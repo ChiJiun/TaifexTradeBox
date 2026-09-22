@@ -539,6 +539,10 @@ def main() -> int:
             pass
 
     module = TTBProcess(args.host, args.zmq_port)
+    # TTB only publishes a symbol to its local ZMQ feed after the helper has
+    # registered it.  A SUB socket alone silently receives no ticks.
+    module.QUOTEDATA(config.symbol)
+    LOG.info("requested TTB quote subscription for %s", config.symbol)
     gateway = (
         ShadowGateway(ledger)
         if args.mode == "shadow"
