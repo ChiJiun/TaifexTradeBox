@@ -36,6 +36,10 @@ py -3.13 sim_hft_bot.py `
 
 TTB 登入並選定競賽後，程式會透過官方 `QUOTEDATA()` 註冊 `--symbol` 的行情，再從本機 ZMQ `51141` 接收 tick。若 shadow 已顯示 `subscribed`、但 quote CSV 仍是空檔，請先在 TTB 確認該商品代碼有效、競賽/重播模式正在送行情，且行情畫面有更新；這不是下單功能失敗。
 
+### TTB 商品代碼格式
+
+網頁交易畫面的顯示代碼與 TTB Python API 的 `Symbol` 可能不同。TTB 隨附手冊使用 `TXF` 加上月份字母與年份尾碼：`A` 至 `L` 分別對應 1 月至 12 月。因此網頁顯示的 `TXF.2610`（2026 年 10 月）在 TTB API 應使用 `TXFJ6`，而不是常見海外期貨格式的 `TXFZ6`。一律以 TTB 的「報價設定」可成功新增的 `Symbol` 為準。
+
 ## 離線回放
 
 `sim_hft_bot.py` 會記錄 quote CSV，可用相同策略重播：
