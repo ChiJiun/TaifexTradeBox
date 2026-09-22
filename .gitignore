@@ -1,0 +1,26 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+!Sample/Python/TTBHelp.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Local runtime output
+tmp/
+log/
+logs/
+*.log
+*.pid
+*.sqlite3
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
