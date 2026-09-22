@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +18,12 @@ from strategy_core import (
     Fill,
     IndependentFillSimulator,
     IndependentFillStrategy,
+    MicropriceMarketMaker,
     OrderIntent,
     PositionLedger,
     Quote,
     StrategyConfig,
+    StrategyDecision,
 )
 
 
@@ -65,7 +68,7 @@ def _value(row: dict[str, Any], *keys: str, default: Any = "") -> Any:
 
 def _float(value: Any) -> float:
     try:
-        return float(str(value).replace(",", "").replace("-", "0"))
+        return float(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return 0.0
 
@@ -84,7 +87,7 @@ class CsvRecorder:
         self._writer = csv.DictWriter(
             self._stream,
             fieldnames=[
-                "wall_time", "exchange_time", "symbol", "bid", "ask", "last", "last_qty",
+                "wall_time", "exchange_time", "received_at", "total_volume", "symbol", "bid", "ask", "last", "last_qty",
                 "bid_qty", "ask_qty", "score", "trade_flow", "position", "average_price",
                 "realized_pnl", "mark_to_market", "decision", "active_orders",
             ],
@@ -96,6 +99,8 @@ class CsvRecorder:
             {
                 "wall_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "exchange_time": quote.exchange_time,
+                "received_at": quote.received_at,
+                "total_volume": quote.total_volume,
                 "symbol": quote.symbol,
                 "bid": quote.bid,
                 "ask": quote.ask,
@@ -165,12 +170,15 @@ class TTBOrderGateway:
         self.seen_deal_qty: dict[str, int] = {}
         self.last_poll = 0.0
         self.bootstrapped = False
+        self.cancel_requested: set[str] = set()
 
     def before_decision(self, quote: Quote) -> list[Fill]:
         if time.monotonic() - self.last_poll < self.poll_seconds:
             return []
         self.last_poll = time.monotonic()
         response = self.module.QUERYRESTOREREPORT()
+        if not isinstance(response, dict) or str(response.get("Code", response.get("code", ""))) not in {"0000", "000"}:
+            raise RuntimeError("Order reconciliation failed")
         rows = _response_rows(response)
         if not self.bootstrapped:
             self.preexisting_order_nos = {
@@ -220,10 +228,22 @@ class TTBOrderGateway:
                 self.active[side] = {"order_no": order_no, "price": ordered_price, "qty": remaining}
             elif self.active.get(side, {}).get("order_no") == order_no:
                 self.active.pop(side, None)
+                self.cancel_requested.discard(order_no)
         return fills
 
     def sync(self, intents: tuple[OrderIntent, ...], quote: Quote) -> None:
+        if not self.bootstrapped:
+            return
+        if any(time.monotonic() - p["created_at"] > 10 for p in self.pending.values()):
+            raise RuntimeError("Unresolved order acknowledgement; reconcile manually")
         desired = {intent.side: intent for intent in intents if intent.quantity > 0}
+        # Do not replace or place an exit until all obsolete entries are confirmed gone.
+        for side, current in list(self.active.items()):
+            wanted = desired.get(side)
+            if wanted is None or wanted.price != current["price"] or wanted.quantity != current["qty"]:
+                self._cancel(side, current)
+        if self.cancel_requested or self.pending:
+            return
         for side in ("buy", "sell"):
             current = self.active.get(side)
             wanted = desired.get(side)
@@ -234,7 +254,7 @@ class TTBOrderGateway:
                 current["price"] != wanted.price or current["qty"] != wanted.quantity
             ):
                 self._cancel(side, current)
-                current = None
+                continue
             if wanted and not current and side not in self.pending:
                 self._place(wanted)
 
@@ -275,12 +295,14 @@ class TTBOrderGateway:
         LOG.info("TTB NEW %s qty=%s price=%s role=%s response=%s", intent.side, intent.quantity, intent.price, intent.role, response)
 
     def _cancel(self, side: str, current: dict[str, Any]) -> None:
+        if current["order_no"] in self.cancel_requested:
+            return
         response = self.module.CANCELORDER({"OrdNo": current["order_no"]})
         code = str(response.get("Code", response.get("code", ""))) if isinstance(response, dict) else ""
         if code not in {"0000", "000"}:
             raise RuntimeError(f"TTB cancel rejected: {response}")
         LOG.info("TTB CANCEL %s %s", side, current["order_no"])
-        self.active.pop(side, None)
+        self.cancel_requested.add(current["order_no"])
 
     def cancel_all(self) -> None:
         for side, current in list(self.active.items()):
@@ -347,13 +369,17 @@ class BotEngine:
     def __init__(self, config: StrategyConfig, gateway: Any, output: Path) -> None:
         self.config = config
         self.ledger = gateway.ledger
-        self.strategy = IndependentFillStrategy(config, self.ledger)
+        self.strategy = MicropriceMarketMaker(config, self.ledger)
         self.gateway = gateway
         self.recorder = CsvRecorder(output)
         self.queue: queue.Queue[Quote] = queue.Queue(maxsize=20_000)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, name="strategy-engine", daemon=True)
         self.last_decision_at = 0.0
+        self.last_quote = None
+        self.raw_stream = (output / f"quotes-{time.strftime('%Y%m%d-%H%M%S')}.csv").open("w", newline="", encoding="utf-8-sig")
+        self.raw_writer = csv.DictWriter(self.raw_stream, fieldnames=list(Quote.__dataclass_fields__))
+        self.raw_writer.writeheader()
 
     def start(self) -> None:
         self.thread.start()
@@ -377,12 +403,34 @@ class BotEngine:
             try:
                 quote = self.queue.get(timeout=0.5)
             except queue.Empty:
+                if self.last_quote and time.monotonic() - self.last_quote.received_at > 2:
+                    if hasattr(self.gateway, "cancel_all"):
+                        self.gateway.cancel_all()
+                    else:
+                        self.gateway.sync((), self.last_quote)
+                    LOG.error("Quote stream stale; stopped. Check outstanding inventory manually.")
+                    self.stop_event.set()
                 continue
             try:
+                if time.monotonic() - quote.received_at > 2:
+                    raise RuntimeError("Quote backlog exceeds 2 seconds")
+                self.last_quote = quote
+                self.raw_writer.writerow(asdict(quote))
+                self.raw_stream.flush()
                 self.gateway.before_decision(quote)
-                if quote.received_at - self.last_decision_at < min_interval:
-                    continue
                 decision = self.strategy.decide(quote)
+                local = datetime.now(timezone(timedelta(hours=8)))
+                clock = local.strftime("%H:%M")
+                if local.weekday() >= 5 or clock >= "13:35" or clock < "08:55":
+                    pos = self.ledger.position
+                    intents = (OrderIntent("sell" if pos > 0 else "buy", quote.bid if pos > 0 else quote.ask,
+                                           abs(pos), "risk_exit", "session close"),) if pos else ()
+                    decision = StrategyDecision(intents, decision.features, True, "outside entry session")
+                elif clock >= "13:20" and not self.ledger.position:
+                    decision = StrategyDecision((), decision.features, True, "entry cutoff")
+                urgent = self.ledger.position != 0 or decision.halted
+                if not urgent and quote.received_at - self.last_decision_at < min_interval:
+                    continue
                 self.gateway.sync(decision.intents, quote)
                 self.last_decision_at = quote.received_at
                 self.recorder.write(quote, decision, self.ledger, self.gateway.snapshot())
@@ -397,7 +445,8 @@ class BotEngine:
                     self.gateway.snapshot(),
                 )
             except Exception:
-                LOG.exception("strategy cycle failed; no additional order is sent in this cycle")
+                LOG.exception("strategy cycle failed; stopping for reconciliation")
+                self.stop_event.set()
 
     def close(self) -> None:
         self.stop_event.set()
@@ -405,6 +454,7 @@ class BotEngine:
         if hasattr(self.gateway, "cancel_all"):
             self.gateway.cancel_all()
         self.recorder.close()
+        self.raw_stream.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -415,18 +465,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zmq-port", type=int, default=51141)
     parser.add_argument("--tick-size", type=float, default=1.0)
     parser.add_argument("--point-value", type=float, default=200.0)
-    parser.add_argument("--fee-per-fill", type=float, default=0.0)
-    parser.add_argument("--tax-rate", type=float, default=0.0)
+    parser.add_argument("--fee-per-fill", type=float, default=100.0)
+    parser.add_argument("--tax-rate", type=float, default=0.00002)
     parser.add_argument("--slippage-ticks", type=float, default=0.0)
-    parser.add_argument("--target-ticks", type=int, default=3)
+    parser.add_argument("--target-ticks", type=int, default=8)
+    parser.add_argument("--half-width-ticks", type=float, default=4.0)
+    parser.add_argument("--warmup-ticks", type=int, default=30)
+    parser.add_argument("--confirm-flat-account", action="store_true", help="TTB: account has no positions or outstanding orders; exclusive use required")
     parser.add_argument("--stop-ticks", type=int, default=8)
     parser.add_argument("--max-hold-seconds", type=float, default=15.0)
     parser.add_argument("--signal-threshold", type=float, default=0.16)
     parser.add_argument("--base-qty", type=int, default=1)
-    parser.add_argument("--max-order-qty", type=int, default=4)
-    parser.add_argument("--max-inventory", type=int, default=8)
-    parser.add_argument("--recovery-fraction", type=float, default=0.25)
-    parser.add_argument("--daily-loss-limit", type=float, default=50_000.0)
+    parser.add_argument("--max-order-qty", type=int, default=1)
+    parser.add_argument("--max-inventory", type=int, default=1)
+    parser.add_argument("--recovery-fraction", type=float, default=0.0, help="legacy only; market maker uses fixed quantity")
+    parser.add_argument("--daily-loss-limit", type=float, default=10_000.0)
     parser.add_argument("--poll-seconds", type=float, default=0.5)
     parser.add_argument("--output", type=Path, default=Path("output") / "runs")
     parser.add_argument(
@@ -445,6 +498,8 @@ def main() -> int:
     )
     if args.mode == "ttb" and not args.confirm_virtual_orders:
         raise SystemExit("--mode ttb requires --confirm-virtual-orders")
+    if args.mode == "ttb" and not args.confirm_flat_account:
+        raise SystemExit("TTB recovery is not automatic: verify flat account and no orders, then pass --confirm-flat-account")
 
     config = StrategyConfig(
         symbol=args.symbol.upper(),
@@ -454,6 +509,8 @@ def main() -> int:
         tax_rate=args.tax_rate,
         slippage_ticks=args.slippage_ticks,
         target_ticks=args.target_ticks,
+        half_width_ticks=args.half_width_ticks,
+        warmup_ticks=args.warmup_ticks,
         stop_ticks=args.stop_ticks,
         max_hold_seconds=args.max_hold_seconds,
         signal_threshold=args.signal_threshold,

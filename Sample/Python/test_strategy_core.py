@@ -98,7 +98,7 @@ class StrategyCoreTests(unittest.TestCase):
         simulator = IndependentFillSimulator()
         simulator.sync((OrderIntent("buy", 19999, 2, "entry", "test"),), now=100)
         self.assertEqual(simulator.on_quote(quote(last=19999, received_at=100)), [])
-        fills = simulator.on_quote(quote(last=19999, last_qty=1, received_at=101))
+        fills = simulator.on_quote(quote(last=19999, last_qty=1, total_volume=1001, received_at=101))
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].quantity, 1)
 

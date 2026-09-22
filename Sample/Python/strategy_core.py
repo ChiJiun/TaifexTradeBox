@@ -74,7 +74,8 @@ class Quote:
         return (self.bid + self.ask) / 2.0
 
     def is_valid(self) -> bool:
-        return self.bid > 0 and self.ask > self.bid and self.last > 0
+        values = (self.bid, self.ask, self.last, self.bid_qty, self.ask_qty, self.total_volume, self.received_at)
+        return all(math.isfinite(x) for x in values) and self.bid > 0 and self.ask > self.bid and self.last > 0 and min(self.bid_qty, self.ask_qty, self.total_volume) >= 0
 
 
 @dataclass
@@ -97,6 +98,11 @@ class StrategyConfig:
     recovery_fraction: float = 0.25
     daily_loss_limit: float = 50_000.0
     min_quote_interval_ms: int = 200
+    half_width_ticks: float = 4.0
+    warmup_ticks: int = 30
+    max_spread_ticks: float = 4.0
+    volatility_limit_ticks: float = 8.0
+    max_drawdown: float = 40_000.0
 
     def validate(self) -> None:
         if not self.symbol:
@@ -111,6 +117,10 @@ class StrategyConfig:
             raise ValueError("invalid order quantity limits")
         if self.max_inventory < self.max_order_qty:
             raise ValueError("max_inventory must be >= max_order_qty")
+        if self.half_width_ticks <= 0 or self.warmup_ticks < 2 or self.max_spread_ticks <= 0 or self.volatility_limit_ticks <= 0:
+            raise ValueError("invalid market-making settings")
+        if self.daily_loss_limit <= 0 or self.max_drawdown <= 0 or self.max_hold_seconds <= 0:
+            raise ValueError("risk limits must be positive")
 
     @property
     def tick_value(self) -> float:
@@ -144,6 +154,7 @@ class FeatureEngine:
         self._trades: Deque[tuple[float, int, int]] = deque()
         self._previous_last = 0.0
         self._last_direction = 0
+        self._volume = None
 
     def update(self, quote: Quote) -> Features:
         depth = quote.bid_qty + quote.ask_qty
@@ -156,8 +167,10 @@ class FeatureEngine:
         micro_bias_ticks = (microprice - quote.mid) / self.config.tick_size
 
         direction = self._classify_trade(quote)
-        if quote.last_qty > 0 and direction:
-            self._trades.append((quote.received_at, direction, quote.last_qty))
+        increment = max(0, quote.total_volume - self._volume) if self._volume is not None else 0
+        self._volume = quote.total_volume
+        if quote.last_qty > 0 and direction and increment > 0:
+            self._trades.append((quote.received_at, direction, min(quote.last_qty, int(increment))))
         cutoff = quote.received_at - self.config.flow_window_seconds
         while self._trades and self._trades[0][0] < cutoff:
             self._trades.popleft()
@@ -374,12 +387,96 @@ class SimulatedOrder:
     created_at: float
 
 
+class MicropriceMarketMaker(IndependentFillStrategy):
+    """Research strategy: fixed-size, inventory-limited, event-driven quoting.
+
+    Scores are heuristic, not calibrated probabilities. Loss limits latch for
+    this process lifetime; starting a new session requires an explicit restart.
+    """
+
+    def __init__(self, config: StrategyConfig, ledger: PositionLedger | None = None) -> None:
+        super().__init__(config, ledger)
+        self.history = deque(maxlen=300)
+        self.previous = None
+        self.halt_reason = ""
+        self.peak_equity = 0.0
+        self.cycle_target = None
+        self.previous_position = 0
+
+    def decide(self, quote: Quote) -> StrategyDecision:
+        if not quote.is_valid() or quote.symbol.upper() != self.config.symbol.upper():
+            return StrategyDecision((), Features(0, 0, 0, 0, 0), True, "invalid quote")
+        cfg = self.config
+        features = self.features.update(quote)
+        ofi = 0.0
+        if self.previous is not None:
+            p = self.previous
+            ofi = ((quote.bid_qty if quote.bid >= p.bid else 0) - (p.bid_qty if quote.bid <= p.bid else 0)
+                   - (quote.ask_qty if quote.ask <= p.ask else 0) + (p.ask_qty if quote.ask >= p.ask else 0))
+            ofi /= max(1, quote.bid_qty + quote.ask_qty + p.bid_qty + p.ask_qty)
+        self.previous = quote
+        self.history.append((quote.received_at, quote.mid))
+        while self.history and self.history[0][0] < quote.received_at - 30:
+            self.history.popleft()
+        prices = [p for _, p in self.history]
+        mean = sum(prices) / len(prices)
+        vol = math.sqrt(sum((p - mean) ** 2 for p in prices) / len(prices)) / cfg.tick_size
+        score = .75 * features.score + .25 * ofi
+        features = Features(features.imbalance, features.microprice, features.micro_bias_ticks, features.trade_flow, score)
+        pos = self.ledger.position
+        liquidation = quote.bid if pos > 0 else quote.ask
+        equity = self.ledger.mark_to_market(liquidation)
+        equity -= abs(pos) * (cfg.fee_per_fill + liquidation * cfg.point_value * cfg.tax_rate)
+        self.peak_equity = max(self.peak_equity, equity)
+        if equity <= -cfg.daily_loss_limit:
+            self.halt_reason = "session loss limit"
+        if self.peak_equity - equity >= cfg.max_drawdown:
+            self.halt_reason = "maximum drawdown"
+        if abs(pos) > cfg.max_inventory:
+            self.halt_reason = "inventory limit"
+        if pos:
+            side = "sell" if pos > 0 else "buy"
+            sign = 1 if pos > 0 else -1
+            adverse = sign * (liquidation - self.ledger.average_price) / cfg.tick_size
+            timed_out = quote.received_at - self.ledger.opened_at >= cfg.max_hold_seconds
+            if self.halt_reason or adverse <= -cfg.stop_ticks or timed_out or sign * score < -cfg.toxic_threshold:
+                return StrategyDecision((OrderIntent(side, liquidation, abs(pos), "risk_exit", self.halt_reason or "stop/time/flow"),), features, bool(self.halt_reason), "reduce inventory")
+            if not self.previous_position or self.previous_position * pos < 0:
+                self.cycle_target = self.ledger.average_price + sign * cfg.target_ticks * cfg.tick_size
+            self.previous_position = pos
+            target = self.cycle_target
+            rounded = (math.ceil(target / cfg.tick_size) if pos > 0 else math.floor(target / cfg.tick_size)) * cfg.tick_size
+            return StrategyDecision((OrderIntent(side, rounded, abs(pos), "exit", "fixed cycle target"),), features, False, "manage inventory")
+        self.previous_position = 0
+        self.cycle_target = None
+        if self.halt_reason:
+            return StrategyDecision((), features, True, self.halt_reason)
+        if len(prices) < cfg.warmup_ticks:
+            return StrategyDecision((), features, False, "warmup")
+        if (quote.ask - quote.bid) / cfg.tick_size > cfg.max_spread_ticks or vol > cfg.volatility_limit_ticks:
+            return StrategyDecision((), features, False, "spread/volatility filter")
+        if cfg.estimated_cycle_net(quote.mid) <= 0:
+            return StrategyDecision((), features, False, "cost filter")
+        width = max(cfg.half_width_ticks, cfg.minimum_profitable_ticks(quote.mid) / 2 + 1, vol)
+        center = features.microprice + score * cfg.tick_size
+        buy = min(quote.bid, math.floor(center / cfg.tick_size - width) * cfg.tick_size)
+        sell = max(quote.ask, math.ceil(center / cfg.tick_size + width) * cfg.tick_size)
+        qty = min(cfg.base_qty, cfg.max_order_qty, cfg.max_inventory)
+        intents = []
+        if score >= -cfg.signal_threshold:
+            intents.append(OrderIntent("buy", buy, qty, "entry", "microprice band"))
+        if score <= cfg.signal_threshold:
+            intents.append(OrderIntent("sell", sell, qty, "entry", "microprice band"))
+        return StrategyDecision(tuple(intents), features, False, "quote band")
+
+
 class IndependentFillSimulator:
     """Fill resting orders when a later real tick reaches their price and volume."""
 
     def __init__(self) -> None:
         self.orders: dict[Side, SimulatedOrder] = {}
         self._sequence = 0
+        self._volume = None
 
     def sync(self, intents: Iterable[OrderIntent], now: float) -> None:
         desired = {intent.side: intent for intent in intents if intent.quantity > 0}
@@ -397,7 +494,11 @@ class IndependentFillSimulator:
 
     def on_quote(self, quote: Quote) -> list[Fill]:
         fills: list[Fill] = []
-        available = max(0, quote.last_qty)
+        if not quote.is_valid():
+            return fills
+        increment = max(0, quote.total_volume - self._volume) if self._volume is not None else 0
+        self._volume = quote.total_volume
+        available = min(max(0, quote.last_qty), int(increment))
         if available <= 0:
             return fills
         for side in ("buy", "sell"):
@@ -410,7 +511,7 @@ class IndependentFillSimulator:
             quantity = min(order.remaining, available)
             if quantity <= 0:
                 continue
-            fills.append(Fill(side, quote.last, quantity, order.order_id, quote.received_at))
+            fills.append(Fill(side, order.intent.price, quantity, order.order_id, quote.received_at))
             order.remaining -= quantity
             available -= quantity
             if order.remaining <= 0:

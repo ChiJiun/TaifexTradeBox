@@ -8,6 +8,7 @@ venv/
 
 # Local runtime output
 tmp/
+Sample/Python/output/
 log/
 logs/
 *.log
