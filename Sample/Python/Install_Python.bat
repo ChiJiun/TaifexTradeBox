@@ -1,5 +1,5 @@
 @echo off
-pip3 install zmq
+pip3 install pyzmq
 pip3 install requests
 
 pause
