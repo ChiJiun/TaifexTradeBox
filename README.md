@@ -101,6 +101,34 @@ TTB 需要 Windows GUI 與本機 API，因此建議使用單台 Windows Azure VM
 
 完整命令與安全設定請閱讀 [azure/README.md](azure/README.md)。
 
+### 目前 Azure 實例
+
+目前已建立一台用於 TTB 研究的 Windows VM：
+
+```text
+資源群組：a112502533_rg_3957
+VM：ttb-sim-01
+區域：East Asia
+規格：Standard_B2as_v2
+系統：Windows Server 2022
+固定公網 IP：20.189.93.22
+RDP 來源限制：49.216.172.184/32
+```
+
+RDP 連線：
+
+```powershell
+mstsc /v:20.189.93.22
+```
+
+VM 已建立但尚未完成 TTB、Python 與策略程式安裝。登入 VM 後，依照 [azure/README.md](azure/README.md) 完成環境安裝，再先執行 shadow。管理員密碼不會儲存在 repo 或 README；登入後請立即變更密碼。
+
+非使用期間可釋放 VM 以停止計算費用：
+
+```powershell
+az vm deallocate --resource-group a112502533_rg_3957 --name ttb-sim-01
+```
+
 ## 研究與驗收原則
 
 目前實作是研究版本，尚未完成官方撮合器的端到端校準。下一步應取得多個交易日資料，按日期做樣本內/樣本外切分，至少檢查：
@@ -119,4 +147,3 @@ TTB 需要 Windows GUI 與本機 API，因此建議使用單台 Windows Azure VM
 - [策略詳細說明](Sample/Python/MARKET_MAKER.md)
 - [原有策略說明](Sample/Python/STRATEGY.md)
 - [Azure 部署說明](azure/README.md)
-

@@ -53,6 +53,25 @@ az vm show -d --resource-group $rg --name $vm `
 
 ## 3. 連線與安裝軟體
 
+### 已建立的 VM
+
+本專案目前使用以下 Azure VM：
+
+```text
+資源群組：a112502533_rg_3957
+名稱：ttb-sim-01
+區域：East Asia
+規格：Standard_B2as_v2
+OS：Windows Server 2022 Gen2
+固定公網 IP：20.189.93.22
+```
+
+目前 RDP NSG 規則只允許 `49.216.172.184/32`。若你的公網 IP 改變，必須先更新 NSG，否則會無法連線。管理員密碼不記錄在 repo，登入後應立即更換。
+
+```powershell
+mstsc /v:20.189.93.22
+```
+
 用上一個命令輸出的 IP 開啟 Windows Remote Desktop（`mstsc /v:<PUBLIC_IP>`），登入後在 VM 內安裝：
 
 ```powershell
