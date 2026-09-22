@@ -1,0 +1,51 @@
+# TTB Python 策略程式
+
+這個目錄包含 TTB 虛擬交易的研究策略、離線回放器與測試。策略目標是研究「見價見量」成交規則下的 microprice / order-flow market making；目前不宣稱已取得 alpha，也不保證獲利。
+
+## 快速開始
+
+需要 Windows、Python 3.13，以及已啟動並登入的 TTB。先安裝相依套件：
+
+```powershell
+py -3.13 -m pip install pyzmq requests
+```
+
+執行測試：
+
+```powershell
+py -3.13 -m unittest discover -v
+```
+
+## 執行模式
+
+先以當期有效商品代碼替換 `<ACTIVE_SYMBOL>`，建議先執行至少數個交易日的 shadow：
+
+```powershell
+py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow
+```
+
+只有在確認 TTB 帳戶空倉、沒有未成交單，並人工檢查過 shadow 紀錄後，才可使用虛擬下單模式：
+
+```powershell
+py -3.13 sim_hft_bot.py `
+  --symbol <ACTIVE_SYMBOL> --mode ttb `
+  --confirm-virtual-orders --confirm-flat-account
+```
+
+異常退出、網路中斷或重啟後，必須先在 TTB 檢查實際掛單與部位，再重啟程式。不可把此程式視為保證斷線平倉的無人值守系統。
+
+## 離線回放
+
+`sim_hft_bot.py` 會記錄 quote CSV，可用相同策略重播：
+
+```powershell
+py -3.13 replay_market_maker.py output/runs/quotes-TIMESTAMP.csv --symbol <ACTIVE_SYMBOL>
+```
+
+## 文件索引
+
+- [MARKET_MAKER.md](MARKET_MAKER.md)：策略規則、撮合假設、風險限制與驗收計畫
+- [STRATEGY.md](STRATEGY.md)：原有策略說明
+- [Azure 部署指南](../../azure/README.md)：Windows VM、TTB 啟動與 24/7 監控
+
+所有績效結論都必須使用扣除費用與稅、按日樣本外切分的實際回放或虛擬成交資料驗證；synthetic 測試只驗證程式邏輯。
