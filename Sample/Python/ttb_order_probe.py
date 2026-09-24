@@ -77,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         if result.unexpected_fill_quantity:
             return 3
-        return 0 if result.cancel_accepted else 2
+        if not result.cancel_confirmed:
+            return 2
+        return 0 if result.fill_query_succeeded else 4
     finally:
         monitor.close()
 

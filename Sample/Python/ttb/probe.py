@@ -32,6 +32,7 @@ class OrderProbeResult:
     order_accepted: bool = False
     cancel_accepted: bool = False
     cancel_confirmed: bool = False
+    fill_query_succeeded: bool = False
     unexpected_fill_quantity: int = 0
     message: str = ""
 
@@ -147,18 +148,40 @@ class OrderProbe:
             while time.monotonic() < deadline:
                 report = self.api.query_orders()
                 rows = [row for row in _response_rows(report) if order_number(row) == order_no]
+                reported_fill_quantity = max(
+                    (
+                        int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0)))
+                        for row in rows
+                    ),
+                    default=0,
+                )
+                result.unexpected_fill_quantity = max(
+                    result.unexpected_fill_quantity,
+                    reported_fill_quantity,
+                )
                 if rows and all(is_terminal_order(row) for row in rows):
                     result.cancel_confirmed = True
                     break
                 time.sleep(self.poll_seconds)
             fills = self.api.query_fills()
-            for row in _response_rows(fills):
-                if order_number(row) == order_no:
-                    result.unexpected_fill_quantity += int(
-                        _float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", "VOLM", default=0))
-                    )
+            result.fill_query_succeeded = is_success_response(fills)
+            if result.fill_query_succeeded:
+                fill_report_quantity = sum(
+                    int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", "VOLM", default=0)))
+                    for row in _response_rows(fills)
+                    if order_number(row) == order_no
+                )
+                result.unexpected_fill_quantity = max(
+                    result.unexpected_fill_quantity,
+                    fill_report_quantity,
+                )
             if result.unexpected_fill_quantity:
                 result.message = "UNEXPECTED FILL: manually reconcile and flatten the virtual account"
+            elif not result.fill_query_succeeded:
+                result.message = (
+                    "order report shows zero fills, but fill-report verification failed; "
+                    "reconcile the virtual account manually"
+                )
             elif result.cancel_confirmed:
                 result.message = "order accepted and cancellation confirmed"
             else:

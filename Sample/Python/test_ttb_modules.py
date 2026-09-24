@@ -154,8 +154,54 @@ class OrderProbeTests(unittest.TestCase):
         self.assertTrue(result.order_accepted)
         self.assertTrue(result.cancel_accepted)
         self.assertTrue(result.cancel_confirmed)
+        self.assertTrue(result.fill_query_succeeded)
         self.assertEqual(result.unexpected_fill_quantity, 0)
         self.assertIn(("cancel", {"OrdNo": "A001"}), module.calls)
+
+    def test_probe_records_failed_fill_reconciliation(self):
+        class ProbeModule(FakeModule):
+            def __init__(self):
+                super().__init__()
+                self.cancelled = False
+
+            def CANCELORDER(self, payload):
+                self.cancelled = True
+                return self._ok("cancel", payload)
+
+            def QUERYRESTOREREPORT(self):
+                if not any(name == "new" for name, _ in self.calls):
+                    return {"Code": "0000", "Data": []}
+                return {
+                    "Code": "0000",
+                    "Data": [
+                        {
+                            "ORDNO": "A001",
+                            "COMD_ID": "TXFA7",
+                            "BS": "1",
+                            "ORDR_PRCE": "18000",
+                            "VOLM": "1",
+                            "LESS_VOLM": "0" if self.cancelled else "1",
+                            "DEAL_TOTL": "0",
+                            "STAT": "取消" if self.cancelled else "委託成功",
+                        }
+                    ],
+                }
+
+            def QUERYRESTOREFILLREPORT(self):
+                return {"Code": "9999", "ErrMsg": "401 Unauthorized"}
+
+        result = OrderProbe(
+            TTBApi(ProbeModule()),
+            "TXFA7",
+            distance_ticks=2000,
+            ack_timeout=0.1,
+            cancel_timeout=0.1,
+            poll_seconds=0.01,
+        ).run(quote())
+        self.assertTrue(result.cancel_confirmed)
+        self.assertFalse(result.fill_query_succeeded)
+        self.assertEqual(result.unexpected_fill_quantity, 0)
+        self.assertIn("verification failed", result.message)
 
 
 class MonitorTests(unittest.TestCase):
