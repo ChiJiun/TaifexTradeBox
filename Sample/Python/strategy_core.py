@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from typing import Any, Deque, Iterable, Literal
 
 
 Side = Literal["buy", "sell"]
+FillModel = Literal["independent", "probabilistic", "queue"]
+SizingMode = Literal["fixed", "martingale", "anti_martingale"]
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -103,6 +106,13 @@ class StrategyConfig:
     max_spread_ticks: float = 4.0
     volatility_limit_ticks: float = 8.0
     max_drawdown: float = 40_000.0
+    quote_ttl_seconds: float = 5.0
+    reprice_threshold_ticks: float = 4.0
+    virtual_max_mode: bool = False
+    sizing_mode: SizingMode = "fixed"
+    sizing_multiplier: float = 2.0
+    max_sizing_step: int = 4
+    entry_offset_ticks: float = 0.0
 
     def validate(self) -> None:
         if not self.symbol:
@@ -121,6 +131,12 @@ class StrategyConfig:
             raise ValueError("invalid market-making settings")
         if self.daily_loss_limit <= 0 or self.max_drawdown <= 0 or self.max_hold_seconds <= 0:
             raise ValueError("risk limits must be positive")
+        if self.quote_ttl_seconds <= 0 or self.reprice_threshold_ticks <= 0:
+            raise ValueError("quote lifetime and reprice threshold must be positive")
+        if self.sizing_mode not in {"fixed", "martingale", "anti_martingale"}:
+            raise ValueError("unknown sizing mode")
+        if self.sizing_multiplier < 1 or self.max_sizing_step < 0 or self.entry_offset_ticks < 0:
+            raise ValueError("invalid virtual-max sizing or entry offset")
 
     @property
     def tick_value(self) -> float:
@@ -385,6 +401,7 @@ class SimulatedOrder:
     intent: OrderIntent
     remaining: int
     created_at: float
+    queue_ahead: float = 0.0
 
 
 class MicropriceMarketMaker(IndependentFillStrategy):
@@ -402,11 +419,49 @@ class MicropriceMarketMaker(IndependentFillStrategy):
         self.peak_equity = 0.0
         self.cycle_target = None
         self.previous_position = 0
+        self.entry_intents: tuple[OrderIntent, ...] = ()
+        self.entry_quote_created_at = 0.0
+        self.entry_quote_center = 0.0
+        self.observed_position = self.ledger.position
+        self.flat_realized_baseline = self.ledger.realized_pnl
+        self.win_streak = 0
+        self.loss_streak = 0
+        self.last_cycle_net = 0.0
+
+    def _clear_entry_quote(self) -> None:
+        self.entry_intents = ()
+        self.entry_quote_created_at = 0.0
+        self.entry_quote_center = 0.0
+
+    def _observe_cycle(self) -> None:
+        position = self.ledger.position
+        if self.observed_position != 0 and position == 0:
+            self.last_cycle_net = self.ledger.realized_pnl - self.flat_realized_baseline
+            if self.last_cycle_net > 0:
+                self.win_streak += 1
+                self.loss_streak = 0
+            elif self.last_cycle_net < 0:
+                self.loss_streak += 1
+                self.win_streak = 0
+            self.flat_realized_baseline = self.ledger.realized_pnl
+        self.observed_position = position
+
+    def _entry_quantity(self) -> int:
+        cfg = self.config
+        step = 0
+        if cfg.sizing_mode == "martingale":
+            step = self.loss_streak
+        elif cfg.sizing_mode == "anti_martingale":
+            step = self.win_streak
+        step = min(step, cfg.max_sizing_step)
+        desired = math.ceil(cfg.base_qty * cfg.sizing_multiplier ** step)
+        return min(desired, cfg.max_order_qty, cfg.max_inventory)
 
     def decide(self, quote: Quote) -> StrategyDecision:
         if not quote.is_valid() or quote.symbol.upper() != self.config.symbol.upper():
             return StrategyDecision((), Features(0, 0, 0, 0, 0), True, "invalid quote")
         cfg = self.config
+        self._observe_cycle()
         features = self.features.update(quote)
         ofi = 0.0
         if self.previous is not None:
@@ -435,6 +490,7 @@ class MicropriceMarketMaker(IndependentFillStrategy):
         if abs(pos) > cfg.max_inventory:
             self.halt_reason = "inventory limit"
         if pos:
+            self._clear_entry_quote()
             side = "sell" if pos > 0 else "buy"
             sign = 1 if pos > 0 else -1
             adverse = sign * (liquidation - self.ledger.average_price) / cfg.tick_size
@@ -450,35 +506,71 @@ class MicropriceMarketMaker(IndependentFillStrategy):
         self.previous_position = 0
         self.cycle_target = None
         if self.halt_reason:
+            self._clear_entry_quote()
             return StrategyDecision((), features, True, self.halt_reason)
         if len(prices) < cfg.warmup_ticks:
+            self._clear_entry_quote()
             return StrategyDecision((), features, False, "warmup")
         if (quote.ask - quote.bid) / cfg.tick_size > cfg.max_spread_ticks or vol > cfg.volatility_limit_ticks:
+            self._clear_entry_quote()
             return StrategyDecision((), features, False, "spread/volatility filter")
         if cfg.estimated_cycle_net(quote.mid) <= 0:
+            self._clear_entry_quote()
             return StrategyDecision((), features, False, "cost filter")
-        width = max(cfg.half_width_ticks, cfg.minimum_profitable_ticks(quote.mid) / 2 + 1, vol)
         center = features.microprice + score * cfg.tick_size
-        buy = min(quote.bid, math.floor(center / cfg.tick_size - width) * cfg.tick_size)
-        sell = max(quote.ask, math.ceil(center / cfg.tick_size + width) * cfg.tick_size)
-        qty = min(cfg.base_qty, cfg.max_order_qty, cfg.max_inventory)
+        if cfg.virtual_max_mode:
+            buy = math.floor(
+                (quote.bid - cfg.entry_offset_ticks * cfg.tick_size) / cfg.tick_size
+            ) * cfg.tick_size
+            sell = math.ceil(
+                (quote.ask + cfg.entry_offset_ticks * cfg.tick_size) / cfg.tick_size
+            ) * cfg.tick_size
+        else:
+            width = max(cfg.half_width_ticks, cfg.minimum_profitable_ticks(quote.mid) / 2 + 1, vol)
+            buy = min(quote.bid, math.floor(center / cfg.tick_size - width) * cfg.tick_size)
+            sell = max(quote.ask, math.ceil(center / cfg.tick_size + width) * cfg.tick_size)
+        qty = self._entry_quantity()
         intents = []
         if score >= -cfg.signal_threshold:
             intents.append(OrderIntent("buy", buy, qty, "entry", "microprice band"))
         if score <= cfg.signal_threshold:
             intents.append(OrderIntent("sell", sell, qty, "entry", "microprice band"))
-        return StrategyDecision(tuple(intents), features, False, "quote band")
+        candidate = tuple(intents)
+        quote_expired = (
+            not self.entry_intents
+            or quote.received_at - self.entry_quote_created_at >= cfg.quote_ttl_seconds
+            or abs(center - self.entry_quote_center) / cfg.tick_size >= cfg.reprice_threshold_ticks
+        )
+        if quote_expired:
+            self.entry_intents = candidate
+            self.entry_quote_created_at = quote.received_at
+            self.entry_quote_center = center
+        else:
+            previous = {intent.side: intent for intent in self.entry_intents}
+            # Directional filters may cancel one side immediately.  Prices on
+            # still-valid sides remain sticky so the market can reach them.
+            self.entry_intents = tuple(previous.get(intent.side, intent) for intent in candidate)
+        mode = "virtual-max" if cfg.virtual_max_mode else "dynamic"
+        return StrategyDecision(
+            self.entry_intents,
+            features,
+            False,
+            f"sticky {mode} quote qty={qty} sizing={cfg.sizing_mode}",
+        )
 
 
 class IndependentFillSimulator:
     """Fill resting orders when a later real tick reaches their price and volume."""
 
-    def __init__(self) -> None:
+    model_name = "independent"
+
+    def __init__(self, latency_ms: float = 0.0) -> None:
         self.orders: dict[Side, SimulatedOrder] = {}
         self._sequence = 0
         self._volume = None
+        self.latency_seconds = max(0.0, latency_ms) / 1000.0
 
-    def sync(self, intents: Iterable[OrderIntent], now: float) -> None:
+    def sync(self, intents: Iterable[OrderIntent], now: float, quote: Quote | None = None) -> None:
         desired = {intent.side: intent for intent in intents if intent.quantity > 0}
         for side in list(self.orders):
             current = self.orders[side]
@@ -489,7 +581,8 @@ class IndependentFillSimulator:
             if side not in self.orders:
                 self._sequence += 1
                 self.orders[side] = SimulatedOrder(
-                    f"SIM{self._sequence:08d}", intent, intent.quantity, now
+                    f"SIM{self._sequence:08d}", intent, intent.quantity,
+                    now + self.latency_seconds,
                 )
 
     def on_quote(self, quote: Quote) -> list[Fill]:
@@ -519,3 +612,142 @@ class IndependentFillSimulator:
             if available <= 0:
                 break
         return fills
+
+
+class ProbabilisticFillSimulator(IndependentFillSimulator):
+    """Stress model: through-price ticks fill, at-price ticks fill randomly.
+
+    The probability is deliberately explicit instead of being presented as an
+    exchange fact.  Calibrate it from TTB order reports before using results for
+    anything beyond sensitivity analysis.
+    """
+
+    model_name = "probabilistic"
+
+    def __init__(
+        self,
+        touch_fill_probability: float = 0.35,
+        latency_ms: float = 0.0,
+        seed: int | None = None,
+    ) -> None:
+        super().__init__(latency_ms=latency_ms)
+        if not 0.0 <= touch_fill_probability <= 1.0:
+            raise ValueError("touch_fill_probability must be between 0 and 1")
+        self.touch_fill_probability = touch_fill_probability
+        self.random = random.Random(seed)
+
+    def on_quote(self, quote: Quote) -> list[Fill]:
+        fills: list[Fill] = []
+        if not quote.is_valid():
+            return fills
+        increment = max(0, quote.total_volume - self._volume) if self._volume is not None else 0
+        self._volume = quote.total_volume
+        available = min(max(0, quote.last_qty), int(increment))
+        if available <= 0:
+            return fills
+        for side in ("buy", "sell"):
+            order = self.orders.get(side)
+            if order is None or quote.received_at <= order.created_at:
+                continue
+            through = quote.last < order.intent.price if side == "buy" else quote.last > order.intent.price
+            at_price = math.isclose(quote.last, order.intent.price, abs_tol=1e-9)
+            if not through and not (at_price and self.random.random() < self.touch_fill_probability):
+                continue
+            quantity = min(order.remaining, available)
+            if quantity <= 0:
+                continue
+            fills.append(Fill(side, order.intent.price, quantity, order.order_id, quote.received_at))
+            order.remaining -= quantity
+            available -= quantity
+            if order.remaining <= 0:
+                del self.orders[side]
+            if available <= 0:
+                break
+        return fills
+
+
+class QueueAwareFillSimulator(IndependentFillSimulator):
+    """Conservative Level-1 queue approximation for robustness checks.
+
+    A fraction of displayed best quantity is assumed to be ahead of a new
+    order.  Same-price trade volume consumes that queue before it can fill the
+    strategy.  A strict trade-through clears the estimated queue.  This is not
+    a reconstruction of the real order book because TTB quote CSV contains
+    only aggregate Level-1 data.
+    """
+
+    model_name = "queue"
+
+    def __init__(self, queue_fraction: float = 1.0, latency_ms: float = 0.0) -> None:
+        super().__init__(latency_ms=latency_ms)
+        if queue_fraction < 0:
+            raise ValueError("queue_fraction must be non-negative")
+        self.queue_fraction = queue_fraction
+
+    def sync(self, intents: Iterable[OrderIntent], now: float, quote: Quote | None = None) -> None:
+        before = {side: order.order_id for side, order in self.orders.items()}
+        super().sync(intents, now, quote)
+        for side, order in self.orders.items():
+            if before.get(side) == order.order_id or quote is None:
+                continue
+            visible = quote.bid_qty if side == "buy" else quote.ask_qty
+            order.queue_ahead = max(0.0, visible * self.queue_fraction)
+
+    def on_quote(self, quote: Quote) -> list[Fill]:
+        fills: list[Fill] = []
+        if not quote.is_valid():
+            return fills
+        increment = max(0, quote.total_volume - self._volume) if self._volume is not None else 0
+        self._volume = quote.total_volume
+        available: float = min(max(0, quote.last_qty), int(increment))
+        if available <= 0:
+            return fills
+        for side in ("buy", "sell"):
+            order = self.orders.get(side)
+            if order is None or quote.received_at <= order.created_at:
+                continue
+            through = quote.last < order.intent.price if side == "buy" else quote.last > order.intent.price
+            at_price = math.isclose(quote.last, order.intent.price, abs_tol=1e-9)
+            if not through and not at_price:
+                continue
+            if through:
+                order.queue_ahead = 0.0
+            elif order.queue_ahead > 0:
+                consumed = min(order.queue_ahead, available)
+                order.queue_ahead -= consumed
+                available -= consumed
+                if available <= 0:
+                    break
+            quantity = min(order.remaining, math.floor(available))
+            if quantity <= 0:
+                continue
+            fills.append(Fill(side, order.intent.price, quantity, order.order_id, quote.received_at))
+            order.remaining -= quantity
+            available -= quantity
+            if order.remaining <= 0:
+                del self.orders[side]
+            if available <= 0:
+                break
+        return fills
+
+
+def make_fill_simulator(
+    model: FillModel = "independent",
+    *,
+    touch_fill_probability: float = 0.35,
+    queue_fraction: float = 1.0,
+    latency_ms: float = 0.0,
+    seed: int | None = None,
+) -> IndependentFillSimulator:
+    """Build a named fill model used by replay and Monte Carlo research."""
+    if model == "independent":
+        return IndependentFillSimulator(latency_ms=latency_ms)
+    if model == "probabilistic":
+        return ProbabilisticFillSimulator(
+            touch_fill_probability=touch_fill_probability,
+            latency_ms=latency_ms,
+            seed=seed,
+        )
+    if model == "queue":
+        return QueueAwareFillSimulator(queue_fraction=queue_fraction, latency_ms=latency_ms)
+    raise ValueError(f"unknown fill model: {model}")

@@ -1,466 +1,38 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 import logging
-import queue
 import signal
 import sys
-import threading
-import time
-from dataclasses import asdict
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-from strategy_core import (
-    Fill,
-    IndependentFillSimulator,
-    IndependentFillStrategy,
-    MicropriceMarketMaker,
-    OrderIntent,
-    PositionLedger,
-    Quote,
-    StrategyConfig,
-    StrategyDecision,
+from strategies import MovingAverageStrategy
+from strategy_core import PositionLedger, StrategyConfig
+from ttb.api import TTBApi
+from ttb.engine import BotEngine, CsvRecorder
+from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
+from ttb.orders import (
+    ShadowGateway,
+    TTBOrderGateway,
+    _float,
+    _recursive_json,
+    _response_rows,
+    _side,
+    _value,
 )
 
 
+# These imports intentionally re-export the old class/helper names. Code that
+# imported TTBOrderGateway or _float from this script therefore keeps working.
 LOG = logging.getLogger("ttb_sim_hft")
 
 
-def _recursive_json(value: Any) -> Any:
-    current = value
-    for _ in range(3):
-        if not isinstance(current, str):
-            break
-        text = current.strip()
-        if not text or text[0] not in "[{\"":
-            break
-        try:
-            current = json.loads(text)
-        except json.JSONDecodeError:
-            break
-    return current
-
-
-def _response_rows(response: Any) -> list[dict[str, Any]]:
-    parsed = _recursive_json(response)
-    if isinstance(parsed, dict):
-        parsed = _recursive_json(parsed.get("Data", parsed.get("data", [])))
-    if isinstance(parsed, dict):
-        return [parsed]
-    if isinstance(parsed, list):
-        return [row for row in parsed if isinstance(row, dict)]
-    return []
-
-
-def _value(row: dict[str, Any], *keys: str, default: Any = "") -> Any:
-    lowered = {str(key).lower(): value for key, value in row.items()}
-    for key in keys:
-        if key in row:
-            return row[key]
-        if key.lower() in lowered:
-            return lowered[key.lower()]
-    return default
-
-
-def _float(value: Any) -> float:
-    try:
-        return float(str(value).replace(",", ""))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _side(value: Any) -> str:
-    text = str(value).strip().lower()
-    return "buy" if text in {"1", "b", "buy", "買", "買別", "買進"} else "sell"
-
-
-class CsvRecorder:
-    def __init__(self, directory: Path) -> None:
-        directory.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.path = directory / f"ttb-shadow-{stamp}.csv"
-        self._stream = self.path.open("w", newline="", encoding="utf-8-sig")
-        self._writer = csv.DictWriter(
-            self._stream,
-            fieldnames=[
-                "wall_time", "exchange_time", "received_at", "total_volume", "symbol", "bid", "ask", "last", "last_qty",
-                "bid_qty", "ask_qty", "score", "trade_flow", "position", "average_price",
-                "realized_pnl", "mark_to_market", "decision", "active_orders",
-            ],
-        )
-        self._writer.writeheader()
-
-    def write(self, quote: Quote, decision: Any, ledger: PositionLedger, orders: Any) -> None:
-        self._writer.writerow(
-            {
-                "wall_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "exchange_time": quote.exchange_time,
-                "received_at": quote.received_at,
-                "total_volume": quote.total_volume,
-                "symbol": quote.symbol,
-                "bid": quote.bid,
-                "ask": quote.ask,
-                "last": quote.last,
-                "last_qty": quote.last_qty,
-                "bid_qty": quote.bid_qty,
-                "ask_qty": quote.ask_qty,
-                "score": round(decision.features.score, 6),
-                "trade_flow": round(decision.features.trade_flow, 6),
-                "position": ledger.position,
-                "average_price": ledger.average_price,
-                "realized_pnl": round(ledger.realized_pnl, 2),
-                "mark_to_market": round(ledger.mark_to_market(quote.last), 2),
-                "decision": decision.reason,
-                "active_orders": json.dumps(orders, ensure_ascii=False),
-            }
-        )
-        self._stream.flush()
-
-    def close(self) -> None:
-        self._stream.close()
-
-
-class ShadowGateway:
-    def __init__(self, ledger: PositionLedger) -> None:
-        self.ledger = ledger
-        self.simulator = IndependentFillSimulator()
-
-    def before_decision(self, quote: Quote) -> list[Fill]:
-        fills = self.simulator.on_quote(quote)
-        for fill in fills:
-            delta = self.ledger.on_fill(fill)
-            LOG.info(
-                "SIM FILL %s %s @ %.2f id=%s pnl_delta=%.2f position=%s realized=%.2f",
-                fill.side,
-                fill.quantity,
-                fill.price,
-                fill.order_id,
-                delta,
-                self.ledger.position,
-                self.ledger.realized_pnl,
-            )
-        return fills
-
-    def sync(self, intents: tuple[OrderIntent, ...], quote: Quote) -> None:
-        self.simulator.sync(intents, quote.received_at)
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            side: {"price": order.intent.price, "qty": order.remaining, "role": order.intent.role}
-            for side, order in self.simulator.orders.items()
-        }
-
-
-class TTBOrderGateway:
-    """Fail-closed TTB order gateway with one working order per side."""
-
-    def __init__(self, module: Any, config: StrategyConfig, ledger: PositionLedger, poll_seconds: float) -> None:
-        self.module = module
-        self.config = config
-        self.ledger = ledger
-        self.poll_seconds = max(0.25, poll_seconds)
-        self.active: dict[str, dict[str, Any]] = {}
-        self.pending: dict[str, dict[str, Any]] = {}
-        self.owned_order_nos: set[str] = set()
-        self.preexisting_order_nos: set[str] = set()
-        self.seen_deal_qty: dict[str, int] = {}
-        self.last_poll = 0.0
-        self.bootstrapped = False
-        self.cancel_requested: set[str] = set()
-
-    def before_decision(self, quote: Quote) -> list[Fill]:
-        if time.monotonic() - self.last_poll < self.poll_seconds:
-            return []
-        self.last_poll = time.monotonic()
-        response = self.module.QUERYRESTOREREPORT()
-        if not isinstance(response, dict) or str(response.get("Code", response.get("code", ""))) not in {"0000", "000"}:
-            raise RuntimeError("Order reconciliation failed")
-        rows = _response_rows(response)
-        if not self.bootstrapped:
-            self.preexisting_order_nos = {
-                str(_value(row, "ORDNO", "OrdNo", "OrderNo", default=""))
-                for row in rows
-                if str(_value(row, "ORDNO", "OrdNo", "OrderNo", default=""))
-            }
-            self.bootstrapped = True
-            LOG.info("TTB order baseline loaded: %s existing order ids ignored", len(self.preexisting_order_nos))
-            return []
-        fills: list[Fill] = []
-        for row in rows:
-            symbol = str(_value(row, "COMD_ID", "ComdID1", "Symbol", default="")).split(".")[0].upper()
-            if symbol and symbol != self.config.symbol.upper():
-                continue
-            order_no = str(_value(row, "ORDNO", "OrdNo", "OrderNo", default=""))
-            if not order_no:
-                continue
-            side = _side(_value(row, "BS", "Side", "ComdBS1"))
-            price = _float(_value(row, "DEAL_PRCE", "DealPrice", default=0))
-            ordered_price = _float(_value(row, "ORDR_PRCE", "Price", default=0))
-            ordered_qty = int(_float(_value(row, "VOLM", "OrderQty", default=0)))
-            if order_no not in self.owned_order_nos:
-                pending = self.pending.get(side)
-                intent = pending.get("intent") if pending else None
-                matches_pending = (
-                    intent is not None
-                    and ordered_price == intent.price
-                    and (ordered_qty == 0 or ordered_qty == intent.quantity)
-                    and order_no not in self.preexisting_order_nos
-                )
-                if not matches_pending:
-                    continue
-                self.owned_order_nos.add(order_no)
-                self.pending.pop(side, None)
-                LOG.info("TTB BIND %s to order %s", side, order_no)
-            deal_total = int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0)))
-            previous = self.seen_deal_qty.get(order_no, 0)
-            if deal_total > previous and price > 0:
-                fill = Fill(side, price, deal_total - previous, order_no, quote.received_at)
-                self.ledger.on_fill(fill)
-                fills.append(fill)
-            self.seen_deal_qty[order_no] = max(previous, deal_total)
-            remaining = int(_float(_value(row, "LESS_VOLM", "RemainQty", default=0)))
-            status = str(_value(row, "STAT", "Status", default=""))
-            if remaining > 0 and not any(token in status for token in ("刪", "取消", "完全成交")):
-                self.active[side] = {"order_no": order_no, "price": ordered_price, "qty": remaining}
-            elif self.active.get(side, {}).get("order_no") == order_no:
-                self.active.pop(side, None)
-                self.cancel_requested.discard(order_no)
-        return fills
-
-    def sync(self, intents: tuple[OrderIntent, ...], quote: Quote) -> None:
-        if not self.bootstrapped:
-            return
-        if any(time.monotonic() - p["created_at"] > 10 for p in self.pending.values()):
-            raise RuntimeError("Unresolved order acknowledgement; reconcile manually")
-        desired = {intent.side: intent for intent in intents if intent.quantity > 0}
-        # Do not replace or place an exit until all obsolete entries are confirmed gone.
-        for side, current in list(self.active.items()):
-            wanted = desired.get(side)
-            if wanted is None or wanted.price != current["price"] or wanted.quantity != current["qty"]:
-                self._cancel(side, current)
-        if self.cancel_requested or self.pending:
-            return
-        for side in ("buy", "sell"):
-            current = self.active.get(side)
-            wanted = desired.get(side)
-            if current and wanted is None:
-                self._cancel(side, current)
-                continue
-            if current and wanted and (
-                current["price"] != wanted.price or current["qty"] != wanted.quantity
-            ):
-                self._cancel(side, current)
-                continue
-            if wanted and not current and side not in self.pending:
-                self._place(wanted)
-
-    def _place(self, intent: OrderIntent) -> None:
-        payload = {
-            "Symbol1": self.config.symbol,
-            "Price": str(intent.price),
-            "TimeInForce": "2" if intent.role == "risk_exit" else "1",
-            "Side1": "1" if intent.side == "buy" else "2",
-            "OrderType": "2",
-            "OrderQty": str(intent.quantity),
-            "DayTrade": "0",
-            "Symbol2": "",
-            "Side2": "",
-            "PositionEffect": "4",
-        }
-        response = self.module.NEWORDER(payload)
-        code = str(response.get("Code", response.get("code", ""))) if isinstance(response, dict) else ""
-        if code not in {"0000", "000"}:
-            raise RuntimeError(f"TTB new order rejected: {response}")
-        order_no = ""
-        if isinstance(response, dict):
-            order_no = str(
-                response.get("OrdNo")
-                or response.get("OrderNo")
-                or response.get("ORDNO")
-                or ""
-            )
-        if order_no:
-            self.owned_order_nos.add(order_no)
-            self.active[intent.side] = {
-                "order_no": order_no,
-                "price": intent.price,
-                "qty": intent.quantity,
-            }
-        else:
-            self.pending[intent.side] = {"intent": intent, "created_at": time.monotonic()}
-        LOG.info("TTB NEW %s qty=%s price=%s role=%s response=%s", intent.side, intent.quantity, intent.price, intent.role, response)
-
-    def _cancel(self, side: str, current: dict[str, Any]) -> None:
-        if current["order_no"] in self.cancel_requested:
-            return
-        response = self.module.CANCELORDER({"OrdNo": current["order_no"]})
-        code = str(response.get("Code", response.get("code", ""))) if isinstance(response, dict) else ""
-        if code not in {"0000", "000"}:
-            raise RuntimeError(f"TTB cancel rejected: {response}")
-        LOG.info("TTB CANCEL %s %s", side, current["order_no"])
-        self.cancel_requested.add(current["order_no"])
-
-    def cancel_all(self) -> None:
-        for side, current in list(self.active.items()):
-            try:
-                self._cancel(side, current)
-            except Exception:
-                LOG.exception("unable to cancel %s", current)
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "active": self.active,
-            "pending": {k: asdict(v["intent"]) for k, v in self.pending.items()},
-        }
-
-
-class ZmqQuoteSubscriber:
-    """Stoppable version of the quote loop bundled in TTBHelp.pyc."""
-
-    def __init__(self, port: int, symbol: str, callback: Any) -> None:
-        import zmq
-
-        self.zmq = zmq
-        self.symbol = symbol.upper()
-        self.topic = f"TTB$Tick${self.symbol}"
-        self.callback = callback
-        self.stop_event = threading.Event()
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.SUB)
-        self.socket.setsockopt(zmq.RCVHWM, 0)
-        self.socket.setsockopt(zmq.RCVTIMEO, 500)
-        self.socket.setsockopt_string(zmq.SUBSCRIBE, "TTB$Tick")
-        self.socket.connect(f"tcp://localhost:{port}")
-        self.thread = threading.Thread(target=self._run, name="ttb-zmq", daemon=True)
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def _run(self) -> None:
-        while not self.stop_event.is_set():
-            try:
-                topic = self.socket.recv().decode("utf-8")
-                message = self.socket.recv()
-            except self.zmq.Again:
-                continue
-            except Exception:
-                if not self.stop_event.is_set():
-                    LOG.exception("ZMQ quote receive failed")
-                break
-            if topic != self.topic:
-                continue
-            try:
-                self.callback(json.loads(message))
-            except Exception:
-                LOG.exception("invalid quote message")
-
-    def close(self) -> None:
-        self.stop_event.set()
-        self.thread.join(timeout=2)
-        self.socket.close(linger=0)
-        self.context.term()
-
-
-class BotEngine:
-    def __init__(self, config: StrategyConfig, gateway: Any, output: Path) -> None:
-        self.config = config
-        self.ledger = gateway.ledger
-        self.strategy = MicropriceMarketMaker(config, self.ledger)
-        self.gateway = gateway
-        self.recorder = CsvRecorder(output)
-        self.queue: queue.Queue[Quote] = queue.Queue(maxsize=20_000)
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._run, name="strategy-engine", daemon=True)
-        self.last_decision_at = 0.0
-        self.last_quote = None
-        self.raw_stream = (output / f"quotes-{time.strftime('%Y%m%d-%H%M%S')}.csv").open("w", newline="", encoding="utf-8-sig")
-        self.raw_writer = csv.DictWriter(self.raw_stream, fieldnames=list(Quote.__dataclass_fields__))
-        self.raw_writer.writeheader()
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def submit(self, raw: dict[str, Any]) -> None:
-        quote = Quote.from_ttb(raw)
-        if quote.symbol and quote.symbol != self.config.symbol.upper():
-            return
-        try:
-            self.queue.put_nowait(quote)
-        except queue.Full:
-            try:
-                self.queue.get_nowait()
-            except queue.Empty:
-                pass
-            self.queue.put_nowait(quote)
-
-    def _run(self) -> None:
-        min_interval = self.config.min_quote_interval_ms / 1000.0
-        while not self.stop_event.is_set():
-            try:
-                quote = self.queue.get(timeout=0.5)
-            except queue.Empty:
-                if self.last_quote and time.monotonic() - self.last_quote.received_at > 2:
-                    if hasattr(self.gateway, "cancel_all"):
-                        self.gateway.cancel_all()
-                    else:
-                        self.gateway.sync((), self.last_quote)
-                    LOG.error("Quote stream stale; stopped. Check outstanding inventory manually.")
-                    self.stop_event.set()
-                continue
-            try:
-                if time.monotonic() - quote.received_at > 2:
-                    raise RuntimeError("Quote backlog exceeds 2 seconds")
-                self.last_quote = quote
-                self.raw_writer.writerow(asdict(quote))
-                self.raw_stream.flush()
-                self.gateway.before_decision(quote)
-                decision = self.strategy.decide(quote)
-                local = datetime.now(timezone(timedelta(hours=8)))
-                clock = local.strftime("%H:%M")
-                if local.weekday() >= 5 or clock >= "13:35" or clock < "08:55":
-                    pos = self.ledger.position
-                    intents = (OrderIntent("sell" if pos > 0 else "buy", quote.bid if pos > 0 else quote.ask,
-                                           abs(pos), "risk_exit", "session close"),) if pos else ()
-                    decision = StrategyDecision(intents, decision.features, True, "outside entry session")
-                elif clock >= "13:20" and not self.ledger.position:
-                    decision = StrategyDecision((), decision.features, True, "entry cutoff")
-                urgent = self.ledger.position != 0 or decision.halted
-                if not urgent and quote.received_at - self.last_decision_at < min_interval:
-                    continue
-                self.gateway.sync(decision.intents, quote)
-                self.last_decision_at = quote.received_at
-                self.recorder.write(quote, decision, self.ledger, self.gateway.snapshot())
-                LOG.info(
-                    "%s last=%.2f score=%+.3f flow=%+.3f pos=%s pnl=%.2f orders=%s",
-                    decision.reason,
-                    quote.last,
-                    decision.features.score,
-                    decision.features.trade_flow,
-                    self.ledger.position,
-                    self.ledger.mark_to_market(quote.last),
-                    self.gateway.snapshot(),
-                )
-            except Exception:
-                LOG.exception("strategy cycle failed; stopping for reconciliation")
-                self.stop_event.set()
-
-    def close(self) -> None:
-        self.stop_event.set()
-        self.thread.join(timeout=3)
-        if hasattr(self.gateway, "cancel_all"):
-            self.gateway.cancel_all()
-        self.recorder.close()
-        self.raw_stream.close()
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="TTB independent-fill simulator strategy")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Modular TTB quote monitor and strategy runner")
     parser.add_argument("--symbol", required=True, help="TTB contract code, e.g. TXFA7")
     parser.add_argument("--mode", choices=("shadow", "ttb"), default="shadow")
+    parser.add_argument("--strategy", choices=("market-maker", "moving-average"), default="market-maker")
     parser.add_argument("--host", default="http://localhost:8080")
     parser.add_argument("--zmq-port", type=int, default=51141)
     parser.add_argument("--tick-size", type=float, default=1.0)
@@ -471,36 +43,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-ticks", type=int, default=8)
     parser.add_argument("--half-width-ticks", type=float, default=4.0)
     parser.add_argument("--warmup-ticks", type=int, default=30)
-    parser.add_argument("--confirm-flat-account", action="store_true", help="TTB: account has no positions or outstanding orders; exclusive use required")
+    parser.add_argument("--quote-ttl-seconds", type=float, default=5.0)
+    parser.add_argument("--reprice-threshold-ticks", type=float, default=4.0)
+    parser.add_argument("--virtual-max", action="store_true", help="TTB-only aggressive best-price entry mode")
+    parser.add_argument("--sizing-mode", choices=("fixed", "martingale", "anti_martingale"), default="fixed")
+    parser.add_argument("--sizing-multiplier", type=float, default=2.0)
+    parser.add_argument("--max-sizing-step", type=int, default=4)
+    parser.add_argument("--entry-offset-ticks", type=float, default=0.0)
     parser.add_argument("--stop-ticks", type=int, default=8)
     parser.add_argument("--max-hold-seconds", type=float, default=15.0)
     parser.add_argument("--signal-threshold", type=float, default=0.16)
     parser.add_argument("--base-qty", type=int, default=1)
     parser.add_argument("--max-order-qty", type=int, default=1)
     parser.add_argument("--max-inventory", type=int, default=1)
-    parser.add_argument("--recovery-fraction", type=float, default=0.0, help="legacy only; market maker uses fixed quantity")
+    parser.add_argument("--recovery-fraction", type=float, default=0.0, help="legacy strategy only")
     parser.add_argument("--daily-loss-limit", type=float, default=10_000.0)
+    parser.add_argument("--max-drawdown", type=float, default=40_000.0)
     parser.add_argument("--poll-seconds", type=float, default=0.5)
+    parser.add_argument("--short-window", type=int, default=5, help="moving-average strategy")
+    parser.add_argument("--long-window", type=int, default=20, help="moving-average strategy")
+    parser.add_argument("--entry-ticks", type=float, default=0.5, help="moving-average strategy")
     parser.add_argument("--output", type=Path, default=Path("output") / "runs")
+    parser.add_argument("--health-file", type=Path, default=Path("output") / "health.json")
+    parser.add_argument("--quote-stale-seconds", type=float, default=5.0)
+    parser.add_argument("--resume-fresh-ticks", type=int, default=3)
     parser.add_argument(
         "--confirm-virtual-orders",
         action="store_true",
-        help="required with --mode ttb; confirms that orders may be sent to the logged-in virtual account",
+        help="required with --mode ttb; confirms orders may be sent to the logged-in virtual account",
     )
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    parser.add_argument(
+        "--confirm-flat-account",
+        action="store_true",
+        help="required with --mode ttb; confirms the account has no position or working order",
     )
-    if args.mode == "ttb" and not args.confirm_virtual_orders:
-        raise SystemExit("--mode ttb requires --confirm-virtual-orders")
-    if args.mode == "ttb" and not args.confirm_flat_account:
-        raise SystemExit("TTB recovery is not automatic: verify flat account and no orders, then pass --confirm-flat-account")
+    return parser.parse_args(argv)
 
+
+def build_config(args: argparse.Namespace) -> StrategyConfig:
     config = StrategyConfig(
         symbol=args.symbol.upper(),
         tick_size=args.tick_size,
@@ -511,6 +91,13 @@ def main() -> int:
         target_ticks=args.target_ticks,
         half_width_ticks=args.half_width_ticks,
         warmup_ticks=args.warmup_ticks,
+        quote_ttl_seconds=args.quote_ttl_seconds,
+        reprice_threshold_ticks=args.reprice_threshold_ticks,
+        virtual_max_mode=args.virtual_max,
+        sizing_mode=args.sizing_mode,
+        sizing_multiplier=args.sizing_multiplier,
+        max_sizing_step=args.max_sizing_step,
+        entry_offset_ticks=args.entry_offset_ticks,
         stop_ticks=args.stop_ticks,
         max_hold_seconds=args.max_hold_seconds,
         signal_threshold=args.signal_threshold,
@@ -519,37 +106,65 @@ def main() -> int:
         max_inventory=args.max_inventory,
         recovery_fraction=args.recovery_fraction,
         daily_loss_limit=args.daily_loss_limit,
+        max_drawdown=args.max_drawdown,
     )
     config.validate()
+    return config
+
+
+def build_strategy(args: argparse.Namespace, config: StrategyConfig, ledger: PositionLedger) -> Any:
+    if args.strategy == "moving-average":
+        return MovingAverageStrategy(
+            config,
+            ledger,
+            short_window=args.short_window,
+            long_window=args.long_window,
+            entry_ticks=args.entry_ticks,
+        )
+    # None asks BotEngine to construct the default market maker.
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if args.mode == "ttb" and not args.confirm_virtual_orders:
+        raise SystemExit("--mode ttb requires --confirm-virtual-orders")
+    if args.mode == "ttb" and not args.confirm_flat_account:
+        raise SystemExit(
+            "TTB recovery is not automatic: verify a flat account and no orders, then pass --confirm-flat-account"
+        )
+
+    config = build_config(args)
     LOG.info(
-        "symbol=%s mode=%s target=%s ticks estimated_min_ticks=%s cycle_net_at_40000=%.2f",
+        "symbol=%s mode=%s strategy=%s target=%s ticks estimated_min_ticks=%s cycle_net_at_40000=%.2f",
         config.symbol,
         args.mode,
+        args.strategy,
         config.target_ticks,
         config.minimum_profitable_ticks(40_000),
         config.estimated_cycle_net(40_000),
     )
 
-    from TTBHelp import TTBModule
-
+    api = TTBApi.connect(args.host, args.zmq_port)
     ledger = PositionLedger(config)
-
-    class TTBProcess(TTBModule):
-        def SHOWQUOTEDATA(self, obj: dict[str, Any]) -> None:
-            pass
-
-    module = TTBProcess(args.host, args.zmq_port)
-    # TTB only publishes a symbol to its local ZMQ feed after the helper has
-    # registered it.  A SUB socket alone silently receives no ticks.
-    module.QUOTEDATA(config.symbol)
-    LOG.info("requested TTB quote subscription for %s", config.symbol)
     gateway = (
         ShadowGateway(ledger)
         if args.mode == "shadow"
-        else TTBOrderGateway(module, config, ledger, args.poll_seconds)
+        else TTBOrderGateway(api, config, ledger, args.poll_seconds)
     )
-    engine = BotEngine(config, gateway, args.output)
-    subscriber = ZmqQuoteSubscriber(args.zmq_port, config.symbol, engine.submit)
+    strategy = build_strategy(args, config, ledger)
+    engine = BotEngine(
+        config,
+        gateway,
+        args.output,
+        strategy=strategy,
+        health_path=args.health_file,
+        quote_stale_seconds=args.quote_stale_seconds,
+        resume_fresh_ticks=args.resume_fresh_ticks,
+    )
+    engine.health.update(mode=args.mode, strategy=args.strategy)
+    monitor = QuoteMonitor(api, args.zmq_port, config.symbol, engine.submit)
 
     def stop_handler(_signum: int, _frame: Any) -> None:
         engine.stop_event.set()
@@ -558,13 +173,13 @@ def main() -> int:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, stop_handler)
     engine.start()
-    subscriber.start()
-    LOG.info("subscribed; press Ctrl+C to stop")
+    monitor.start()
+    LOG.info("monitoring %s; press Ctrl+C to stop", config.symbol)
     try:
         while not engine.stop_event.wait(1.0):
             pass
     finally:
-        subscriber.close()
+        monitor.close()
         engine.close()
         LOG.info(
             "finished realized=%.2f fees_tax=%.2f position=%s output=%s",
@@ -573,7 +188,7 @@ def main() -> int:
             ledger.position,
             engine.recorder.path,
         )
-    return 0
+    return 2 if engine.fatal_error or ledger.position else 0
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 ## 規則
 
 - 中性訊號雙邊掛單；方向訊號只留同方向入口。
+- 入口報價具有黏著性：預設中心價移動 4 ticks 或掛單滿 5 秒才重報，避免遠端報價每 tick 追價而永遠無法成交。
 - 公平價使用加權中間價，加上啟發式訂單流分數。這不是完整估計的 Stoikov micro-price，也不是校準的上漲機率。
 - 分數含最優檔量不平衡、成交方向與 Level-1 OFI。
 - 半寬至少 4 ticks，並依成本與最近 30 秒價格標準差擴大。
@@ -28,6 +29,14 @@ py -3.13 replay_market_maker.py output/runs/quotes-TIMESTAMP.csv --symbol PLACEH
 預設成本為 TX 每次每口 100 元、契約金額稅率 0.00002。其他競賽或商品必須覆寫成本與乘數。
 raw quotes CSV 記錄每筆處理的行情，另有決策 CSV。離線 replay 使用相同策略，但不套用牆鐘交易時段。
 回放結束的部位按可平倉方向報價估值，不假裝已成交；報表列出未平倉數量。
+
+可用 `--fill-model independent|probabilistic|queue` 切換成交假設，並用
+`monte_carlo_market_maker.py` 做區塊拔靴蒙地卡羅。完整設計、命令與驗收門檻見
+[DYNAMIC_MARKET_MAKING_PLAN.md](DYNAMIC_MARKET_MAKING_PLAN.md)。
+
+若研究目標只限虛擬競賽，可加 `--virtual-max` 直接在最佳價提供入口，並選擇
+`fixed`、`martingale` 或 `anti_martingale` 倉位模式。使用
+`optimize_virtual_competition.py` 可按費後總獲利或競賽資格／夏普排序參數。
 
 ## 撮合假設
 

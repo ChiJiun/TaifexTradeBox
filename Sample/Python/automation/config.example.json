@@ -1,0 +1,14 @@
+{
+  "symbol": "TMFJ6",
+  "mode": "shadow",
+  "strategy": "market-maker",
+  "confirmVirtualOrders": false,
+  "confirmFlatAccount": false,
+  "extraArgs": [
+    "--base-qty", "1",
+    "--max-order-qty", "1",
+    "--max-inventory", "1",
+    "--quote-stale-seconds", "5",
+    "--resume-fresh-ticks", "3"
+  ]
+}

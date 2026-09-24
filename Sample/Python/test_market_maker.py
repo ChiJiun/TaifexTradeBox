@@ -45,6 +45,39 @@ class MarketMakerTests(unittest.TestCase):
         self.assertEqual(s.decide(quote()).reason, "warmup")
         self.assertEqual(s.decide(quote(received_at=101)).reason, "cost filter")
 
+    def test_entry_quotes_are_sticky_until_reprice_threshold(self):
+        s = self.make(quote_ttl_seconds=10, reprice_threshold_ticks=4)
+        s.decide(quote(bid_qty=100, ask_qty=100))
+        initial = s.decide(quote(bid_qty=100, ask_qty=100, received_at=101))
+        moved_one = s.decide(
+            quote(
+                bid=20000,
+                ask=20001,
+                last=20000,
+                bid_qty=100,
+                ask_qty=100,
+                received_at=102,
+            )
+        )
+        self.assertEqual(
+            [(intent.side, intent.price) for intent in initial.intents],
+            [(intent.side, intent.price) for intent in moved_one.intents],
+        )
+        moved_five = s.decide(
+            quote(
+                bid=20004,
+                ask=20005,
+                last=20004,
+                bid_qty=100,
+                ask_qty=100,
+                received_at=103,
+            )
+        )
+        self.assertNotEqual(
+            [(intent.side, intent.price) for intent in initial.intents],
+            [(intent.side, intent.price) for intent in moved_five.intents],
+        )
+
     def test_replay_rejects_reverse_time(self):
         with self.assertRaises(ValueError):
             replay([asdict(quote(received_at=102)), asdict(quote(received_at=101))], self.make().config)
@@ -66,6 +99,31 @@ class MarketMakerTests(unittest.TestCase):
         self.assertEqual(result["filled_contracts"], 2)
         self.assertEqual(result["open_position"], 0)
         self.assertAlmostEqual(result["realized_net"], 1600 - 200 - (19995 + 20003) * 200 * .00002)
+
+    def test_open_inventory_reserves_exit_cost_and_reports_return(self):
+        config = self.make(fee_per_fill=100, tax_rate=.00002).config
+        rows = [
+            quote(bid_qty=100, ask_qty=100, received_at=100),
+            quote(bid_qty=100, ask_qty=100, received_at=101),
+            quote(
+                bid=19995,
+                ask=19996,
+                last=19995,
+                bid_qty=100,
+                ask_qty=100,
+                total_volume=1001,
+                last_qty=1,
+                received_at=102,
+            ),
+        ]
+        result = replay([asdict(x) for x in rows], config, initial_capital=1_000_000)
+        expected_exit_cost = 100 + 19995 * 200 * .00002
+        self.assertEqual(result["open_position"], 1)
+        self.assertAlmostEqual(result["estimated_exit_cost"], expected_exit_cost)
+        self.assertAlmostEqual(
+            result["cumulative_return"],
+            result["marked_equity"] / 1_000_000,
+        )
 
     def test_invalid_quote_is_rejected(self):
         self.assertFalse(quote(bid=float("nan")).is_valid())

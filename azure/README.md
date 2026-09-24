@@ -8,7 +8,7 @@ TTB 是 Windows GUI 程式，並透過本機 `localhost:8080` / ZMQ `51141` 提�
 - 映像：Windows Server 2022 Datacenter, Gen2, Desktop Experience
 - SKU：`Standard_B2as_v2`（2 vCPU、8 GiB RAM）
 - 磁碟：64 GiB `StandardSSD_LRS`
-- 公開 IP：Standard；只允許你的固定 IP 進入 RDP
+- 公開 IP：Standard；優先使用 Bastion、Tailscale 或 JIT 管理 RDP
 
 `B2as_v2` 適合先跑 GUI、TTB、Python 與記錄檔。若只做 shadow 測試，可先用較小規格；若 24/7 運作，請設定 Azure Budget。Azure for Students 的額度通常足以做短期測試，但不是永久免費，必須以 Azure Portal 中你帳戶的剩餘 credit 為準。
 
@@ -66,11 +66,20 @@ OS：Windows Server 2022 Gen2
 固定公網 IP：20.189.93.22
 ```
 
-目前 RDP NSG 規則只允許 `49.216.172.184/32`。若你的公網 IP 改變，必須先更新 NSG，否則會無法連線。管理員密碼不記錄在 repo，登入後應立即更換。
+目前 RDP NSG 規則因管理端 IP 經常變更而暫時允許所有來源（`*`）。這能避免換網路後被擋，但會讓 3389 暴露在公網；請使用高強度密碼與 NLA，並盡快改用 Bastion、Tailscale 或 JIT。管理員密碼不記錄在 repo。
 
 ```powershell
 mstsc /v:20.189.93.22
 ```
+
+### 目前部署狀態（2026-09-24）
+
+- 專案最新版已部署到 `C:\TTB\Sample\Python`，Azure 端 37 個單元測試通過。
+- `TTB Automation` 排程正在執行，完整啟動參數為 `TMFJ6`、`market-maker`、`shadow`；沒有傳入任何允許虛擬委託的旗標。
+- TTB、Python、8080、51141 與健康心跳檢查通過，交易時段已收到即時 tick，部位為 0、沒有活動委託。
+- shadow 策略已碰到模擬時段損失上限並進入 `paused`。這證明風控會阻止繼續報價，但也表示目前不能把績效解讀為正 alpha，更不能直接切換為 `ttb`。
+- 遠價下單／撤單探測器已部署且通過離線測試；尚未作用於帳戶，因為執行前仍需人工確認空倉及沒有未成交單。
+- 回復備份保留於 `C:\TTB\deploy-backups\20260924-101746`；完整部署證據記錄於 `.azure\deployment-plan.md`。
 
 用上一個命令輸出的 IP 開啟 Windows Remote Desktop（`mstsc /v:<PUBLIC_IP>`），登入後在 VM 內安裝：
 
@@ -109,7 +118,16 @@ py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow
 
 ## 5. 切換到 TTB 虛擬下單
 
-開始前請人工確認：帳戶為 flat、沒有未成交單、商品代碼正確、VM 時區為 Asia/Taipei，且已經理解比賽/模擬平台的 `見價見量` 成交規則。第一次不要讓 Task Scheduler 自動送單。
+開始前請人工確認：帳戶為 flat、沒有未成交單、商品代碼正確、VM 時區為 Asia/Taipei，且已經理解比賽/模擬平台的 `見價見量` 成交規則。第一次不要讓 Task Scheduler 自動送單。先執行遠價委託／撤單探測器：
+
+```powershell
+cd C:\TTB\Sample\Python
+py -3.13 ttb_order_probe.py `
+  --symbol TMFJ6 --side buy --distance-ticks 2000 `
+  --confirm-virtual-order-probe --confirm-flat-account
+```
+
+成功標準是：新單 API 接受、取得委託編號、撤單 API 接受、委託報告進入終態，而且成交數量為零。結果位於 `output\order-probes`。即使價格離市場很遠，也不能保證絕不成交；任何非零成交量都必須先人工處理。
 
 ```powershell
 cd C:\TTB\Sample\Python
@@ -120,27 +138,46 @@ py -3.13 sim_hft_bot.py `
 
 若 TTB、RDP 或網路異常，策略不能保證遠端平倉；恢復連線後必須先檢查 TTB 的實際持倉與委託，再重啟 bot。這是虛擬帳戶也必須遵守的操作安全界線。
 
-## 6. 24/7 監控（建議先手動驗證）
+## 6. 24/7 監控與自動執行
 
-TTB 是 GUI 程式，Task Scheduler 應設為「Only when user is logged on」，讓它在同一個互動式桌面啟動。先建立 `C:\TTB\start-bot.cmd`：
+TTB 是 GUI 程式，Task Scheduler 必須使用互動式登入類型（PowerShell 列舉值 `Interactive`），讓它在 `azureuser` 的桌面工作階段啟動。RDP 可以關閉，但不能登出 Windows。
 
-```bat
-@echo off
-timeout /t 60 /nobreak
-cd /d C:\TTB\Sample\Python
-py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow
-```
-
-確認 shadow 穩定後，再把 `--mode shadow` 改成 TTB 模式並加入兩個 confirmation flags；建議先連續觀察數個交易日，再設定開機/登入自動啟動：
+先複製設定檔；預設是 shadow：
 
 ```powershell
-schtasks /Create /TN "TTB GUI" /SC ONLOGON `
-  /TR "C:\TTB\TTB.exe" /RL HIGHEST /F
-schtasks /Create /TN "TTB Strategy" /SC ONLOGON `
-  /TR "C:\TTB\start-bot.cmd" /RL HIGHEST /F
+cd C:\TTB\Sample\Python
+Copy-Item automation\config.example.json automation\config.json
+powershell -ExecutionPolicy Bypass -File automation\install_azure_tasks.ps1 -RunAsUser azureuser
+Start-ScheduledTask -TaskName 'TTB Automation'
 ```
 
-RDP 斷線不要登出 Windows；登出會終止 GUI 與互動式策略。重開機後仍可能需要人工登入 TTB，不能把「自動登入」當成交易安全機制。
+檢查健康狀態：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File automation\check_ttb_health.ps1
+Get-Content C:\TTB\Sample\Python\output\health.json
+Get-Content C:\TTB\Sample\Python\output\supervisor\supervisor.log -Tail 50
+```
+
+健康狀態的主要值：
+
+| 狀態 | 意義 |
+|---|---|
+| `healthy` | 正常收到行情並執行決策 |
+| `waiting_market` | 休市待命，屬於正常狀態 |
+| `stale_market_data` | 交易時段行情停止，已撤銷已知掛單並暫停入口 |
+| `paused` | 時段或風控條件暫停 |
+| `error` | 策略／委託流程發生致命錯誤 |
+| `manual_reconciliation_required` | 有未知部位或異常退出，必須人工核對 |
+
+完成 shadow 與委託探測後，才能將 `automation\config.json` 的 `mode` 改為 `ttb`，並同時將 `confirmVirtualOrders`、`confirmFlatAccount` 設為 `true`。live 虛擬交易發生非正常退出時，supervisor 不會自動重啟，而會留下 `manual-reconciliation-required.flag`。
+
+### 無人值守限制
+
+- Bot 可以跨休市時段常駐，但只有交易時段會產生入口委託。
+- TTB 登入、競賽選擇與持倉核對仍依賴 GUI；Windows 重開機後可能需要人工處理。
+- TTB 範例 API 沒有足以保證冷啟動部位一致性的完整持倉查詢，因此不可在未知狀態下自動重啟 live 模式。
+- 登出 Windows 會終止 GUI 與互動式排程；只關閉 RDP 視窗不會登出。
 
 ## 7. 省成本與告警
 
