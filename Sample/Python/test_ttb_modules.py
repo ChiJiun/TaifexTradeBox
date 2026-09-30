@@ -90,6 +90,58 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(payload["Side1"], "2")
         self.assertEqual(payload["Price"], "20010")
 
+    def test_gateway_emergency_flatten_reconciles_broker_fill(self):
+        class FlattenModule(FakeModule):
+            def __init__(self):
+                super().__init__()
+                self.flatten_sent = False
+
+            def NEWORDER(self, payload):
+                response = super().NEWORDER(payload)
+                self.flatten_sent = True
+                return response
+
+            def QUERYRESTOREFILLREPORT(self):
+                if self.flatten_sent:
+                    return {"Code": "0000", "Data": []}
+                return {
+                    "Code": "0000",
+                    "Data": [{"Hold": "1", "ComdID1": "TXFA7", "ComdBS1": "1"}],
+                }
+
+            def QUERYRESTOREREPORT(self):
+                if not self.flatten_sent:
+                    return {"Code": "0000", "Data": []}
+                return {
+                    "Code": "0000",
+                    "Data": [{
+                        "ORDNO": "A001",
+                        "COMD_ID": "TXFA7",
+                        "BS": "2",
+                        "ORDR_PRCE": "20000",
+                        "VOLM": "1",
+                        "LESS_VOLM": "0",
+                        "DEAL_TOTL": "1",
+                        "DEAL_PRCE": "20000",
+                        "STAT": "完全成交",
+                    }],
+                }
+
+        module = FlattenModule()
+        config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
+        ledger = PositionLedger(config)
+        ledger.position = 1
+        ledger.average_price = 19_999
+        gateway = TTBOrderGateway(module, config, ledger, 0.01)
+        gateway.bootstrapped = True
+        gateway.reported_position = 1
+
+        self.assertTrue(gateway.emergency_flatten(quote(), timeout_seconds=1.0))
+        self.assertEqual(ledger.position, 0)
+        payload = next(payload for name, payload in module.calls if name == "new")
+        self.assertEqual(payload["Side1"], "2")
+        self.assertEqual(payload["TimeInForce"], "2")
+
     def test_gateway_refuses_startup_with_existing_working_order(self):
         module = FakeModule()
         module.QUERYRESTOREREPORT = lambda: {

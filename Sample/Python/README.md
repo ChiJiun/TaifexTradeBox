@@ -22,7 +22,7 @@ TTBHelp.pyc
 需要 Windows、Python 3.13，以及已啟動並登入的 TTB。先安裝相依套件：
 
 ```powershell
-py -3.13 -m pip install pyzmq requests
+py -3.13 -m pip install -r requirements.txt
 ```
 
 執行測試：
@@ -39,7 +39,11 @@ py -3.13 -m unittest discover -v
 py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow
 ```
 
-程式可跨休市時段保持執行。休市時健康狀態為 `waiting_market`；交易時行情超過 `--quote-stale-seconds` 未更新，會撤銷已知掛單並進入 `stale_market_data`，收到 `--resume-fresh-ticks` 筆新行情後才恢復入口決策。
+程式可跨休市時段保持執行。預設日盤 `08:45–13:45`、夜盤 `15:00–05:00` 都會被辨識為交易時段；可使用 `--regular-open/--regular-close/--after-hours-open/--after-hours-close` 覆寫，或用 `--disable-after-hours` 停用夜盤。休市時健康狀態為 `waiting_market`；交易時行情超過 `--quote-stale-seconds` 未更新，會撤銷已知掛單並進入 `stale_market_data`，收到 `--resume-fresh-ticks` 筆新行情後才恢復入口決策；若曾經收到過行情後持續斷線超過 `--stale-fatal-seconds`（預設 120 秒），程序會 fail-closed 結束，讓 shadow supervisor 可重啟，而 `ttb` live 模式則留下人工對帳旗標後停止。
+
+同一交易日的風控狀態預設保存到 `output/risk-state.json`，包含 realized PnL、peak equity、halt reason 與 sizing streak；程序重啟時會恢復。這個檔案只用於 session risk persistence，不用來恢復未知持倉或工作中委託，live TTB 仍以 API 對帳為準並 fail closed。
+
+本機監控端點預設綁定 `127.0.0.1:8765`：`/healthz` 表示程序存活、`/readyz` 在需要人工對帳時回 503、`/status` 回傳完整 health snapshot。可用 `--status-port 0` 停用。
 
 也可以用同一個行情、委託和帳本模組執行範例均線策略：
 
@@ -99,15 +103,19 @@ Copy-Item automation\config.example.json automation\config.json
   "strategy": "market-maker",
   "confirmVirtualOrders": true,
   "confirmFlatAccount": true,
+  "flattenOnShutdown": false,
   "extraArgs": ["--base-qty", "1", "--max-order-qty", "1", "--max-inventory", "1"]
 }
 ```
 
-啟動與檢查：
+啟動前先跑 release validator 與 preflight，再啟動與檢查：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File automation\validate_release.ps1
+powershell -ExecutionPolicy Bypass -File automation\preflight_ttb.ps1
 powershell -ExecutionPolicy Bypass -File automation\run_ttb_automation.ps1
 powershell -ExecutionPolicy Bypass -File automation\check_ttb_health.ps1
+Invoke-RestMethod http://127.0.0.1:8765/status
 ```
 
 安裝 Azure Windows 排程（需在系統管理員 PowerShell 執行）：
@@ -116,7 +124,9 @@ powershell -ExecutionPolicy Bypass -File automation\check_ttb_health.ps1
 powershell -ExecutionPolicy Bypass -File automation\install_azure_tasks.ps1 -RunAsUser azureuser
 ```
 
-排程會在 `azureuser` 登入與每日 08:35 啟動，且忽略重複實例。supervisor 記錄於 `output/supervisor/supervisor.log`，bot 的 stdout/stderr 分別位於 `bot.stdout.log`、`bot.stderr.log`。shadow 異常可由 supervisor 重啟；`ttb` 模式若非正常結束，會建立 `output/supervisor/manual-reconciliation-required.flag` 並停止，避免在未知持倉下自動重送委託。
+排程會在 `azureuser` 登入與每日 08:35 啟動，且忽略重複實例；另外建立 `TTB Health Watchdog` 每 5 分鐘健康檢查。supervisor 記錄於 `output/supervisor/supervisor.log`；bot 詳細 log 寫入會自動輪替的 `output/supervisor/bot.log`（10 MB × 最多 6 份），stdout/stderr 只保留少量主控台輸出。shadow 異常可由 supervisor 重啟；`ttb` 模式若非正常結束，會建立 `output/supervisor/manual-reconciliation-required.flag` 並停止，避免在未知持倉下自動重送委託。若 VM 使用者環境設定 `TTB_ALERT_WEBHOOK_URL`，watchdog 可在故障與恢復時送 webhook。
+
+quote/decision CSV 依台北日期每日輪替；`cleanup_runtime.ps1` 預設保留 14 天 runtime CSV／order-probe 檔，supervisor log 超過 10 MB 也會輪替。`flattenOnShutdown=true` 只會在 `ttb` 模式、交易時段、且 bot 有有效行情時，於正常停止流程嘗試 IOC flatten；預設為 `false`，避免未經確認自動平倉。
 
 TTB 登入並選定競賽後，程式會透過官方 `QUOTEDATA()` 註冊 `--symbol` 的行情，再從本機 ZMQ `51141` 接收 tick。若 shadow 已顯示 `subscribed`、但 quote CSV 仍是空檔，請先在 TTB 確認該商品代碼有效、競賽/重播模式正在送行情，且行情畫面有更新；這不是下單功能失敗。
 

@@ -41,7 +41,7 @@ azure/
 安裝相依套件：
 
 ```powershell
-py -3.13 -m pip install pyzmq requests
+py -3.13 -m pip install -r Sample/Python/requirements.txt
 ```
 
 ## 快速開始
@@ -155,10 +155,14 @@ mstsc /v:20.189.93.22
 
 ### 「24/7」的實際界線
 
-- Bot 可以全天候常駐，休市時寫入 `waiting_market` 健康狀態，交易時段才允許策略產生入口委託。
-- 交易時行情中斷會撤銷已知掛單並暫停；行情恢復後先觀察連續新 tick，持倉不為零時優先送出風險退出意圖。
+- Bot 可以全天候常駐，休市時寫入 `waiting_market` 健康狀態；預設同時辨識日盤 `08:45–13:45` 與夜盤 `15:00–05:00`，並可由 CLI 覆寫或停用夜盤。
+- 同一交易日的 realized PnL、drawdown halt、勝負 streak 與 sizing 狀態會原子化寫入 `output/risk-state.json`；程序重啟後會恢復，避免藉由重啟意外洗掉風控。
+- 本機 `127.0.0.1:8765` 提供 `/healthz`、`/readyz` 與 `/status`，供 VM watchdog 或監控代理 probe；不要把此 port 公開到 Internet。
+- 交易時行情中斷會撤銷已知掛單並暫停；行情恢復後先觀察連續新 tick，持倉不為零時優先送出風險退出意圖。若曾正常收到行情後持續斷線超過預設 120 秒，程序會 fail-closed 結束；shadow 可由 supervisor 重啟，live TTB 則停止並要求人工對帳。
 - TTB 是 GUI 程式；RDP 可以中斷，但不可登出 Windows。VM 重開機後仍可能需要人工登入 TTB、選擇正確競賽並核對帳戶。
-- TTB 範例 API 沒有足以保證冷啟動部位一致性的持倉端點，因此異常退出後 live 模式不會自動重啟，必須人工核對持倉與未成交單。
+- Live gateway 會用 TTB 的委託報告與 `QUERYRESTOREFILLREPORT()` 做 broker-side 持倉對帳；若發現既有 working order、非零持倉或持倉長時間不一致，仍會 fail closed。異常退出後 supervisor 不會自動重啟 live 模式，避免未知狀態下重送委託。
+- quote/decision CSV 會依台北日期每日輪替；runtime 檔預設保留 14 天，supervisor log 超過 10 MB 會輪替，避免長時間運作塞滿磁碟。
+- `TTB Health Watchdog` 每 5 分鐘執行健康檢查；若設定環境變數 `TTB_ALERT_WEBHOOK_URL`，故障轉態、持續故障每小時與恢復時都可送出 webhook。
 
 非使用期間可釋放 VM 以停止計算費用：
 

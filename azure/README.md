@@ -92,7 +92,7 @@ mkdir C:\TTB
 cd C:\TTB
 git clone https://github.com/ChiJiun/TaifexTradeBox.git .
 py -3.13 -m pip install --upgrade pip
-py -3.13 -m pip install pyzmq requests
+py -3.13 -m pip install -r Sample/Python/requirements.txt
 ```
 
 私有 GitHub repo 需要 GitHub 登入或 token；不要把 token 寫入這份文件或提交到 repo。安裝 Tailscale 後完成瀏覽器登入，確認能用 Tailscale IP 連線，再把 NSG 的公開 RDP 規則刪除或改成你的管理 IP。
@@ -151,13 +151,17 @@ powershell -ExecutionPolicy Bypass -File automation\install_azure_tasks.ps1 -Run
 Start-ScheduledTask -TaskName 'TTB Automation'
 ```
 
-檢查健康狀態：
+先跑 preflight，再檢查健康狀態：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File automation\preflight_ttb.ps1
 powershell -ExecutionPolicy Bypass -File automation\check_ttb_health.ps1
+Invoke-RestMethod http://127.0.0.1:8765/status
 Get-Content C:\TTB\Sample\Python\output\health.json
 Get-Content C:\TTB\Sample\Python\output\supervisor\supervisor.log -Tail 50
 ```
+
+`install_azure_tasks.ps1` 也會建立 `TTB Health Watchdog`，每 5 分鐘執行一次。若需要外部告警，可只在 VM 使用者環境設定 `TTB_ALERT_WEBHOOK_URL`；repo 不保存 webhook secret。watchdog 只在故障轉態、每 60 分鐘持續故障提醒與恢復時送出通知。
 
 健康狀態的主要值：
 
@@ -176,7 +180,7 @@ Get-Content C:\TTB\Sample\Python\output\supervisor\supervisor.log -Tail 50
 
 - Bot 可以跨休市時段常駐，但只有交易時段會產生入口委託。
 - TTB 登入、競賽選擇與持倉核對仍依賴 GUI；Windows 重開機後可能需要人工處理。
-- TTB 範例 API 沒有足以保證冷啟動部位一致性的完整持倉查詢，因此不可在未知狀態下自動重啟 live 模式。
+- 程式會用委託報告與 `QUERYRESTOREFILLREPORT()` 交叉對帳 broker position；但異常退出後仍不會自動重啟 live 模式，因為 GUI 競賽選擇、登入狀態與未知外部委託仍需要人工確認。
 - 登出 Windows 會終止 GUI 與互動式排程；只關閉 RDP 視窗不會登出。
 
 ## 7. 省成本與告警
@@ -189,7 +193,7 @@ az vm deallocate --resource-group $rg --name $vm
 az vm start --resource-group $rg --name $vm
 ```
 
-在 Azure Portal 建立 Cost Management Budget，至少設定 50%、75%、90% 告警。只有在策略已通過 shadow 與人工復核後，才適合把 VM 改成長時間執行；交易期間應優先確保 TTB 與 bot 的進程、磁碟空間和 VM 狀態可觀測。
+在 Azure Portal 建立 Cost Management Budget，至少設定 50%、75%、90% 告警。只有在策略已通過 shadow 與人工復核後，才適合把 VM 改成長時間執行；交易期間應優先確保 TTB 與 bot 的進程、磁碟空間和 VM 狀態可觀測。quote/decision CSV 會每日輪替，`cleanup_runtime.ps1` 預設清除 14 天前的 runtime CSV／order-probe 檔，supervisor log 超過 10 MB 會輪替。
 
 ## 官方參考
 

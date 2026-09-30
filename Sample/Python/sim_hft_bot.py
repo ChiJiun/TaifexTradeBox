@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 import signal
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ from strategy_core import PositionLedger, StrategyConfig
 from ttb.api import TTBApi
 from ttb.engine import BotEngine, CsvRecorder
 from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
+from ttb.runtime import SessionSchedule
+from ttb.status_server import StatusServer
 from ttb.orders import (
     ShadowGateway,
     TTBOrderGateway,
@@ -66,7 +69,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("output") / "runs")
     parser.add_argument("--health-file", type=Path, default=Path("output") / "health.json")
     parser.add_argument("--quote-stale-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--stale-fatal-seconds",
+        type=float,
+        default=120.0,
+        help="after quotes have started, exit fail-closed if market data stays stale this long; 0 disables",
+    )
     parser.add_argument("--resume-fresh-ticks", type=int, default=3)
+    parser.add_argument("--regular-open", default="08:45")
+    parser.add_argument("--regular-close", default="13:45")
+    parser.add_argument("--after-hours-open", default="15:00")
+    parser.add_argument("--after-hours-close", default="05:00")
+    parser.add_argument("--disable-after-hours", action="store_true")
+    parser.add_argument("--risk-state-file", type=Path, default=Path("output") / "risk-state.json")
+    parser.add_argument("--status-host", default="127.0.0.1")
+    parser.add_argument("--log-file", type=Path, default=None)
+    parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
+    parser.add_argument("--status-port", type=int, default=8765, help="0 disables the local HTTP status endpoint")
+    parser.add_argument(
+        "--flatten-on-shutdown",
+        action="store_true",
+        help="with --mode ttb, attempt an IOC flatten during a graceful stop while the market is open",
+    )
     parser.add_argument(
         "--confirm-virtual-orders",
         action="store_true",
@@ -78,6 +102,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="required with --mode ttb; confirms the account has no position or working order",
     )
     return parser.parse_args(argv)
+
+
+def configure_logging(args: argparse.Namespace) -> None:
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(getattr(logging, args.log_level))
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING if args.log_file else getattr(logging, args.log_level))
+    console.setFormatter(formatter)
+    root.addHandler(console)
+    if args.log_file:
+        args.log_file.parent.mkdir(parents=True, exist_ok=True)
+        rotating = RotatingFileHandler(
+            args.log_file,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        rotating.setLevel(getattr(logging, args.log_level))
+        rotating.setFormatter(formatter)
+        root.addHandler(rotating)
 
 
 def build_config(args: argparse.Namespace) -> StrategyConfig:
@@ -127,7 +173,7 @@ def build_strategy(args: argparse.Namespace, config: StrategyConfig, ledger: Pos
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging(args)
     if args.mode == "ttb" and not args.confirm_virtual_orders:
         raise SystemExit("--mode ttb requires --confirm-virtual-orders")
     if args.mode == "ttb" and not args.confirm_flat_account:
@@ -154,6 +200,13 @@ def main(argv: list[str] | None = None) -> int:
         else TTBOrderGateway(api, config, ledger, args.poll_seconds)
     )
     strategy = build_strategy(args, config, ledger)
+    schedule = SessionSchedule(
+        regular_open=args.regular_open,
+        regular_close=args.regular_close,
+        after_hours_open=args.after_hours_open,
+        after_hours_close=args.after_hours_close,
+        include_after_hours=not args.disable_after_hours,
+    )
     engine = BotEngine(
         config,
         gateway,
@@ -161,10 +214,15 @@ def main(argv: list[str] | None = None) -> int:
         strategy=strategy,
         health_path=args.health_file,
         quote_stale_seconds=args.quote_stale_seconds,
+        stale_fatal_seconds=args.stale_fatal_seconds,
         resume_fresh_ticks=args.resume_fresh_ticks,
+        session_schedule=schedule,
+        risk_state_path=args.risk_state_file,
+        flatten_on_shutdown=(args.mode == "ttb" and args.flatten_on_shutdown),
     )
     engine.health.update(mode=args.mode, strategy=args.strategy)
     monitor = QuoteMonitor(api, args.zmq_port, config.symbol, engine.submit)
+    status_server = StatusServer(args.status_host, args.status_port, engine.health.snapshot)
 
     def stop_handler(_signum: int, _frame: Any) -> None:
         engine.stop_event.set()
@@ -172,14 +230,16 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, stop_handler)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, stop_handler)
-    engine.start()
-    monitor.start()
-    LOG.info("monitoring %s; press Ctrl+C to stop", config.symbol)
     try:
+        engine.start()
+        status_server.start()
+        monitor.start()
+        LOG.info("monitoring %s; press Ctrl+C to stop", config.symbol)
         while not engine.stop_event.wait(1.0):
             pass
     finally:
         monitor.close()
+        status_server.close()
         engine.close()
         LOG.info(
             "finished realized=%.2f fees_tax=%.2f position=%s output=%s",

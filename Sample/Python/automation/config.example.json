@@ -4,11 +4,13 @@
   "strategy": "market-maker",
   "confirmVirtualOrders": false,
   "confirmFlatAccount": false,
+  "flattenOnShutdown": false,
   "extraArgs": [
     "--base-qty", "1",
     "--max-order-qty", "1",
     "--max-inventory", "1",
     "--quote-stale-seconds", "5",
+    "--stale-fatal-seconds", "120",
     "--resume-fresh-ticks", "3"
   ]
 }

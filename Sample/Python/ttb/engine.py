@@ -15,6 +15,7 @@ from strategy_core import MicropriceMarketMaker, OrderIntent, PositionLedger, Qu
 
 from .orders import OrderGateway
 from .health import HealthReporter
+from .runtime import RiskStateStore, SessionSchedule, TAIPEI_TZ
 
 
 LOG = logging.getLogger("ttb.engine")
@@ -26,21 +27,65 @@ class Strategy(Protocol):
     def decide(self, quote: Quote) -> StrategyDecision: ...
 
 
+class DailyCsvWriter:
+    """Rotate CSV output at Taipei calendar-day boundaries."""
+
+    def __init__(self, directory: Path, prefix: str, fieldnames: list[str]) -> None:
+        self.directory = directory
+        self.prefix = prefix
+        self.fieldnames = fieldnames
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self._day = ""
+        self._stream: Any = None
+        self._writer: csv.DictWriter | None = None
+        self.path = Path()
+        self._ensure_open()
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(TAIPEI_TZ)
+
+    def _ensure_open(self) -> None:
+        now = self._now()
+        day = now.strftime("%Y%m%d")
+        if self._writer is not None and day == self._day:
+            return
+        if self._stream is not None and not self._stream.closed:
+            self._stream.close()
+        self._day = day
+        stamp = now.strftime("%Y%m%d-%H%M%S")
+        self.path = self.directory / f"{self.prefix}-{stamp}.csv"
+        self._stream = self.path.open("w", newline="", encoding="utf-8-sig")
+        self._writer = csv.DictWriter(self._stream, fieldnames=self.fieldnames)
+        self._writer.writeheader()
+        self._stream.flush()
+
+    def write(self, row: dict[str, Any]) -> None:
+        self._ensure_open()
+        assert self._writer is not None
+        self._writer.writerow(row)
+        self._stream.flush()
+
+    def close(self) -> None:
+        if self._stream is not None and not self._stream.closed:
+            self._stream.close()
+
+
 class CsvRecorder:
     def __init__(self, directory: Path) -> None:
-        directory.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.path = directory / f"ttb-shadow-{stamp}.csv"
-        self._stream = self.path.open("w", newline="", encoding="utf-8-sig")
-        self._writer = csv.DictWriter(
-            self._stream,
-            fieldnames=[
+        self._sink = DailyCsvWriter(
+            directory,
+            "ttb-shadow",
+            [
                 "wall_time", "exchange_time", "received_at", "total_volume", "symbol", "bid", "ask", "last",
                 "last_qty", "bid_qty", "ask_qty", "score", "trade_flow", "position", "average_price",
                 "realized_pnl", "mark_to_market", "decision", "active_orders",
             ],
         )
-        self._writer.writeheader()
+
+    @property
+    def path(self) -> Path:
+        return self._sink.path
 
     def write(
         self,
@@ -49,9 +94,9 @@ class CsvRecorder:
         ledger: PositionLedger,
         orders: dict[str, Any],
     ) -> None:
-        self._writer.writerow(
+        self._sink.write(
             {
-                "wall_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "wall_time": datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                 "exchange_time": quote.exchange_time,
                 "received_at": quote.received_at,
                 "total_volume": quote.total_volume,
@@ -72,11 +117,24 @@ class CsvRecorder:
                 "active_orders": json.dumps(orders, ensure_ascii=False),
             }
         )
-        self._stream.flush()
 
     def close(self) -> None:
-        if not self._stream.closed:
-            self._stream.close()
+        self._sink.close()
+
+
+class RawQuoteRecorder:
+    def __init__(self, directory: Path) -> None:
+        self._sink = DailyCsvWriter(directory, "quotes", list(Quote.__dataclass_fields__))
+
+    @property
+    def path(self) -> Path:
+        return self._sink.path
+
+    def write(self, quote: Quote) -> None:
+        self._sink.write(asdict(quote))
+
+    def close(self) -> None:
+        self._sink.close()
 
 
 class BotEngine:
@@ -94,7 +152,11 @@ class BotEngine:
         strategy: Strategy | None = None,
         health_path: Path | None = None,
         quote_stale_seconds: float = 5.0,
+        stale_fatal_seconds: float = 120.0,
         resume_fresh_ticks: int = 3,
+        session_schedule: SessionSchedule | None = None,
+        risk_state_path: Path | None = None,
+        flatten_on_shutdown: bool = False,
     ) -> None:
         self.config = config
         self.ledger = gateway.ledger
@@ -108,11 +170,25 @@ class BotEngine:
         self.last_quote: Quote | None = None
         self.started_at = time.monotonic()
         self.quote_stale_seconds = max(2.0, quote_stale_seconds)
+        self.stale_fatal_seconds = max(0.0, stale_fatal_seconds)
         self.resume_fresh_ticks = max(1, resume_fresh_ticks)
         self.market_data_stale = False
+        self.stale_since = 0.0
         self.fresh_after_stale = 0
+        self.submitted_quotes = 0
+        self.processed_quotes = 0
+        self.dropped_quotes = 0
+        self.decision_count = 0
+        self.first_quote_grace_seconds = max(30.0, self.quote_stale_seconds * 3.0)
         self.closed_cleanup_done = False
         self.fatal_error = ""
+        self.session_schedule = session_schedule or SessionSchedule()
+        self.risk_state = RiskStateStore(
+            risk_state_path or output.parent / "risk-state.json",
+            config.symbol,
+        )
+        self.current_trading_day = ""
+        self.flatten_on_shutdown = flatten_on_shutdown
         self.health = HealthReporter(
             health_path or output / "health.json",
             symbol=config.symbol,
@@ -121,11 +197,7 @@ class BotEngine:
             position=0,
             clean_shutdown=False,
         )
-        self.raw_stream = (output / f"quotes-{time.strftime('%Y%m%d-%H%M%S')}.csv").open(
-            "w", newline="", encoding="utf-8-sig"
-        )
-        self.raw_writer = csv.DictWriter(self.raw_stream, fieldnames=list(Quote.__dataclass_fields__))
-        self.raw_writer.writeheader()
+        self.raw_recorder = RawQuoteRecorder(output)
 
     def start(self) -> None:
         self.health.update(state="running")
@@ -133,19 +205,80 @@ class BotEngine:
 
     @staticmethod
     def _session_phase(local: datetime | None = None) -> str:
-        local = local or datetime.now(timezone(timedelta(hours=8)))
-        if local.weekday() >= 5:
-            return "closed"
-        clock = local.strftime("%H:%M:%S")
-        return "trading" if "08:45:00" <= clock < "13:45:00" else "closed"
+        """Backward-compatible coarse phase used by older tests/callers."""
+        return "trading" if SessionSchedule().status(local).trading else "closed"
+
+    def _restore_or_roll_risk_state(self, local: datetime) -> None:
+        status = self.session_schedule.status(local)
+        trading_day = status.trading_day
+        if trading_day == self.current_trading_day:
+            return
+        self.current_trading_day = trading_day
+        saved = self.risk_state.load(trading_day)
+        if saved:
+            self.ledger.realized_pnl = float(saved.get("realized_pnl", 0.0))
+            self.ledger.peak_realized_pnl = float(saved.get("peak_realized_pnl", self.ledger.realized_pnl))
+            self.ledger.fees_and_tax = float(saved.get("fees_and_tax", 0.0))
+            self.ledger.fill_count = int(saved.get("fill_count", 0))
+            if hasattr(self.strategy, "peak_equity"):
+                self.strategy.peak_equity = float(saved.get("peak_equity", 0.0))
+            if hasattr(self.strategy, "halt_reason"):
+                self.strategy.halt_reason = str(saved.get("halt_reason", ""))
+            strategy_state = saved.get("strategy_state", {})
+            for name in ("win_streak", "loss_streak", "flat_realized_baseline", "last_cycle_net"):
+                if hasattr(self.strategy, name) and name in strategy_state:
+                    setattr(self.strategy, name, strategy_state[name])
+            if hasattr(self.strategy, "observed_position"):
+                self.strategy.observed_position = self.ledger.position
+            LOG.warning("restored same-session risk state for %s", trading_day)
+        else:
+            # A new trading day resets only cumulative session accounting.
+            self.ledger.realized_pnl = 0.0
+            self.ledger.peak_realized_pnl = 0.0
+            self.ledger.fees_and_tax = 0.0
+            self.ledger.fill_count = 0
+            if hasattr(self.strategy, "peak_equity"):
+                self.strategy.peak_equity = 0.0
+            if hasattr(self.strategy, "halt_reason"):
+                self.strategy.halt_reason = ""
+            for name, value in (
+                ("win_streak", 0),
+                ("loss_streak", 0),
+                ("flat_realized_baseline", 0.0),
+                ("last_cycle_net", 0.0),
+            ):
+                if hasattr(self.strategy, name):
+                    setattr(self.strategy, name, value)
+
+    def _checkpoint_risk_state(self) -> None:
+        if not self.current_trading_day:
+            return
+        strategy_state = {
+            name: getattr(self.strategy, name)
+            for name in ("win_streak", "loss_streak", "flat_realized_baseline", "last_cycle_net")
+            if hasattr(self.strategy, name)
+        }
+        self.risk_state.checkpoint(
+            trading_day=self.current_trading_day,
+            realized_pnl=self.ledger.realized_pnl,
+            peak_realized_pnl=self.ledger.peak_realized_pnl,
+            fees_and_tax=self.ledger.fees_and_tax,
+            fill_count=self.ledger.fill_count,
+            peak_equity=float(getattr(self.strategy, "peak_equity", 0.0)),
+            halt_reason=str(getattr(self.strategy, "halt_reason", "")),
+            position=self.ledger.position,
+            strategy_state=strategy_state,
+        )
 
     def submit(self, value: Quote | dict[str, Any]) -> None:
         quote = value if isinstance(value, Quote) else Quote.from_ttb(value)
         if quote.symbol and quote.symbol != self.config.symbol.upper():
             return
+        self.submitted_quotes += 1
         try:
             self.queue.put_nowait(quote)
         except queue.Full:
+            self.dropped_quotes += 1
             try:
                 self.queue.get_nowait()
             except queue.Empty:
@@ -157,17 +290,17 @@ class BotEngine:
         if time.monotonic() - quote.received_at > 2:
             raise RuntimeError("Quote backlog exceeds 2 seconds")
         self.last_quote = quote
-        self.raw_writer.writerow(asdict(quote))
-        self.raw_stream.flush()
+        self.processed_quotes += 1
+        self.raw_recorder.write(quote)
+        local = datetime.now(TAIPEI_TZ)
+        self._restore_or_roll_risk_state(local)
         self.gateway.before_decision(quote)
         decision = self.strategy.decide(quote)
-        local = datetime.now(timezone(timedelta(hours=8)))
-        clock = local.strftime("%H:%M")
-        if self.config.virtual_max_mode:
-            entry_start, entry_cutoff, flatten_time = "08:45", "13:35", "13:42"
-        else:
-            entry_start, entry_cutoff, flatten_time = "08:55", "13:20", "13:35"
-        if local.weekday() >= 5 or clock >= flatten_time or clock < entry_start:
+        session = self.session_schedule.status(local)
+        entry_delay_minutes = 0.0 if self.config.virtual_max_mode else 10.0
+        entry_cutoff_minutes = 10.0 if self.config.virtual_max_mode else 25.0
+        flatten_buffer_minutes = 3.0 if self.config.virtual_max_mode else 10.0
+        if not session.trading or session.minutes_until_close <= flatten_buffer_minutes:
             position = self.ledger.position
             intents = (
                 OrderIntent(
@@ -179,7 +312,9 @@ class BotEngine:
                 ),
             ) if position else ()
             decision = StrategyDecision(intents, decision.features, True, "outside entry session")
-        elif clock >= entry_cutoff and not self.ledger.position:
+        elif session.minutes_since_open < entry_delay_minutes and not self.ledger.position:
+            decision = StrategyDecision((), decision.features, True, "session opening delay")
+        elif session.minutes_until_close <= entry_cutoff_minutes and not self.ledger.position:
             decision = StrategyDecision((), decision.features, True, "entry cutoff")
         if self.market_data_stale:
             self.fresh_after_stale += 1
@@ -202,6 +337,7 @@ class BotEngine:
                 decision = StrategyDecision((), decision.features, True, "recovering market data")
             else:
                 self.market_data_stale = False
+                self.stale_since = 0.0
                 self.fresh_after_stale = 0
         urgent = self.ledger.position != 0 or decision.halted
         min_interval = self.config.min_quote_interval_ms / 1000.0
@@ -209,11 +345,15 @@ class BotEngine:
             return None
         self.gateway.sync(decision.intents, quote)
         self.last_decision_at = quote.received_at
+        self.decision_count += 1
         snapshot = self.gateway.snapshot()
         self.recorder.write(quote, decision, self.ledger, snapshot)
         self.closed_cleanup_done = False
+        self._checkpoint_risk_state()
         self.health.update(
             state="healthy" if not decision.halted else "paused",
+            session_phase=session.phase,
+            trading_day=session.trading_day,
             last_quote_exchange_time=quote.exchange_time,
             last_quote_monotonic=quote.received_at,
             last_price=quote.last,
@@ -221,6 +361,11 @@ class BotEngine:
             position=self.ledger.position,
             realized_pnl=round(self.ledger.realized_pnl, 2),
             active_orders=snapshot,
+            queue_depth=self.queue.qsize(),
+            submitted_quotes=self.submitted_quotes,
+            processed_quotes=self.processed_quotes,
+            dropped_quotes=self.dropped_quotes,
+            decision_count=self.decision_count,
             fatal_error="",
         )
         LOG.info(
@@ -242,8 +387,15 @@ class BotEngine:
             except queue.Empty:
                 now = time.monotonic()
                 last_seen = self.last_quote.received_at if self.last_quote else self.started_at
-                phase = self._session_phase()
-                if phase == "trading" and now - last_seen > self.quote_stale_seconds:
+                session = self.session_schedule.status()
+                phase = "trading" if session.trading else "closed"
+                has_seen_quote = self.last_quote is not None
+                no_first_quote = (
+                    phase == "trading"
+                    and not has_seen_quote
+                    and now - self.started_at > self.first_quote_grace_seconds
+                )
+                if phase == "trading" and ((has_seen_quote and now - last_seen > self.quote_stale_seconds) or no_first_quote):
                     if not self.market_data_stale:
                         if hasattr(self.gateway, "cancel_all"):
                             self.gateway.cancel_all()  # type: ignore[attr-defined]
@@ -251,19 +403,54 @@ class BotEngine:
                             self.gateway.sync((), self.last_quote)
                         LOG.error("Quote stream stale; entries paused until fresh ticks recover.")
                     self.market_data_stale = True
+                    if not self.stale_since:
+                        self.stale_since = now
                     self.fresh_after_stale = 0
+                    stale_duration = max(0.0, now - self.stale_since)
                     self.health.update(
                         state="stale_market_data",
+                        session_phase=session.phase,
+                        trading_day=session.trading_day,
                         position=self.ledger.position,
-                        last_error="quote stream stale during trading session",
+                        last_error=(
+                            "no first quote received during trading session"
+                            if no_first_quote
+                            else "quote stream stale during trading session"
+                        ),
+                        queue_depth=self.queue.qsize(),
+                        submitted_quotes=self.submitted_quotes,
+                        processed_quotes=self.processed_quotes,
+                        dropped_quotes=self.dropped_quotes,
+                        stale_duration_seconds=round(stale_duration, 1),
                     )
+                    if (
+                        has_seen_quote
+                        and self.stale_fatal_seconds > 0
+                        and stale_duration >= self.stale_fatal_seconds
+                    ):
+                        self.fatal_error = (
+                            f"market data stale for {stale_duration:.1f}s "
+                            f"(fatal threshold {self.stale_fatal_seconds:.1f}s)"
+                        )
+                        LOG.error(self.fatal_error)
+                        self.health.update(
+                            state="error",
+                            fatal_error=self.fatal_error,
+                            position=self.ledger.position,
+                        )
+                        self.stop_event.set()
                 else:
                     if phase == "closed" and not self.closed_cleanup_done and self.ledger.position == 0:
                         if hasattr(self.gateway, "cancel_all"):
                             self.gateway.cancel_all()  # type: ignore[attr-defined]
                         self.closed_cleanup_done = True
                     state = "waiting_market" if self.ledger.position == 0 else "manual_reconciliation_required"
-                    self.health.update(state=state, position=self.ledger.position)
+                    self.health.update(
+                        state=state,
+                        session_phase=session.phase,
+                        trading_day=session.trading_day,
+                        position=self.ledger.position,
+                    )
                 continue
             try:
                 self.process_quote(quote)
@@ -281,12 +468,32 @@ class BotEngine:
         self.stop_event.set()
         if self.thread.is_alive():
             self.thread.join(timeout=3)
-        if hasattr(self.gateway, "cancel_all"):
+        shutdown_reconciled = True
+        session = self.session_schedule.status()
+        if (
+            self.flatten_on_shutdown
+            and self.ledger.position
+            and self.last_quote is not None
+            and session.trading
+            and hasattr(self.gateway, "emergency_flatten")
+        ):
+            try:
+                shutdown_reconciled = bool(self.gateway.emergency_flatten(self.last_quote))  # type: ignore[attr-defined]
+            except Exception:
+                shutdown_reconciled = False
+                LOG.exception("graceful shutdown flatten failed")
+        if hasattr(self.gateway, "finalize_shutdown"):
+            try:
+                shutdown_reconciled = bool(self.gateway.finalize_shutdown()) and shutdown_reconciled  # type: ignore[attr-defined]
+            except Exception:
+                shutdown_reconciled = False
+                LOG.exception("final shutdown reconciliation failed")
+        elif hasattr(self.gateway, "cancel_all"):
             self.gateway.cancel_all()  # type: ignore[attr-defined]
+        self._checkpoint_risk_state()
         self.recorder.close()
-        if not self.raw_stream.closed:
-            self.raw_stream.close()
-        clean = not self.fatal_error and self.ledger.position == 0
+        self.raw_recorder.close()
+        clean = not self.fatal_error and self.ledger.position == 0 and shutdown_reconciled
         self.health.update(
             state="stopped" if clean else "manual_reconciliation_required",
             clean_shutdown=clean,

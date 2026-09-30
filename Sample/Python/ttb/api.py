@@ -170,8 +170,19 @@ class TTBApi:
     def query_margin(self) -> Any:
         return self.module.QUERYMARGIN()
 
-    def query_fills(self) -> Any:
+    def query_positions(self) -> Any:
+        """Return the current open-position report.
+
+        The official TTB manual names the endpoint RESTOREFILLREPORT, but
+        documents it as the inventory/open-position query. Keep the clearer
+        facade name here so recovery code does not mistake it for execution
+        history.
+        """
         return self.module.QUERYRESTOREFILLREPORT()
+
+    def query_fills(self) -> Any:
+        """Backward-compatible alias; new code should use query_positions()."""
+        return self.query_positions()
 
     def query_orders(self) -> Any:
         return self.module.QUERYRESTOREREPORT()

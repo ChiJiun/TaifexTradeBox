@@ -92,6 +92,26 @@ def is_working_order(row: dict[str, Any]) -> bool:
     return bool(order_number(row)) and order_remaining(row) > 0 and not is_terminal_order(row)
 
 
+def reported_position(response: Any, symbol: str) -> int:
+    """Return signed open quantity for symbol from TTB's inventory report."""
+    target = symbol.split(".")[0].upper()
+    total = 0
+    for row in _response_rows(response):
+        hold = int(_float(_value(row, "Hold", "HOLD", "PositionQty", "Qty", default=0)))
+        if hold <= 0:
+            continue
+        for symbol_keys, side_keys in (
+            (("ComdID1", "COMD_ID", "Symbol"), ("ComdBS1", "BS", "Side")),
+            (("ComdID2",), ("ComdBS2",)),
+        ):
+            leg_symbol = str(_value(row, *symbol_keys, default="")).split(".")[0].upper()
+            if not leg_symbol or leg_symbol != target:
+                continue
+            side = _side(_value(row, *side_keys, default=""))
+            total += hold if side == "buy" else -hold
+    return total
+
+
 class OrderGateway(Protocol):
     ledger: PositionLedger
 
@@ -153,6 +173,9 @@ class TTBOrderGateway:
         self.last_poll = 0.0
         self.bootstrapped = False
         self.cancel_requested: set[str] = set()
+        self.reported_position = 0
+        self.position_mismatch_polls = 0
+        self.max_position_mismatch_polls = 3
 
     def before_decision(self, quote: Quote) -> list[Fill]:
         if time.monotonic() - self.last_poll < self.poll_seconds:
@@ -161,6 +184,10 @@ class TTBOrderGateway:
         response = self.api.query_orders()
         if not is_success_response(response):
             raise RuntimeError("Order reconciliation failed")
+        position_response = self.api.query_positions()
+        if not is_success_response(position_response):
+            raise RuntimeError("Position reconciliation failed")
+        self.reported_position = reported_position(position_response, self.config.symbol)
         rows = _response_rows(response)
         if not self.bootstrapped:
             self.preexisting_order_nos = {
@@ -179,8 +206,16 @@ class TTBOrderGateway:
                     "Working orders already exist for this symbol; reconcile manually before startup: "
                     + ", ".join(working)
                 )
+            if self.reported_position:
+                raise RuntimeError(
+                    "Non-flat TTB position exists for this symbol; reconcile manually before startup: "
+                    f"{self.config.symbol} position={self.reported_position}"
+                )
             self.bootstrapped = True
-            LOG.info("TTB order baseline loaded: %s existing order ids ignored", len(self.preexisting_order_nos))
+            LOG.info(
+                "TTB baseline loaded: %s existing order ids ignored; position confirmed flat",
+                len(self.preexisting_order_nos),
+            )
             return []
         fills: list[Fill] = []
         for row in rows:
@@ -221,6 +256,23 @@ class TTBOrderGateway:
             elif self.active.get(side, {}).get("order_no") == order_no:
                 self.active.pop(side, None)
                 self.cancel_requested.discard(order_no)
+
+        if self.reported_position != self.ledger.position:
+            self.position_mismatch_polls += 1
+            LOG.warning(
+                "TTB position mismatch poll=%s/%s reported=%s ledger=%s",
+                self.position_mismatch_polls,
+                self.max_position_mismatch_polls,
+                self.reported_position,
+                self.ledger.position,
+            )
+            if self.position_mismatch_polls >= self.max_position_mismatch_polls:
+                raise RuntimeError(
+                    "TTB position mismatch persisted; reconcile manually "
+                    f"(reported={self.reported_position}, ledger={self.ledger.position})"
+                )
+        else:
+            self.position_mismatch_polls = 0
         return fills
 
     def sync(self, intents: tuple[OrderIntent, ...], quote: Quote) -> None:
@@ -290,8 +342,121 @@ class TTBOrderGateway:
             except Exception:
                 LOG.exception("unable to cancel %s", current)
 
+    def emergency_flatten(self, quote: Quote, timeout_seconds: float = 15.0) -> bool:
+        """Best-effort IOC flatten for an explicitly requested graceful shutdown.
+
+        The broker-reported position is authoritative. Existing working orders
+        are cancelled first; a new opposite-side IOC order is only sent after
+        the order report confirms no working order remains for the symbol.
+        """
+        if not self.bootstrapped or not quote.is_valid():
+            return False
+        self.cancel_all()
+        deadline = time.monotonic() + max(2.0, timeout_seconds)
+        flatten_sent = False
+        while time.monotonic() < deadline:
+            orders_response = self.api.query_orders()
+            position_response = self.api.query_positions()
+            if not is_success_response(orders_response) or not is_success_response(position_response):
+                time.sleep(self.poll_seconds)
+                continue
+            rows = _response_rows(orders_response)
+            working = [
+                order_number(row)
+                for row in rows
+                if (not order_symbol(row) or order_symbol(row) == self.config.symbol.upper())
+                and is_working_order(row)
+            ]
+            self.reported_position = reported_position(position_response, self.config.symbol)
+            if self.reported_position == 0:
+                # Broker position can update before the filled order appears in
+                # the order report. Keep polling until the local ledger sees the
+                # execution too; never send a second flatten while broker is flat.
+                try:
+                    self.last_poll = 0.0
+                    self.before_decision(quote)
+                except RuntimeError as exc:
+                    if "position mismatch" not in str(exc).lower():
+                        raise
+                if self.ledger.position == 0:
+                    return True
+                time.sleep(self.poll_seconds)
+                continue
+            if working:
+                time.sleep(self.poll_seconds)
+                continue
+            if not flatten_sent:
+                side = "sell" if self.reported_position > 0 else "buy"
+                price = quote.bid if side == "sell" else quote.ask
+                response = self.api.new_order(
+                    TTBOrderRequest(
+                        symbol=self.config.symbol,
+                        side=side,
+                        price=price,
+                        quantity=abs(self.reported_position),
+                        time_in_force="2",
+                    )
+                )
+                order_no = extract_order_no(response)
+                if order_no:
+                    self.owned_order_nos.add(order_no)
+                    self.active[side] = {
+                        "order_no": order_no,
+                        "price": price,
+                        "qty": abs(self.reported_position),
+                    }
+                else:
+                    self.pending[side] = {
+                        "intent": OrderIntent(side, price, abs(self.reported_position), "risk_exit", "shutdown flatten"),
+                        "created_at": time.monotonic(),
+                    }
+                flatten_sent = True
+                LOG.warning("shutdown flatten sent side=%s qty=%s price=%s", side, abs(self.reported_position), price)
+            try:
+                self.last_poll = 0.0
+                self.before_decision(quote)
+            except RuntimeError as exc:
+                # Position mismatch is expected briefly while broker reports
+                # transition; any other reconciliation failure remains fatal.
+                if "position mismatch" not in str(exc).lower():
+                    raise
+            time.sleep(self.poll_seconds)
+        return False
+
+    def finalize_shutdown(self, timeout_seconds: float = 10.0) -> bool:
+        """Cancel tracked orders and verify that the TTB account is flat before exit."""
+        self.cancel_all()
+        deadline = time.monotonic() + max(1.0, timeout_seconds)
+        while time.monotonic() < deadline:
+            orders_response = self.api.query_orders()
+            position_response = self.api.query_positions()
+            if not is_success_response(orders_response) or not is_success_response(position_response):
+                time.sleep(self.poll_seconds)
+                continue
+            working = [
+                order_number(row)
+                for row in _response_rows(orders_response)
+                if (not order_symbol(row) or order_symbol(row) == self.config.symbol.upper())
+                and is_working_order(row)
+            ]
+            self.reported_position = reported_position(position_response, self.config.symbol)
+            if not working and not self.pending and self.reported_position == 0 and self.ledger.position == 0:
+                self.active.clear()
+                self.cancel_requested.clear()
+                return True
+            time.sleep(self.poll_seconds)
+        LOG.error(
+            "shutdown reconciliation failed pending=%s reported_position=%s ledger_position=%s",
+            list(self.pending),
+            self.reported_position,
+            self.ledger.position,
+        )
+        return False
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "active": self.active,
             "pending": {side: asdict(value["intent"]) for side, value in self.pending.items()},
+            "reported_position": self.reported_position,
+            "position_mismatch_polls": self.position_mismatch_polls,
         }

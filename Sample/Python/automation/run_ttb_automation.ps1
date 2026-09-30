@@ -12,6 +12,10 @@ $supervisorLog = Join-Path $statusDir 'supervisor.log'
 New-Item -ItemType Directory -Path $statusDir -Force | Out-Null
 
 function Write-SupervisorLog([string]$Message) {
+    if ((Test-Path -LiteralPath $supervisorLog) -and (Get-Item -LiteralPath $supervisorLog).Length -gt 10MB) {
+        $archive = Join-Path $statusDir ('supervisor-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Move-Item -LiteralPath $supervisorLog -Destination $archive -Force
+    }
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
     Add-Content -LiteralPath $supervisorLog -Value $line -Encoding utf8
 }
@@ -34,6 +38,15 @@ if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $con
 Set-Location -LiteralPath $WorkDir
 Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
 Write-SupervisorLog "supervisor starting symbol=$($config.symbol) mode=$($config.mode)"
+$cleanupScript = Join-Path $WorkDir 'automation\cleanup_runtime.ps1'
+if (Test-Path -LiteralPath $cleanupScript) {
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cleanupScript -WorkDir $WorkDir | Out-Null
+        Write-SupervisorLog 'runtime retention cleanup completed'
+    } catch {
+        Write-SupervisorLog "runtime retention cleanup failed: $($_.Exception.Message)"
+    }
+}
 
 while (-not (Test-Path -LiteralPath $stopFile)) {
     if (-not (Get-Process -Name TTB -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $TtbExe)) {
@@ -51,10 +64,14 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         '--symbol', [string]$config.symbol,
         '--mode', [string]$config.mode,
         '--strategy', [string]$config.strategy,
-        '--health-file', (Join-Path $WorkDir 'output\health.json')
+        '--health-file', (Join-Path $WorkDir 'output\health.json'),
+        '--log-file', (Join-Path $statusDir 'bot.log')
     )
     if ($config.mode -eq 'ttb') {
         $botArgs += @('--confirm-virtual-orders', '--confirm-flat-account')
+        if ($config.flattenOnShutdown) {
+            $botArgs += '--flatten-on-shutdown'
+        }
     }
     if ($config.extraArgs) {
         $botArgs += @($config.extraArgs | ForEach-Object { [string]$_ })
