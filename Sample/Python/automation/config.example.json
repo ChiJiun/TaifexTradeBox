@@ -2,6 +2,7 @@
   "symbol": "TMFJ6",
   "mode": "shadow",
   "strategy": "market-maker",
+  "strategyModule": "",
   "confirmVirtualOrders": false,
   "confirmFlatAccount": false,
   "flattenOnShutdown": false,

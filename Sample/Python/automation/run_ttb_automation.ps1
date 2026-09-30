@@ -67,6 +67,9 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         '--health-file', (Join-Path $WorkDir 'output\health.json'),
         '--log-file', (Join-Path $statusDir 'bot.log')
     )
+    if ($config.strategyModule) {
+        $botArgs += @('--strategy-module', [string]$config.strategyModule)
+    }
     if ($config.mode -eq 'ttb') {
         $botArgs += @('--confirm-virtual-orders', '--confirm-flat-account')
         if ($config.flattenOnShutdown) {
@@ -77,7 +80,8 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         $botArgs += @($config.extraArgs | ForEach-Object { [string]$_ })
     }
 
-    Write-SupervisorLog "launching bot mode=$($config.mode)"
+    $strategyName = if ($config.strategyModule) { $config.strategyModule } else { $config.strategy }
+    Write-SupervisorLog "launching bot mode=$($config.mode) strategy=$strategyName"
     $env:PYTHONUTF8 = '1'
     $env:PYTHONIOENCODING = 'utf-8'
     $pythonArgs = @('-3.13') + $botArgs

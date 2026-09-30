@@ -157,7 +157,7 @@ class MyStrategy:
         return StrategyDecision((), features, False, "wait")
 ```
 
-可直接複製 [strategies/moving_average.py](strategies/moving_average.py) 再修改，接著在 `sim_hft_bot.py` 的 `build_strategy()` 登記新名稱。
+可直接複製 [strategies/moving_average.py](strategies/moving_average.py) 再修改。若 class 建構子接受 `(config, ledger)` 並實作 `decide(quote)`，不必修改 runner，可直接用 `--strategy-module your_module:YourStrategy` 載入；Azure `automation/config.json` 也可設定 `"strategyModule": "your_module:YourStrategy"`。內建策略仍可用 `--strategy market-maker|moving-average`。
 
 若是人工測試單一 API，而不是自動策略，可使用型別化介面：
 

@@ -6,6 +6,7 @@ from ttb.api import TTBApi, TTBOrderRequest, extract_order_no
 from ttb.market_data import QuoteMonitor
 from ttb.orders import TTBOrderGateway
 from ttb.probe import OrderProbe, far_limit_price
+from sim_hft_bot import build_strategy, parse_args
 
 
 def quote(last=20_000, received_at=100.0):
@@ -21,6 +22,15 @@ def quote(last=20_000, received_at=100.0):
         exchange_time="09:00:00.000",
         received_at=received_at,
     )
+
+
+class CustomDeployStrategy:
+    def __init__(self, config, ledger):
+        self.config = config
+        self.ledger = ledger
+
+    def decide(self, _quote):
+        raise NotImplementedError
 
 
 class FakeModule:
@@ -298,6 +308,18 @@ class MonitorTests(unittest.TestCase):
 
 
 class ExampleStrategyTests(unittest.TestCase):
+    def test_custom_strategy_module_can_be_loaded_without_editing_runner(self):
+        args = parse_args([
+            "--symbol", "TXFA7",
+            "--strategy-module", "test_ttb_modules:CustomDeployStrategy",
+        ])
+        config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
+        ledger = PositionLedger(config)
+        strategy = build_strategy(args, config, ledger)
+        self.assertIsInstance(strategy, CustomDeployStrategy)
+        self.assertIs(strategy.config, config)
+        self.assertIs(strategy.ledger, ledger)
+
     def test_moving_average_strategy_emits_order_intent(self):
         config = StrategyConfig(symbol="TXFA7", base_qty=1, max_order_qty=1, max_inventory=1)
         strategy = MovingAverageStrategy(config, PositionLedger(config), short_window=2, long_window=3, entry_ticks=0)

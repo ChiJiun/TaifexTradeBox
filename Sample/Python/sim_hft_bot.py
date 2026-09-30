@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 from logging.handlers import RotatingFileHandler
 import signal
@@ -36,6 +37,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--symbol", required=True, help="TTB contract code, e.g. TXFA7")
     parser.add_argument("--mode", choices=("shadow", "ttb"), default="shadow")
     parser.add_argument("--strategy", choices=("market-maker", "moving-average"), default="market-maker")
+    parser.add_argument(
+        "--strategy-module",
+        default="",
+        help="optional custom strategy as module:Class; class must accept (config, ledger) and implement decide(quote)",
+    )
     parser.add_argument("--host", default="http://localhost:8080")
     parser.add_argument("--zmq-port", type=int, default=51141)
     parser.add_argument("--tick-size", type=float, default=1.0)
@@ -158,7 +164,24 @@ def build_config(args: argparse.Namespace) -> StrategyConfig:
     return config
 
 
+def _load_strategy_class(spec: str) -> type[Any]:
+    module_name, separator, class_name = spec.partition(":")
+    if not separator or not module_name.strip() or not class_name.strip():
+        raise ValueError("--strategy-module must use module:Class syntax")
+    module = importlib.import_module(module_name.strip())
+    strategy_class = getattr(module, class_name.strip(), None)
+    if strategy_class is None or not callable(strategy_class):
+        raise ValueError(f"strategy class not found or not callable: {spec}")
+    return strategy_class
+
+
 def build_strategy(args: argparse.Namespace, config: StrategyConfig, ledger: PositionLedger) -> Any:
+    if args.strategy_module:
+        strategy_class = _load_strategy_class(args.strategy_module)
+        strategy = strategy_class(config, ledger)
+        if not callable(getattr(strategy, "decide", None)):
+            raise TypeError(f"custom strategy {args.strategy_module} must implement decide(quote)")
+        return strategy
     if args.strategy == "moving-average":
         return MovingAverageStrategy(
             config,
@@ -220,7 +243,8 @@ def main(argv: list[str] | None = None) -> int:
         risk_state_path=args.risk_state_file,
         flatten_on_shutdown=(args.mode == "ttb" and args.flatten_on_shutdown),
     )
-    engine.health.update(mode=args.mode, strategy=args.strategy)
+    strategy_name = args.strategy_module or args.strategy
+    engine.health.update(mode=args.mode, strategy=strategy_name)
     monitor = QuoteMonitor(api, args.zmq_port, config.symbol, engine.submit)
     status_server = StatusServer(args.status_host, args.status_port, engine.health.snapshot)
 
