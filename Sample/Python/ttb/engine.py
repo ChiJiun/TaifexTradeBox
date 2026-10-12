@@ -461,6 +461,7 @@ class BotEngine:
                     state="error",
                     fatal_error=self.fatal_error,
                     position=self.ledger.position,
+                    active_orders=self.gateway.snapshot(),
                 )
                 self.stop_event.set()
 

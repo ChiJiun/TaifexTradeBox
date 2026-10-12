@@ -176,8 +176,25 @@ class TTBOrderGateway:
         self.reported_position = 0
         self.position_mismatch_polls = 0
         self.max_position_mismatch_polls = 3
+        # Order ownership must be proven by an API-returned order ID; matching
+        # side/price/quantity cannot distinguish a bot order from a manual one.
+        self.unknown_order_nos: set[str] = set()
+        self.unsafe_reason = ""
+
+    def _assert_safe(self) -> None:
+        if self.unsafe_reason:
+            raise RuntimeError(self.unsafe_reason)
+
+    def _latch_unsafe(self, reason: str, order_nos: set[str] | None = None) -> None:
+        if order_nos:
+            self.unknown_order_nos.update(order_nos)
+        if not self.unsafe_reason:
+            self.unsafe_reason = reason
+        LOG.critical("TTB order safety latch: %s", self.unsafe_reason)
+        raise RuntimeError(self.unsafe_reason)
 
     def before_decision(self, quote: Quote) -> list[Fill]:
+        self._assert_safe()
         if time.monotonic() - self.last_poll < self.poll_seconds:
             return []
         self.last_poll = time.monotonic()
@@ -217,6 +234,45 @@ class TTBOrderGateway:
                 len(self.preexisting_order_nos),
             )
             return []
+        # Check the entire report before applying any fills or permitting a
+        # new strategy decision.  Matching price/side/qty is *not* ownership
+        # proof; an operator can place an otherwise identical manual order.
+        unknown_orders: set[str] = set()
+        working_by_side: dict[str, set[str]] = {"buy": set(), "sell": set()}
+        for row in rows:
+            symbol = order_symbol(row)
+            if symbol and symbol != self.config.symbol.upper():
+                continue
+            number = order_number(row)
+            working = order_remaining(row) > 0 and not is_terminal_order(row)
+            if working and not number:
+                self._latch_unsafe("TTB working order has no order number; reconcile manually")
+            if not number:
+                continue
+            if number not in self.owned_order_nos:
+                # Historical terminal orders were present at startup; they are
+                # not evidence of an unexpected live execution.
+                if working or (
+                    number not in self.preexisting_order_nos
+                    and int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0))) > 0
+                ):
+                    unknown_orders.add(number)
+            elif working:
+                side = _side(_value(row, "BS", "Side", "ComdBS1"))
+                working_by_side[side].add(number)
+        if unknown_orders:
+            self._latch_unsafe(
+                "Unowned TTB working/filled order(s); reconcile manually: "
+                + ", ".join(sorted(unknown_orders)),
+                unknown_orders,
+            )
+        for side, numbers in working_by_side.items():
+            if len(numbers) > 1:
+                self._latch_unsafe(
+                    f"Multiple bot-owned working orders on {side}; reconcile manually: "
+                    + ", ".join(sorted(numbers))
+                )
+
         fills: list[Fill] = []
         for row in rows:
             symbol = order_symbol(row)
@@ -230,19 +286,9 @@ class TTBOrderGateway:
             ordered_price = _float(_value(row, "ORDR_PRCE", "Price", default=0))
             ordered_qty = int(_float(_value(row, "VOLM", "OrderQty", default=0)))
             if order_no not in self.owned_order_nos:
-                pending = self.pending.get(side)
-                intent = pending.get("intent") if pending else None
-                matches_pending = (
-                    intent is not None
-                    and ordered_price == intent.price
-                    and (ordered_qty == 0 or ordered_qty == intent.quantity)
-                    and order_no not in self.preexisting_order_nos
-                )
-                if not matches_pending:
-                    continue
-                self.owned_order_nos.add(order_no)
-                self.pending.pop(side, None)
-                LOG.info("TTB BIND %s to order %s", side, order_no)
+                # Other terminal orders are not ours; never infer ownership
+                # from a matching pending intent.
+                continue
             deal_total = int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0)))
             previous = self.seen_deal_qty.get(order_no, 0)
             if deal_total > previous and price > 0:
@@ -276,6 +322,7 @@ class TTBOrderGateway:
         return fills
 
     def sync(self, intents: tuple[OrderIntent, ...], quote: Quote) -> None:
+        self._assert_safe()
         if not self.bootstrapped:
             return
         if any(time.monotonic() - pending["created_at"] > 10 for pending in self.pending.values()):
@@ -318,6 +365,11 @@ class TTBOrderGateway:
             }
         else:
             self.pending[intent.side] = {"intent": intent, "created_at": time.monotonic()}
+            # The order may be live at TTB, but without its ID we cannot
+            # identify it safely or cancel it. Require operator reconciliation.
+            self._latch_unsafe(
+                "TTB accepted an order without a verifiable order number; reconcile manually"
+            )
         LOG.info(
             "TTB NEW %s qty=%s price=%s role=%s response=%s",
             intent.side,
@@ -349,7 +401,7 @@ class TTBOrderGateway:
         are cancelled first; a new opposite-side IOC order is only sent after
         the order report confirms no working order remains for the symbol.
         """
-        if not self.bootstrapped or not quote.is_valid():
+        if not self.bootstrapped or not quote.is_valid() or self.unsafe_reason:
             return False
         self.cancel_all()
         deadline = time.monotonic() + max(2.0, timeout_seconds)
@@ -457,6 +509,8 @@ class TTBOrderGateway:
         return {
             "active": self.active,
             "pending": {side: asdict(value["intent"]) for side, value in self.pending.items()},
+            "unknown_orders": sorted(self.unknown_order_nos),
+            "unsafe_reason": self.unsafe_reason,
             "reported_position": self.reported_position,
             "position_mismatch_polls": self.position_mismatch_polls,
         }
