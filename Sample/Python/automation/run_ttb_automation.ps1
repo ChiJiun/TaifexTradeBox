@@ -34,9 +34,21 @@ if ($config.mode -notin @('shadow', 'ttb')) {
 if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $config.confirmFlatAccount)) {
     throw 'ttb mode requires confirmVirtualOrders=true and confirmFlatAccount=true'
 }
+# A scheduled/logon restart must never override an unresolved live failure.
+# The existing preflight check is not necessarily run by Task Scheduler.
+if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
+    Write-SupervisorLog 'refusing live startup: manual reconciliation flag exists'
+    throw "Refusing live startup until manual reconciliation is completed: $reconcileFlag"
+}
+if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $stopFile)) {
+    Write-SupervisorLog 'refusing live startup: stop request still exists'
+    throw "Refusing live startup while a stop request is present: $stopFile"
+}
 
 Set-Location -LiteralPath $WorkDir
-Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+if ($config.mode -ne 'ttb') {
+    Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+}
 Write-SupervisorLog "supervisor starting symbol=$($config.symbol) mode=$($config.mode)"
 $cleanupScript = Join-Path $WorkDir 'automation\cleanup_runtime.ps1'
 if (Test-Path -LiteralPath $cleanupScript) {
@@ -49,6 +61,10 @@ if (Test-Path -LiteralPath $cleanupScript) {
 }
 
 while (-not (Test-Path -LiteralPath $stopFile)) {
+    if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
+        Write-SupervisorLog 'refusing further live launches: manual reconciliation flag exists'
+        break
+    }
     if (-not (Get-Process -Name TTB -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $TtbExe)) {
         Start-Process -FilePath $TtbExe
         Write-SupervisorLog 'TTB process started; interactive login may still be required'
