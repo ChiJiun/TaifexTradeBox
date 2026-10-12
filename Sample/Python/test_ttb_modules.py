@@ -172,6 +172,100 @@ class ApiTests(unittest.TestCase):
             gateway.before_decision(quote())
 
 
+
+class LiveOwnershipSafetyTests(unittest.TestCase):
+    @staticmethod
+    def setup_gateway():
+        module = FakeModule()
+        config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
+        gateway = TTBOrderGateway(module, config, PositionLedger(config), 0.25)
+        gateway.before_decision(quote())  # establish a flat/empty baseline
+        return module, gateway
+
+    @staticmethod
+    def row(order_no="MANUAL1", symbol="TXFA7", side="1", price="20000", filled="0",
+            remaining="1"):
+        return {
+            "ORDNO": order_no, "COMD_ID": symbol, "BS": side,
+            "ORDR_PRCE": price, "VOLM": "1", "LESS_VOLM": remaining,
+            "DEAL_TOTL": filled,
+            "DEAL_PRCE": price if filled != "0" else "0",
+            "STAT": "委託成功" if remaining != "0" else "完全成交",
+        }
+
+    def poll(self, module, gateway, rows):
+        module.QUERYRESTOREREPORT = lambda: {"Code": "0000", "Data": rows}
+        gateway.last_poll = 0.0
+        return gateway.before_decision(quote())
+
+    def test_new_manual_working_order_is_latched_and_blocks_future_orders(self):
+        module, gateway = self.setup_gateway()
+        with self.assertRaisesRegex(RuntimeError, "Unowned TTB"):
+            self.poll(module, gateway, [self.row()])
+        self.assertEqual(gateway.snapshot()["unknown_orders"], ["MANUAL1"])
+        self.assertTrue(gateway.snapshot()["unsafe_reason"])
+        with self.assertRaisesRegex(RuntimeError, "Unowned TTB"):
+            gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertFalse(any(name == "new" for name, _ in module.calls))
+        self.assertFalse(any(name == "cancel" for name, _ in module.calls))
+
+    def test_identical_manual_order_cannot_bind_to_pending_intent(self):
+        module, gateway = self.setup_gateway()
+        gateway.pending["buy"] = {
+            "intent": OrderIntent("buy", 20000, 1, "entry", "test"),
+            "created_at": 1.0,
+        }
+        with self.assertRaisesRegex(RuntimeError, "Unowned TTB"):
+            self.poll(module, gateway, [self.row(price="20000")])
+        self.assertNotIn("MANUAL1", gateway.owned_order_nos)
+        self.assertIn("buy", gateway.pending)
+
+    def test_order_accepted_without_id_requires_manual_reconciliation(self):
+        module, gateway = self.setup_gateway()
+        module.NEWORDER = lambda payload: {"Code": "0000"}
+        with self.assertRaisesRegex(RuntimeError, "without a verifiable order number"):
+            gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertTrue(gateway.snapshot()["unsafe_reason"])
+        with self.assertRaises(RuntimeError):
+            gateway.sync((), quote())
+
+    def test_known_bot_order_can_be_polled_normally(self):
+        module, gateway = self.setup_gateway()
+        gateway.owned_order_nos.add("OWNED1")
+        self.poll(module, gateway, [self.row(order_no="OWNED1")])
+        self.assertEqual(gateway.active["buy"]["order_no"], "OWNED1")
+        self.assertEqual(gateway.unknown_order_nos, set())
+
+    def test_other_symbol_and_preexisting_terminal_orders_are_ignored(self):
+        module = FakeModule()
+        module.QUERYRESTOREREPORT = lambda: {
+            "Code": "0000",
+            "Data": [self.row(order_no="HISTORIC", remaining="0", filled="1")],
+        }
+        config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
+        gateway = TTBOrderGateway(module, config, PositionLedger(config), 0.25)
+        gateway.before_decision(quote())
+        self.poll(module, gateway, [
+            self.row(order_no="HISTORIC", remaining="0", filled="1"),
+            self.row(order_no="OTHER", symbol="TMFA7"),
+        ])
+        self.assertFalse(gateway.unsafe_reason)
+
+    def test_unowned_filled_order_fails_even_when_no_working_order_remains(self):
+        module, gateway = self.setup_gateway()
+        with self.assertRaisesRegex(RuntimeError, "Unowned TTB"):
+            self.poll(module, gateway, [self.row(remaining="0", filled="1")])
+
+    def test_two_bot_owned_working_orders_on_same_side_fail_closed(self):
+        module, gateway = self.setup_gateway()
+        gateway.owned_order_nos.update({"ONE", "TWO"})
+        with self.assertRaisesRegex(RuntimeError, "Multiple bot-owned working orders"):
+            self.poll(module, gateway, [
+                self.row(order_no="ONE"),
+                self.row(order_no="TWO"),
+            ])
+
+
 class OrderProbeTests(unittest.TestCase):
     def test_far_buy_price_is_below_bid(self):
         self.assertEqual(far_limit_price(quote(), "buy", 1, 2000), 18000)
