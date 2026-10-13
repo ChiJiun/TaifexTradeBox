@@ -16,6 +16,7 @@ from ttb.engine import BotEngine, CsvRecorder
 from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
 from ttb.runtime import SessionSchedule
 from ttb.status_server import StatusServer
+from ttb.risk import PreTradeLimits
 from ttb.orders import (
     ShadowGateway,
     TTBOrderGateway,
@@ -69,6 +70,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--daily-loss-limit", type=float, default=10_000.0)
     parser.add_argument("--max-drawdown", type=float, default=40_000.0)
     parser.add_argument("--poll-seconds", type=float, default=0.5)
+    parser.add_argument("--max-orders-per-minute", type=int, default=20)
+    parser.add_argument("--max-cancels-per-minute", type=int, default=60)
+    parser.add_argument("--max-daily-orders", type=int, default=250)
+    parser.add_argument("--max-notional", type=float, default=0.0,
+                        help="mandatory positive notional ceiling for TTB live entries")
+    parser.add_argument("--available-margin-field", default="",
+                        help="TTB QUERYMARGIN field verified from a real virtual-account fixture")
+    parser.add_argument("--min-available-margin", type=float, default=0.0,
+                        help="mandatory positive margin headroom for TTB live entries")
+    parser.add_argument("--rate-counters-file", type=Path, default=None,
+                        help="durable attempt counter file; defaults to output/rate-counters-SYMBOL.json")
     parser.add_argument("--short-window", type=int, default=5, help="moving-average strategy")
     parser.add_argument("--long-window", type=int, default=20, help="moving-average strategy")
     parser.add_argument("--entry-ticks", type=float, default=0.5, help="moving-average strategy")
@@ -217,10 +229,22 @@ def main(argv: list[str] | None = None) -> int:
 
     api = TTBApi.connect(args.host, args.zmq_port)
     ledger = PositionLedger(config)
+    limits = PreTradeLimits(
+        max_orders_per_minute=args.max_orders_per_minute,
+        max_cancels_per_minute=args.max_cancels_per_minute,
+        max_daily_orders=args.max_daily_orders,
+        max_notional=args.max_notional,
+        minimum_available_margin=args.min_available_margin,
+        available_margin_field=args.available_margin_field,
+    )
+    limits.validate()
     gateway = (
         ShadowGateway(ledger)
         if args.mode == "shadow"
-        else TTBOrderGateway(api, config, ledger, args.poll_seconds)
+        else TTBOrderGateway(
+            api, config, ledger, args.poll_seconds,
+            risk_limits=limits, risk_counters_path=args.rate_counters_file,
+        )
     )
     strategy = build_strategy(args, config, ledger)
     schedule = SessionSchedule(

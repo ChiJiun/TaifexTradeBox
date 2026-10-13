@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import time
+from pathlib import Path
 from dataclasses import asdict
 from typing import Any, Protocol
 
 from strategy_core import Fill, IndependentFillSimulator, OrderIntent, PositionLedger, Quote, StrategyConfig
 
 from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response
+from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, parse_available_margin, validate_exposure
 
 
 LOG = logging.getLogger("ttb.orders")
@@ -158,7 +160,15 @@ class ShadowGateway:
 class TTBOrderGateway:
     """Fail-closed TTB order gateway with one working order per side."""
 
-    def __init__(self, module_or_api: Any, config: StrategyConfig, ledger: PositionLedger, poll_seconds: float) -> None:
+    def __init__(
+        self,
+        module_or_api: Any,
+        config: StrategyConfig,
+        ledger: PositionLedger,
+        poll_seconds: float,
+        risk_limits: PreTradeLimits | None = None,
+        risk_counters_path: Path | None = None,
+    ) -> None:
         self.api = module_or_api if isinstance(module_or_api, TTBApi) else TTBApi(module_or_api)
         # Keep the old public attribute for code that inspected it.
         self.module = self.api.module
@@ -176,6 +186,12 @@ class TTBOrderGateway:
         self.reported_position = 0
         self.position_mismatch_polls = 0
         self.max_position_mismatch_polls = 3
+        self.risk_limits = risk_limits or PreTradeLimits()
+        self.order_rate = DurableOrderRateGuard(
+            risk_counters_path or Path("output") / f"rate-counters-{config.symbol.upper()}.json",
+            config.symbol,
+            self.risk_limits,
+        )
         # Order ownership must be proven by an API-returned order ID; matching
         # side/price/quantity cannot distinguish a bot order from a manual one.
         self.unknown_order_nos: set[str] = set()
@@ -347,6 +363,23 @@ class TTBOrderGateway:
                 self._place(wanted)
 
     def _place(self, intent: OrderIntent) -> None:
+        validate_exposure(intent, self.ledger.position, self.active, self.config, self.risk_limits)
+        now = time.time()
+        if intent.role == "entry":
+            self.order_rate.assert_entry_budget(now)
+            limits = self.risk_limits
+            if limits.minimum_available_margin <= 0 or not limits.available_margin_field:
+                raise PreTradeRiskError(
+                    "live entries require a verified --available-margin-field and --min-available-margin"
+                )
+            margin = parse_available_margin(
+                self.api.query_margin(), limits.available_margin_field
+            )
+            if margin < limits.minimum_available_margin:
+                raise PreTradeRiskError("available TTB margin below required headroom")
+        # Persist the attempt before the network side effect; do not allow a
+        # process restart to reset the rate budget or replay a failed order.
+        self.order_rate.record("order", now)
         request = TTBOrderRequest(
             symbol=self.config.symbol,
             side=intent.side,
@@ -383,9 +416,17 @@ class TTBOrderGateway:
         order_no = current["order_no"]
         if order_no in self.cancel_requested:
             return
+        counter_failure = None
+        try:
+            self.order_rate.record("cancel", time.time())
+        except Exception as exc:
+            counter_failure = exc
+            LOG.critical("unable to persist cancel attempt; still attempting safety cancel: %s", exc)
         self.api.cancel_order(order_no)
         LOG.info("TTB CANCEL %s %s", side, order_no)
         self.cancel_requested.add(order_no)
+        if counter_failure:
+            self._latch_unsafe("rate-counter persistence failed during cancel; manual reconciliation required")
 
     def cancel_all(self) -> None:
         for side, current in list(self.active.items()):
@@ -440,6 +481,7 @@ class TTBOrderGateway:
             if not flatten_sent:
                 side = "sell" if self.reported_position > 0 else "buy"
                 price = quote.bid if side == "sell" else quote.ask
+                self.order_rate.record("order", time.time())
                 response = self.api.new_order(
                     TTBOrderRequest(
                         symbol=self.config.symbol,
@@ -506,6 +548,12 @@ class TTBOrderGateway:
         return False
 
     def snapshot(self) -> dict[str, Any]:
+        try:
+            rate_counters = self.order_rate.snapshot(time.time())
+        except Exception as exc:
+            # An error-reporting path must never raise a second exception and
+            # prevent BotEngine from setting its fail-closed stop_event.
+            rate_counters = {"error": str(exc)}
         return {
             "active": self.active,
             "pending": {side: asdict(value["intent"]) for side, value in self.pending.items()},
@@ -513,4 +561,5 @@ class TTBOrderGateway:
             "unsafe_reason": self.unsafe_reason,
             "reported_position": self.reported_position,
             "position_mismatch_polls": self.position_mismatch_polls,
+            "rate_counters": rate_counters,
         }

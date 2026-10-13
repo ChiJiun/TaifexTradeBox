@@ -174,7 +174,7 @@ Get-Content C:\TTB\Sample\Python\output\supervisor\supervisor.log -Tail 50
 | `error` | 策略／委託流程發生致命錯誤 |
 | `manual_reconciliation_required` | 有未知部位或異常退出，必須人工核對 |
 
-完成 shadow 與委託探測後，才能將 `automation\config.json` 的 `mode` 改為 `ttb`，並同時將 `confirmVirtualOrders`、`confirmFlatAccount` 設為 `true`。live 虛擬交易發生非正常退出時，supervisor 不會自動重啟，而會留下 `manual-reconciliation-required.flag`。**禁止直接刪除此檔**；在 TTB GUI 確認正確帳戶、空倉且沒有未成交單後，以 `py -3.13 reconcile_ttb.py` 唯讀查詢，再依 [Operator Runbook](../Sample/Python/OPERATOR_RUNBOOK.md) 的四項人工確認指令清除旗標。此工具只處理本機旗標，不會下單或自動平倉。
+完成 shadow 與委託探測後，才能將 `automation\config.json` 的 `mode` 改為 `ttb`，並同時將 `confirmVirtualOrders`、`confirmFlatAccount` 設為 `true`。此外，live 入口單必須設定經驗證的 `--max-notional`、`--available-margin-field`、`--min-available-margin`；目前尚無真實 TTB margin response fixture，預設拒絕新增部位。相關設定與計數持久化請參考 [Python 風控說明](../Sample/Python/README.md)。live 虛擬交易發生非正常退出時，supervisor 不會自動重啟，而會留下 `manual-reconciliation-required.flag`。**禁止直接刪除此檔**；在 TTB GUI 確認正確帳戶、空倉且沒有未成交單後，以 `py -3.13 reconcile_ttb.py` 唯讀查詢，再依 [Operator Runbook](../Sample/Python/OPERATOR_RUNBOOK.md) 的四項人工確認指令清除旗標。此工具只處理本機旗標，不會下單或自動平倉。
 
 ### 無人值守限制
 
