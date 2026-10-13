@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from strategies import MovingAverageStrategy
 from strategy_core import OrderIntent, PositionLedger, Quote, StrategyConfig
@@ -6,6 +8,7 @@ from ttb.api import TTBApi, TTBOrderRequest, extract_order_no
 from ttb.market_data import QuoteMonitor
 from ttb.orders import TTBOrderGateway
 from ttb.probe import OrderProbe, far_limit_price
+from ttb.risk import PreTradeLimits
 from sim_hft_bot import build_strategy, parse_args
 
 
@@ -60,7 +63,8 @@ class FakeModule:
         return self._ok("replace_qty", payload)
 
     def QUERYMARGIN(self):
-        return self._ok("margin")
+        self.calls.append(("margin", None))
+        return {"Code": "0000", "Data": [{"Available": "10000000"}]}
 
     def QUERYRESTOREFILLREPORT(self):
         return self._ok("fills")
@@ -91,7 +95,17 @@ class ApiTests(unittest.TestCase):
     def test_gateway_turns_strategy_intent_into_order(self):
         module = FakeModule()
         config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
-        gateway = TTBOrderGateway(module, config, PositionLedger(config), 0.5)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gateway = TTBOrderGateway(
+            module, config, PositionLedger(config), 0.5,
+            risk_limits=PreTradeLimits(
+                max_notional=100000000,
+                available_margin_field="Available",
+                minimum_available_margin=1000,
+            ),
+            risk_counters_path=Path(tmp.name) / "rates.json",
+        )
         gateway.bootstrapped = True
         gateway.sync((OrderIntent("sell", 20_010, 1, "entry", "test"),), quote())
 
@@ -142,7 +156,12 @@ class ApiTests(unittest.TestCase):
         ledger = PositionLedger(config)
         ledger.position = 1
         ledger.average_price = 19_999
-        gateway = TTBOrderGateway(module, config, ledger, 0.01)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gateway = TTBOrderGateway(
+            module, config, ledger, 0.01,
+            risk_counters_path=Path(tmp.name) / "rates.json",
+        )
         gateway.bootstrapped = True
         gateway.reported_position = 1
 
@@ -167,18 +186,32 @@ class ApiTests(unittest.TestCase):
             ],
         }
         config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
-        gateway = TTBOrderGateway(module, config, PositionLedger(config), 0.25)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gateway = TTBOrderGateway(
+            module, config, PositionLedger(config), 0.25,
+            risk_counters_path=Path(tmp.name) / "rates.json",
+        )
         with self.assertRaisesRegex(RuntimeError, "Working orders already exist"):
             gateway.before_decision(quote())
 
 
 
 class LiveOwnershipSafetyTests(unittest.TestCase):
-    @staticmethod
-    def setup_gateway():
+    def setup_gateway(self):
         module = FakeModule()
         config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
-        gateway = TTBOrderGateway(module, config, PositionLedger(config), 0.25)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gateway = TTBOrderGateway(
+            module, config, PositionLedger(config), 0.25,
+            risk_limits=PreTradeLimits(
+                max_notional=100000000,
+                available_margin_field="Available",
+                minimum_available_margin=1000,
+            ),
+            risk_counters_path=Path(tmp.name) / "rates.json",
+        )
         gateway.before_decision(quote())  # establish a flat/empty baseline
         return module, gateway
 
@@ -243,7 +276,12 @@ class LiveOwnershipSafetyTests(unittest.TestCase):
             "Data": [self.row(order_no="HISTORIC", remaining="0", filled="1")],
         }
         config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=1)
-        gateway = TTBOrderGateway(module, config, PositionLedger(config), 0.25)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gateway = TTBOrderGateway(
+            module, config, PositionLedger(config), 0.25,
+            risk_counters_path=Path(tmp.name) / "rates.json",
+        )
         gateway.before_decision(quote())
         self.poll(module, gateway, [
             self.row(order_no="HISTORIC", remaining="0", filled="1"),

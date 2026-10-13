@@ -37,6 +37,22 @@ if (Test-Path -LiteralPath $ConfigPath) {
         if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $config.confirmFlatAccount)) {
             Add-Failure 'ttb mode requires both confirmation flags'
         }
+        if ($config.mode -eq 'ttb') {
+            $extras = @($config.extraArgs | ForEach-Object { [string]$_ })
+            foreach ($name in @('--max-notional', '--min-available-margin')) {
+                $index = [array]::IndexOf($extras, $name)
+                $value = 0.0
+                if ($index -lt 0 -or ($index + 1) -ge $extras.Count -or
+                    -not [double]::TryParse($extras[$index + 1], [ref]$value) -or $value -le 0) {
+                    Add-Failure "ttb mode requires a positive $name in extraArgs"
+                }
+            }
+            $marginFieldIndex = [array]::IndexOf($extras, '--available-margin-field')
+            if ($marginFieldIndex -lt 0 -or ($marginFieldIndex + 1) -ge $extras.Count -or
+                [string]::IsNullOrWhiteSpace($extras[$marginFieldIndex + 1])) {
+                Add-Failure 'ttb mode requires a verified --available-margin-field in extraArgs'
+            }
+        }
     } catch {
         Add-Failure "Config JSON invalid: $($_.Exception.Message)"
     }

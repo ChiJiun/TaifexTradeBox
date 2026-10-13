@@ -64,6 +64,30 @@ py -3.13 sim_hft_bot.py `
 
 **委託所有權防護（#11）**：TTB gateway 會拒絕執行期間新出現、且沒有被 bot 以委託編號識別的 working/filled order（包含手動委託）。即使該委託的方向、價格和數量剛好符合 pending intent，也**不能**據此當成 bot 自己的單。若 `NEWORDER` 成功但沒有回傳可驗證的委託編號，bot 同樣會停機，將 pending 狀態交由人工確認。此限制可能使目前的 TTB API 無法直接無人值守下單；須完成真實回覆格式驗證後再設計安全的 ID correlation，不應直接移除防護。錯誤時健康狀態會包含 `active_orders.unknown_orders` 和 `active_orders.unsafe_reason`。
 
+## Live 下單前風控（#4）
+
+TTB gateway 在送新入口單之前會檢查：
+
+- `--max-orders-per-minute`（預設 20）、`--max-cancels-per-minute`（預設 60；不禁止安全性撤單，但過量後封鎖新的入口）、`--max-daily-orders`（預設 250，台北日曆日）。
+- `--max-inventory`：計入當前部位與雙向工作中委託的最壞淨持倉。
+- `--max-notional`：依商品乘數與委託價估算的名目曝險上限，live 進場**必須明確設定正數**。
+- `--available-margin-field` 與 `--min-available-margin`：從 `QUERYMARGIN()` 的指定欄位確認可用保證金下限；**欄位必須先由真實 TTB 虛擬帳戶的回報驗證，不得猜測**。未提供欄位或回覆格式不確定則拒絕新入口。
+
+次數統計先寫入 `output/rate-counters-SYMBOL.json` 再送 API，正常重啟不會歸零。該檔案**不可人工重設**，也不會被 14 天的 CSV cleanup 移除。持倉風險退出採 reduce-only 驗證，仍允許在超過一般進場速率限制時執行風險退出。`QUERYMARGIN()` 實際欄位語義仍待 #2 端到端驗收確認。
+
+使用 supervisor 切換 `config.json` 為 live 時，`extraArgs` **必須**額外包含（以下全為待人工校準的 placeholder，不能直接用於 live）：
+
+```json
+"extraArgs": [
+  "--base-qty", "1", "--max-order-qty", "1", "--max-inventory", "1",
+  "--max-notional", "<VERIFIED_NOTIONAL_LIMIT>",
+  "--available-margin-field", "<VERIFIED_TTB_FIELD>",
+  "--min-available-margin", "<VERIFIED_MARGIN_HEADROOM>"
+]
+```
+
+未填正數或未能解析欄位時，preflight 或 gateway 將 fail closed。沒有 TTB 實際資料時，不應取消這些檢查來嘗試虛擬 live 交易。
+
 ## 異常中斷與人工對帳
 
 `reconcile_ttb.py` 提供唯讀檢查 TTB 全帳戶（包含不同商品）持倉與未成交單的 CLI：
@@ -124,7 +148,12 @@ Copy-Item automation\config.example.json automation\config.json
   "confirmVirtualOrders": true,
   "confirmFlatAccount": true,
   "flattenOnShutdown": false,
-  "extraArgs": ["--base-qty", "1", "--max-order-qty", "1", "--max-inventory", "1"]
+  "extraArgs": [
+    "--base-qty", "1", "--max-order-qty", "1", "--max-inventory", "1",
+    "--max-notional", "<VERIFIED_NOTIONAL_LIMIT>",
+    "--available-margin-field", "<VERIFIED_TTB_FIELD>",
+    "--min-available-margin", "<VERIFIED_MARGIN_HEADROOM>"
+  ]
 }
 ```
 

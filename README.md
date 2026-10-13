@@ -15,6 +15,7 @@ Sample/Python/
   ttb/health.py             watchdog 使用的原子化健康狀態檔
   ttb/probe.py              遠價 1 口委託／撤單探測器
   ttb/reconciliation.py     全帳戶唯讀對帳與稽核工具核心
+  ttb/risk.py               TTB 委託前風控與跨重啟委託速率計數
   strategies/               可替換的策略範例
   strategy_core.py          策略、microprice、OFI 與模擬成交核心
   sim_hft_bot.py            組合上述模組的命令列入口
@@ -116,6 +117,7 @@ py -3.13 sim_hft_bot.py `
 - 中性訊號時提供雙邊報價；方向訊號時限制入口方向。
 - 首筆成交後只允許減倉，避免無限制馬丁格爾加碼。
 - 固定口數、固定停利停損、時間出場、日損失與最大回撤鎖定。
+- Live TTB 入口單另經過 gateway 級別的 margin、notional、inventory、委託/撤單頻率檢查；實際 `QUERYMARGIN` 欄位未驗證前**不允許啟用新進場**。
 - 行情中斷、未知委託回報或交易時段結束時停止開倉。
 
 詳細規則與限制請閱讀 [Sample/Python/MARKET_MAKER.md](Sample/Python/MARKET_MAKER.md)。
