@@ -26,3 +26,6 @@ logs/
 .serena/
 .DS_Store
 Thumbs.db
+
+# Official manual is downloaded from the publisher; do not re-commit 12 MB PDF.
+期交所「新一代虛擬交易所」教學手冊.pdf
