@@ -1,5 +1,7 @@
 # 動態委託簿做市與蒙地卡羅研究計畫
 
+> **研究方案而非操作手冊。** 部分賽事目標及策略變形仍屬研究假設；已實作的 `replay_market_maker.py`、`monte_carlo_market_maker.py`、`walk_forward_oos.py` 可供離線研究，但不構成經真實 TTB API／競賽帳戶驗收。唯一操作手冊見 [OPERATIONS.md](OPERATIONS.md)。此頁早期 live 示例可能欠缺目前必需的 margin 風控欄位，**不得直接複製執行**。
+
 ## 研究結論先行
 
 期交所新一代虛擬交易所的見價見量模式，會以真實市場成交 tick 的價格與數量判斷成交；每位模擬交易人的委託則獨立與市場比對，交易人之間不互相搶排隊順位。這讓被動限價策略可能取得真實市場沒有的成交優勢，但並不代表任何掛價都會成交，也不代表同一帳戶可無限重複使用同一筆成交量。
@@ -49,18 +51,7 @@ py -3.13 optimize_virtual_competition.py `
 
 `--objective profit` 直接按費後總損益排序；`competition` 會先考慮已知資格與日夏普，再比較總獲利；`sharpe` 可單獨尋找低波動版本。每個行情 CSV 視為一個交易日。
 
-正式執行範例：
-
-```powershell
-py -3.13 sim_hft_bot.py --symbol TXFJ6 --mode ttb `
-  --virtual-max --sizing-mode anti_martingale `
-  --target-ticks 4 --stop-ticks 6 --entry-offset-ticks 0 `
-  --base-qty 1 --max-order-qty 4 --max-inventory 4 `
-  --daily-loss-limit 200000 --max-drawdown 300000 `
-  --confirm-virtual-orders --confirm-flat-account
-```
-
-範例參數只是介面展示；必須由非空的歷史 quote CSV 搜尋後再選用。
+**正式送單命令不在研究計畫提供。** 要評估假設，請使用下方離線回放及 Walk-forward 管線；真實虛擬委託仍需要 #2/#4 驗證及 [OPERATIONS.md](OPERATIONS.md) 規定的人工核對。
 
 官方參考：
 
