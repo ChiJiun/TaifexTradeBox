@@ -80,6 +80,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         '--symbol', [string]$config.symbol,
         '--mode', [string]$config.mode,
         '--strategy', [string]$config.strategy,
+        '--stop-file', $stopFile,
         '--health-file', (Join-Path $WorkDir 'output\health.json'),
         '--log-file', (Join-Path $statusDir 'bot.log')
     )

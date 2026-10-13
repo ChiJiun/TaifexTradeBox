@@ -91,6 +91,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("output") / "runs")
     parser.add_argument("--health-file", type=Path, default=Path("output") / "health.json")
     parser.add_argument("--quote-stale-seconds", type=float, default=5.0)
+    parser.add_argument("--max-exchange-lag-seconds", type=float, default=15.0,
+                        help="maximum allowed broker TickTime delay in live ZMQ stream")
     parser.add_argument(
         "--stale-fatal-seconds",
         type=float,
@@ -104,6 +106,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--after-hours-close", default="05:00")
     parser.add_argument("--disable-after-hours", action="store_true")
     parser.add_argument("--risk-state-file", type=Path, default=Path("output") / "risk-state.json")
+    parser.add_argument("--stop-file", type=Path, default=None,
+                        help="operator stop request file; supervisor passes output/supervisor/stop.requested")
     parser.add_argument("--status-host", default="127.0.0.1")
     parser.add_argument("--log-file", type=Path, default=None)
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
@@ -220,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             "TTB recovery is not automatic: verify a flat account and no orders, then pass --confirm-flat-account"
         )
 
+    if args.max_exchange_lag_seconds <= 0:
+        raise SystemExit("--max-exchange-lag-seconds must be positive")
     config = build_config(args)
     LOG.info(
         "symbol=%s mode=%s strategy=%s target=%s ticks estimated_min_ticks=%s cycle_net_at_40000=%.2f",
@@ -274,7 +280,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     strategy_name = args.strategy_module or args.strategy
     engine.health.update(mode=args.mode, strategy=strategy_name)
-    monitor = QuoteMonitor(api, args.zmq_port, config.symbol, engine.submit)
+    monitor = QuoteMonitor(
+        api, args.zmq_port, config.symbol, engine.submit,
+        max_exchange_lag_seconds=args.max_exchange_lag_seconds,
+        on_status=lambda stats: engine.health.update(market_data=stats),
+    )
     status_server = StatusServer(args.status_host, args.status_port, engine.health.snapshot)
 
     def stop_handler(_signum: int, _frame: Any) -> None:
@@ -289,7 +299,9 @@ def main(argv: list[str] | None = None) -> int:
         monitor.start()
         LOG.info("monitoring %s; press Ctrl+C to stop", config.symbol)
         while not engine.stop_event.wait(1.0):
-            pass
+            if args.stop_file is not None and args.stop_file.exists():
+                LOG.warning("operator stop requested by %s", args.stop_file)
+                engine.stop_event.set()
     finally:
         monitor.close()
         status_server.close()
