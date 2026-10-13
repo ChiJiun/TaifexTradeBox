@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from strategy_core import OrderIntent, StrategyConfig
 from .api import _decoded, is_success_response
@@ -252,3 +252,37 @@ def validate_exposure(
         raise PreTradeRiskError("working order price is invalid")
     if exposure * max_price * config.point_value > limits.max_notional:
         raise PreTradeRiskError("entry exceeds configured max notional")
+
+
+def assess_pretrade(
+    intent: OrderIntent,
+    position: int,
+    active: dict[str, dict[str, Any]],
+    config: StrategyConfig,
+    limits: PreTradeLimits,
+    *,
+    order_rate: DurableOrderRateGuard,
+    now: float,
+    margin_supplier: Callable[[], Any],
+) -> None:
+    """Identical live/offline pre-trade risk policy, with injected margin data.
+
+    The caller is responsible for persisting the order attempt AFTER success
+    and BEFORE the network side effect. `margin_supplier` may be a fake
+    provider in offline research; unknown TTB fields still fail closed.
+    """
+    if intent.quantity > config.max_order_qty:
+        raise PreTradeRiskError("order exceeds configured max_order_qty")
+    validate_exposure(intent, position, active, config, limits)
+    if intent.role != "entry":
+        # Validated reduce-only exits are intentionally not subject to the
+        # entry margin threshold or order-budget exhaustion.
+        return
+    order_rate.assert_entry_budget(now)
+    if not limits.available_margin_field or limits.minimum_available_margin <= 0:
+        raise PreTradeRiskError(
+            "live entries require a verified --available-margin-field and --min-available-margin"
+        )
+    margin = parse_available_margin(margin_supplier(), limits.available_margin_field)
+    if margin < limits.minimum_available_margin:
+        raise PreTradeRiskError("available TTB margin below required headroom")
