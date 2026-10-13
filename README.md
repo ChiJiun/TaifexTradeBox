@@ -14,10 +14,13 @@ Sample/Python/
   ttb/engine.py             可注入策略的執行引擎與 CSV 紀錄
   ttb/health.py             watchdog 使用的原子化健康狀態檔
   ttb/probe.py              遠價 1 口委託／撤單探測器
+  ttb/reconciliation.py     全帳戶唯讀對帳與稽核工具核心
   strategies/               可替換的策略範例
   strategy_core.py          策略、microprice、OFI 與模擬成交核心
   sim_hft_bot.py            組合上述模組的命令列入口
   ttb_order_probe.py        虛擬帳戶下單與撤單 smoke test
+  reconcile_ttb.py          安全檢查帳戶與人工授權清除停機旗標
+  OPERATOR_RUNBOOK.md       事故對帳與復原操作手冊
   automation/               Azure 監督、健康檢查與排程安裝腳本
   replay_market_maker.py    quote CSV 離線回放器
   monte_carlo_market_maker.py 區塊拔靴蒙地卡羅與成交模型比較
@@ -104,7 +107,7 @@ py -3.13 sim_hft_bot.py `
   --confirm-flat-account
 ```
 
-程式中斷、斷線或 VM 重啟後，必須先回 TTB 檢查實際持倉和委託，再重新啟動。live 虛擬委託模式遇到致命錯誤會 fail-closed，不會由 supervisor 無條件重啟，以免重複委託或疊加部位。
+程式中斷、斷線或 VM 重啟後，必須先回 TTB 檢查實際持倉和委託，再重新啟動。live 虛擬委託模式遇到致命錯誤會 fail-closed，不會由 supervisor 無條件重啟，以免重複委託或疊加部位。**不得手動刪除** `manual-reconciliation-required.flag`；請依 [人工對帳操作手冊](Sample/Python/OPERATOR_RUNBOOK.md) 執行 `reconcile_ttb.py`，核對全帳戶後才授權清除。
 
 ## 策略概要
 
