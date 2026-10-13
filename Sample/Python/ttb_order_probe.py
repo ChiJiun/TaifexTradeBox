@@ -30,6 +30,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("output") / "order-probes")
     parser.add_argument("--confirm-virtual-order-probe", action="store_true")
     parser.add_argument("--confirm-flat-account", action="store_true")
+    parser.add_argument("--confirm-bot-stopped", action="store_true",
+                        help="operator verified no bot is actively controlling the GUI account")
+    parser.add_argument("--supervisor-dir", type=Path, default=Path("output/supervisor"))
     return parser.parse_args(argv)
 
 
@@ -40,6 +43,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("probe requires --confirm-virtual-order-probe")
     if not args.confirm_flat_account:
         raise SystemExit("verify no position and no working orders, then pass --confirm-flat-account")
+    if not args.confirm_bot_stopped:
+        raise SystemExit("probe requires --confirm-bot-stopped")
+    for name in ("manual-reconciliation-required.flag", "stop.requested"):
+        if (args.supervisor_dir / name).exists():
+            raise SystemExit(f"probe forbidden while supervisor safety flag exists: {name}")
     api = TTBApi.connect(args.host, args.zmq_port)
     received = threading.Event()
     latest: list[Quote] = []
@@ -79,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         if not result.cancel_confirmed:
             return 2
-        return 0 if result.fill_query_succeeded else 4
+        return 0 if result.position_query_succeeded else 4
     finally:
         monitor.close()
 

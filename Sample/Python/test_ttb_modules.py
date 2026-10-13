@@ -391,7 +391,7 @@ class OrderProbeTests(unittest.TestCase):
         self.assertTrue(result.order_accepted)
         self.assertTrue(result.cancel_accepted)
         self.assertTrue(result.cancel_confirmed)
-        self.assertTrue(result.fill_query_succeeded)
+        self.assertTrue(result.position_query_succeeded)
         self.assertEqual(result.unexpected_fill_quantity, 0)
         self.assertIn(("cancel", {"OrdNo": "A001"}), module.calls)
 
@@ -427,18 +427,17 @@ class OrderProbeTests(unittest.TestCase):
             def QUERYRESTOREFILLREPORT(self):
                 return {"Code": "9999", "ErrMsg": "401 Unauthorized"}
 
-        result = OrderProbe(
-            TTBApi(ProbeModule()),
-            "TXFA7",
-            distance_ticks=2000,
-            ack_timeout=0.1,
-            cancel_timeout=0.1,
-            poll_seconds=0.01,
-        ).run(quote())
-        self.assertTrue(result.cancel_confirmed)
-        self.assertFalse(result.fill_query_succeeded)
-        self.assertEqual(result.unexpected_fill_quantity, 0)
-        self.assertIn("verification failed", result.message)
+        module = ProbeModule()
+        with self.assertRaisesRegex(RuntimeError, "success code"):
+            OrderProbe(
+                TTBApi(module),
+                "TXFA7",
+                distance_ticks=2000,
+                ack_timeout=0.1,
+                cancel_timeout=0.1,
+                poll_seconds=0.01,
+            ).run(quote())
+        self.assertFalse(any(name == "new" for name, _ in module.calls))
 
 
 class MonitorTests(unittest.TestCase):
