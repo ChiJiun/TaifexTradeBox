@@ -28,6 +28,7 @@ $requiredFiles = @(
     'OPERATIONS.md',
     'MARKET_MAKER.md',
     'automation\check_docs_consistency.py',
+    'automation\check_binary_integrity.py',
     'requirements.txt',
     'ttb\api.py',
     'ttb\engine.py',
@@ -100,6 +101,9 @@ try {
 
         & py.exe -3.13 -m automation.check_docs_consistency *> $null
         Add-Check 'docs-consistency' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 -m automation.check_binary_integrity *> $null
+        Add-Check 'runtime-binary-snapshot' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
         if (-not $SkipUnitTests) {
             & py.exe -3.13 -m unittest discover -q

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "snapshot_recorded_date": "2026-10-13",
+  "provenance_status": "unverified_repository_snapshot",
+  "provenance_note": "Hashes lock currently checked-in artifacts only. The original official download channel, license and TTB/TTBHelp compatibility have not been independently authenticated. TTB.exe is unsigned (Authenticode NotSigned).",
+  "artifacts": [
+    {
+      "path": "TTB.exe",
+      "type": "windows-executable",
+      "size_bytes": 2246331,
+      "sha256": "dadd75b8da8989c7a46ab4de54d445f170d14e224949a5520128905f1c1d3d81",
+      "observed_file_version": "2025.11.27.1900",
+      "observed_authenticode_status": "NotSigned",
+      "provenance_status": "unverified",
+      "deployment_required": true
+    },
+    {
+      "path": "Sample/Python/TTBHelp.pyc",
+      "type": "python-bytecode",
+      "size_bytes": 7685,
+      "sha256": "431236e5fa04ce769a77fecda96a9aeabe32ad343d40265b56e10004fcf072cc",
+      "pyc_magic_hex": "f30d0d0a",
+      "python_minor": "3.13",
+      "provenance_status": "unverified",
+      "deployment_required": true
+    }
+  ],
+  "reference_files": [
+    {
+      "path": "Sample/VBA/Sample.xlsm",
+      "size_bytes": 70924,
+      "sha256": "145263dbc25bb6f502ca39c6426595d740f9a50e006e9b2e194ecd8aeda8fb37",
+      "purpose": "non-runtime VBA sample; preserve separately and inspect macros before opening"
+    }
+  ]
+}

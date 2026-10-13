@@ -16,6 +16,26 @@ if (-not (Test-Path -LiteralPath $WorkDir)) { Add-Failure "WorkDir missing: $Wor
 if (-not (Test-Path -LiteralPath $ConfigPath)) { Add-Failure "Config missing: $ConfigPath" }
 if (-not (Test-Path -LiteralPath $TtbExe)) { Add-Failure "TTB executable missing: $TtbExe" }
 
+# Fail closed on an unexpected TTB.exe/TTBHelp.pyc pair. A matching hash
+# proves only equivalence to the reviewed repository snapshot, NOT official
+# publisher provenance or a safe TTB GUI session.
+if (Test-Path -LiteralPath $WorkDir) {
+    $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $WorkDir '..\..'))
+    try {
+        Push-Location $WorkDir
+        & py.exe -3.13 -m automation.check_binary_integrity --root $repoRoot *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Add-Failure 'TTB binary SHA256/magic mismatch or missing manifest; refuse startup'
+        } else {
+            Add-Warning 'TTB snapshot hashes match but official provenance/compatibility is NOT authenticated'
+        }
+    } catch {
+        Add-Failure "TTB binary integrity validation failed: $($_.Exception.Message)"
+    } finally {
+        Pop-Location
+    }
+}
+
 $python = Get-Command py.exe -ErrorAction SilentlyContinue
 if (-not $python) {
     Add-Failure 'py.exe not found'

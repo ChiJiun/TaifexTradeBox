@@ -212,5 +212,5 @@ CI 成功**不能取代** TTB 虛擬帳戶的人工驗證（[#2](https://github.
 - [動態做市與蒙地卡羅計畫](Sample/Python/DYNAMIC_MARKET_MAKING_PLAN.md)
 - [原有策略說明](Sample/Python/STRATEGY.md)
 - [TTB 單一操作手冊](Sample/Python/OPERATIONS.md)：啟動、風控、異常、恢復及操作檢查
-- [Azure 部署說明](azure/README.md)
+- [Azure 部署說明](azure/README.md)（含 TTB.exe/TTBHelp.pyc 完整性快照與人工升級流程）
 - [RDP 白名單管理腳本](azure/Set-TtbRdpAllowlist.ps1)：查核或限制 Azure NSG 3389 至管理端目前 IPv4
