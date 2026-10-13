@@ -83,6 +83,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="mandatory positive margin headroom for TTB live entries")
     parser.add_argument("--rate-counters-file", type=Path, default=None,
                         help="durable attempt counter file; defaults to output/rate-counters-SYMBOL.json")
+    parser.add_argument("--journal-dir", type=Path, default=None,
+                        help="append-only execution journal partitioned by trading day, defaults to output/journal")
     parser.add_argument("--short-window", type=int, default=5, help="moving-average strategy")
     parser.add_argument("--long-window", type=int, default=20, help="moving-average strategy")
     parser.add_argument("--entry-ticks", type=float, default=0.5, help="moving-average strategy")
@@ -246,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         else TTBOrderGateway(
             api, config, ledger, args.poll_seconds,
             risk_limits=limits, risk_counters_path=args.rate_counters_file,
+            journal_dir=args.journal_dir,
         )
     )
     strategy = build_strategy(args, config, ledger)

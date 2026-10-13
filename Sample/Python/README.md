@@ -96,6 +96,14 @@ TTB gateway 在送新入口單之前會檢查：
 
 未填正數或未能解析欄位時，preflight 或 gateway 將 fail closed。沒有 TTB 實際資料時，不應取消這些檢查來嘗試虛擬 live 交易。
 
+## Durable Execution Journal（#5）
+
+虛擬委託模式會把 `order_intent`、`order_ack`、`cancel_intent`、`cancel_ack`、broker 委託/部位摘要、`fill`、風控 halt 變化和 shutdown 寫進 `output/journal/events-SYMBOL-YYYY-MM-DD.jsonl`。每筆事件含序號及雜湊鏈，寫入後 `fsync`；成交**先寫入 journal，再更新 ledger**。報告沒有變動則不重複寫入。
+
+異常重啟後會驗證現有事件檔完整性，並透過當日 `fill` 重建成交口數、已實現損益、交易成本及累積成交量。若 journal 顯示未平倉、snapshot 包含 journal 沒有的成交、或事件檔截斷/損毀，會拒絕啟動並要求人工對帳；不會因重啟默默重置損失限制。Journal 為 append-only 按風控交易日分檔，不會由既有 14 天 runtime cleanup 自動刪除。請另設受控備份與保留期限，不要手動編輯或清除 journal。可用 `--journal-dir` 指定路徑。
+
+**限制**：此功能不等同真實 TTB 帳戶身分已驗證，事故後仍須先完成 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md)；無法用 journal 推定失去委託編號的單屬於 bot。新版本首次部署前，若已經發生交易但沒有舊版 journal，將因 checkpoint 不一致而拒絕直接啟動，應先人工核對。
+
 ## 異常中斷與人工對帳
 
 `reconcile_ttb.py` 提供唯讀檢查 TTB 全帳戶（包含不同商品）持倉與未成交單的 CLI：
