@@ -31,6 +31,15 @@ jobs:
         run: python -m compileall -q .
       - name: Accelerated 48-hour offline shadow soak
         run: python -m automation.soak_offline --hours 48 --interval-minutes 10
+      - name: Walk-forward synthetic smoke (must fail readiness gate)
+        shell: pwsh
+        run: |
+          python -m walk_forward_oos --symbol TMFJ6 --synthetic-days 8 --quotes-per-day 36 --fee-per-fill 20 --tax-rate 0.00002 --slippage-ticks 1 --mc-trials 2 --target-ticks 4,6 --half-width-ticks 2,4 --output output/research/ci-synthetic-walkforward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = Get-Content output/research/ci-synthetic-walkforward.json -Raw | ConvertFrom-Json
+          if ($result.production_research_gate_pass -or $result.verified_real_source -or -not (Test-Path output/research/ci-synthetic-walkforward.md)) {
+            throw "Synthetic data must never pass research readiness"
+          }
       - name: Validate CLI
         run: python sim_hft_bot.py --help
       - name: Parse automation PowerShell scripts

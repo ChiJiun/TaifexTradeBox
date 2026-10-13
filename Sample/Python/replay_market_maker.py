@@ -6,9 +6,12 @@ import argparse
 import csv
 import json
 import math
+from collections import deque
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Iterable
+
+from ttb.contracts import point_value_for
 
 from strategy_core import (
     FillModel,
@@ -68,6 +71,16 @@ def replay(
     inventory_seconds = 0.0
     cycle_start_pnl: float | None = None
     cycle_pnls: list[float] = []
+    observed_hold_seconds: list[float] = []
+    submitted_order_ids: set[str] = set()
+    filled_order_ids: set[str] = set()
+    drift_horizons = (1, 2, 5, 10)
+    # A deque per horizon is O(quotes + fills); each drift is evaluated on
+    # the FIRST future quote at or after the required horizon.
+    drift_pending: dict[int, deque[tuple[float, int, float, int]]] = {
+        horizon: deque() for horizon in drift_horizons
+    }
+    drift_values: dict[int, list[float]] = {horizon: [] for horizon in drift_horizons}
 
     for row in rows:
         quote = _quote_from_row(row)
@@ -82,20 +95,40 @@ def replay(
             duration += elapsed
             inventory_seconds += abs(ledger.position) * elapsed
         previous_time = quote.received_at
+        for horizon in drift_horizons:
+            pending = drift_pending[horizon]
+            while pending and pending[0][0] <= quote.received_at:
+                _deadline, signed, fill_mid, qty = pending.popleft()
+                drift_values[horizon].append(
+                    signed * (quote.mid - fill_mid) * config.point_value * qty
+                )
 
         for fill in simulator.on_quote(quote):
+            filled_order_ids.add(fill.order_id)
+            signed = 1 if fill.side == "buy" else -1
+            for horizon in drift_horizons:
+                drift_pending[horizon].append(
+                    (quote.received_at + horizon, signed, quote.mid, fill.quantity)
+                )
             old_position = ledger.position
+            previous_opened_at = ledger.opened_at
             if old_position == 0:
                 cycle_start_pnl = ledger.realized_pnl
             ledger.on_fill(fill)
             if old_position != 0 and ledger.position == 0 and cycle_start_pnl is not None:
                 cycle_pnls.append(ledger.realized_pnl - cycle_start_pnl)
+                if previous_opened_at:
+                    observed_hold_seconds.append(max(0.0, quote.received_at - previous_opened_at))
                 cycle_start_pnl = None
 
         decision = strategy.decide(quote)
         simulator.sync(decision.intents, quote.received_at, quote)
+        submitted_order_ids.update(order.order_id for order in simulator.orders.values())
         liquidation = quote.bid if ledger.position > 0 else quote.ask
         equity = ledger.mark_to_market(liquidation)
+        # Marked-to-market risk includes already incurred execution slippage,
+        # even when a position is held or the final fill has just flattened.
+        equity -= ledger.fill_count * config.slippage_ticks * config.tick_value
         if ledger.position:
             equity -= abs(ledger.position) * (
                 config.fee_per_fill
@@ -123,6 +156,14 @@ def replay(
             + config.slippage_ticks * config.tick_value
         )
     marked_equity = raw_marked_equity - estimated_exit_cost
+    slippage_cost = ledger.fill_count * config.slippage_ticks * config.tick_value
+    net_marked_equity = marked_equity - slippage_cost
+    net_realized = ledger.realized_pnl - slippage_cost
+    sorted_holds = sorted(observed_hold_seconds)
+    p95_hold = (
+        sorted_holds[min(len(sorted_holds) - 1, math.ceil(0.95 * len(sorted_holds)) - 1)]
+        if sorted_holds else None
+    )
     return {
         "quotes": count,
         "filled_contracts": ledger.fill_count,
@@ -131,12 +172,32 @@ def replay(
         "average_cycle_net": sum(cycle_pnls) / len(cycle_pnls) if cycle_pnls else None,
         "profit_factor": gains / losses if losses > 0 else None,
         "realized_net": ledger.realized_pnl,
+        "net_realized_after_slippage": net_realized,
+        "slippage_cost": slippage_cost,
         "fees_tax": ledger.fees_and_tax,
         "open_position": ledger.position,
         "raw_marked_equity": raw_marked_equity,
         "estimated_exit_cost": estimated_exit_cost,
         "marked_equity": marked_equity,
+        "net_marked_equity": net_marked_equity,
         "cumulative_return": marked_equity / initial_capital if initial_capital else None,
+        "net_cumulative_return": net_marked_equity / initial_capital if initial_capital else None,
+        "submitted_orders": len(submitted_order_ids),
+        "filled_orders": len(filled_order_ids),
+        "order_fill_rate": len(filled_order_ids) / len(submitted_order_ids) if submitted_order_ids else None,
+        "inventory_hold_seconds_p95": p95_hold,
+        "inventory_hold_samples": len(observed_hold_seconds),
+        "open_inventory_seconds_at_end": max(0.0, quote.received_at - ledger.opened_at) if quote and ledger.position and ledger.opened_at else 0.0,
+        "adverse_selection": {
+            str(horizon): {
+                "samples": len(drift_values[horizon]),
+                "mean_signed_mid_drift_ntd": (
+                    sum(drift_values[horizon]) / len(drift_values[horizon])
+                    if drift_values[horizon] else None
+                ),
+            }
+            for horizon in drift_horizons
+        },
         "max_marked_drawdown": drawdown,
         "inventory_unit_seconds": inventory_seconds,
         "inventory_exposure_ratio": inventory_seconds / duration if duration > 0 else 0.0,
@@ -173,7 +234,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--initial-capital", type=float)
     parser.add_argument("--tick-size", type=float, default=1.0)
-    parser.add_argument("--point-value", type=float, default=200.0)
+    parser.add_argument("--point-value", type=float, default=None,
+                        help="auto-resolve TXF=200, MTX=50, TMF=10 NTD/point; unknown symbols require explicit value")
     parser.add_argument("--fee-per-fill", type=float, default=100.0)
     parser.add_argument("--tax-rate", type=float, default=0.00002)
     parser.add_argument("--target-ticks", type=int, default=8)
@@ -201,7 +263,7 @@ def main() -> int:
     config = StrategyConfig(
         symbol=args.symbol.upper(),
         tick_size=args.tick_size,
-        point_value=args.point_value,
+        point_value=point_value_for(args.symbol, args.point_value),
         fee_per_fill=args.fee_per_fill,
         tax_rate=args.tax_rate,
         target_ticks=args.target_ticks,

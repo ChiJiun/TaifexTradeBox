@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from replay_market_maker import MODEL_NOTES, replay
+from ttb.contracts import point_value_for
 from strategy_core import FillModel, Quote, StrategyConfig
 
 
@@ -239,7 +240,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--initial-capital", type=float)
     parser.add_argument("--tick-size", type=float, default=1.0)
-    parser.add_argument("--point-value", type=float, default=200.0)
+    parser.add_argument("--point-value", type=float, default=None,
+                        help="auto-resolve TXF=200, MTX=50, TMF=10 NTD/point; unknown symbols require explicit value")
     parser.add_argument("--fee-per-fill", type=float, default=100.0)
     parser.add_argument("--tax-rate", type=float, default=0.00002)
     parser.add_argument("--target-ticks", type=int, default=8)
@@ -278,7 +280,7 @@ def main() -> int:
     config = StrategyConfig(
         symbol=args.symbol.upper(),
         tick_size=args.tick_size,
-        point_value=args.point_value,
+        point_value=point_value_for(args.symbol, args.point_value),
         fee_per_fill=args.fee_per_fill,
         tax_rate=args.tax_rate,
         target_ticks=args.target_ticks,

@@ -19,6 +19,7 @@ from typing import Any, Iterable
 
 from monte_carlo_market_maker import synthetic_quotes
 from replay_market_maker import replay
+from ttb.contracts import point_value_for
 from strategy_core import SizingMode, StrategyConfig
 
 
@@ -302,7 +303,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-quantities", default="1,4,8")
     parser.add_argument("--max-sizing-step", type=int, default=4)
     parser.add_argument("--tick-size", type=float, default=1.0)
-    parser.add_argument("--point-value", type=float, default=200.0)
+    parser.add_argument("--point-value", type=float, default=None,
+                        help="auto-resolve TXF=200, MTX=50, TMF=10 NTD/point; unknown symbols require explicit value")
     parser.add_argument("--fee-per-fill", type=float, default=100.0)
     parser.add_argument("--tax-rate", type=float, default=0.00002)
     parser.add_argument("--slippage-ticks", type=float, default=0.0)
@@ -349,7 +351,7 @@ def main() -> int:
     base = StrategyConfig(
         symbol=args.symbol.upper(),
         tick_size=args.tick_size,
-        point_value=args.point_value,
+        point_value=point_value_for(args.symbol, args.point_value),
         fee_per_fill=args.fee_per_fill,
         tax_rate=args.tax_rate,
         slippage_ticks=args.slippage_ticks,

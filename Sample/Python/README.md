@@ -72,6 +72,48 @@ TTB 下單前對帳回覆缺少 `Data`、委託剩餘量/持倉口數缺失、�
 
 **真實 TTB API 的完整回覆格式仍待 #2 核實**；保守拒絕不代表已完成真實帳戶驗收。
 
+## Walk-forward／Out-of-sample 研究驗收（#8）
+
+以 `walk_forward_oos.py` 一次執行嚴格日期切分、expanding-window Walk-forward、三種成交模型、區塊 bootstrap 蒙地卡羅、費稅滑價與未平倉退出成本、1／2／5／10 秒 signed mid-price drift、參數鄰域敏感度及固定的 acceptance gates。最後的 Holdout 日期**從不參與選參數或敏感度排名**。產出 JSON（CI/agent）與 Markdown（人工審查）。
+
+先做不連線也不會送單的 smoke test：
+
+```powershell
+cd Sample/Python
+py -3.13 walk_forward_oos.py --symbol TMFJ6 `
+  --synthetic-days 8 --quotes-per-day 36 `
+  --fee-per-fill 20 --tax-rate 0.00002 --slippage-ticks 1 `
+  --target-ticks 4,6 --half-width-ticks 2,4 `
+  --mc-trials 5 --output output/research/synthetic-walkforward
+```
+
+合成資料的 `production_research_gate_pass` **永遠是 false**，即使參數碰巧獲利。使用真實報價：
+
+```powershell
+py -3.13 walk_forward_oos.py output/runs `
+  --symbol TMFJ6 --fee-per-fill <VERIFIED_FEE> `
+  --tax-rate <VERIFIED_TAX_RATE> --slippage-ticks <VERIFIED_SLIPPAGE> `
+  --holdout-days 2 --initial-train-days 3 `
+  --source-manifest <OPERATOR_VERIFIED_MANIFEST.json> `
+  --output output/research/tmf-walkforward
+```
+
+輸入 CSV 必須命名 `quotes-YYYYMMDD[-session].csv`，至少六個**不同日期**且每個日期只有一份資料；若同一天有多段紀錄，必須先校正並人工合併，不得跨日隨機拆分。需要人工核對的來源 manifest 格式：
+
+```json
+{
+  "source": "verified_ttb_quotes",
+  "trading_day_reconciled": true,
+  "reviewer": "OPERATOR_NAME",
+  "reviewed_at": "YYYY-MM-DD",
+  "files": {"quotes-YYYYMMDD-HHMMSS.csv": "<ACTUAL_FILE_SHA256>"}
+}
+```
+
+其中 `files` 必須列出本次全部輸入檔案的真實 SHA256。**不得自動為合成資料產生假「verified」manifest**。此檔只證明有人聲明核對且檔案未被修改，程式無法獨立確認交易所來源真實性。沒有 manifest 或缺少完整成交日、盈虧、費率、滑價等資料，報告仍可產生，但不可通過研究驗收。
+
+內建門檻：留存期至少 100 次平倉循環、費後損益正值、正確持倉結束、回撤不超過 30 萬元、最差單日不低於負 20 萬元、任何單日不獨占超過 50% 正報酬、成交率至少 1%、`probabilistic` Monte Carlo 虧損率不高於 10%。CLI 只允許**加嚴**這些限制。Sharpe 報告為「未年化日 Sharpe」，不得直接視為年化值。三種成交模型不是 broker 實際成交承諾；研究驗收也**不是自動下單核准**，仍須 #2/#4 真實 API/保證金與帳戶人工驗收。
+
 ## 24/7 加速故障測試（#10）
 
 離線測試完全使用 `ShadowGateway`，不載入 TTB GUI 或向交易 API 下單：
