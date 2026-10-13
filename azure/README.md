@@ -66,7 +66,19 @@ OS：Windows Server 2022 Gen2
 固定公網 IP：20.189.93.22
 ```
 
-目前 RDP NSG 規則因管理端 IP 經常變更而暫時允許所有來源（`*`）。這能避免換網路後被擋，但會讓 3389 暴露在公網；請使用高強度密碼與 NLA，並盡快改用 Bastion、Tailscale 或 JIT。管理員密碼不記錄在 repo。
+**2026-10-13 安全更新：**已以 Azure CLI 實際將 `ttb-sim-01-nsg` 中的 `Allow-RDP-From-Home` TCP/3389 來源從 `*` 收緊為當前管理端出口 IPv4 的 `/32`，更新後透過 Azure 查詢確認，從相同管理端測試 TCP 3389 可連通。此來源可能因行動網路、VPN 或切換 Wi-Fi 而變更。
+
+管理端 IP 變更時，請先在具 Azure CLI 登入權限的 PowerShell 執行：
+
+```powershell
+# 唯讀：預覽目前白名單與本機公網 IPv4
+powershell -ExecutionPolicy Bypass -File azure\Set-TtbRdpAllowlist.ps1
+
+# 實際更新：將 RDP 限制為當前 IPv4 /32
+powershell -ExecutionPolicy Bypass -File azure\Set-TtbRdpAllowlist.ps1 -Apply
+```
+
+如無法進行 RDP，仍可透過 Azure Portal 或 `az network nsg rule update` 修改白名單，無需先登入 VM。不要為了方便連線將來源改回 `*` 或 `0.0.0.0/0`；長期建議改用 Bastion、Tailscale 或 JIT。管理員密碼不記錄在 repo。
 
 ```powershell
 mstsc /v:20.189.93.22

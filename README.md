@@ -150,7 +150,7 @@ VM：ttb-sim-01
 規格：Standard_B2as_v2
 系統：Windows Server 2022
 固定公網 IP：20.189.93.22
-RDP 來源限制：目前為所有來源（`*`，風險較高，應改用 Bastion/Tailscale/JIT）
+RDP 來源限制：2026-10-13 已改為管理端目前出口 IPv4 的 `/32`；變更網路時請先更新 Azure NSG 白名單，禁止改回 `*`
 ```
 
 RDP 連線：
@@ -212,3 +212,4 @@ CI 成功**不能取代** TTB 虛擬帳戶的人工驗證（[#2](https://github.
 - [動態做市與蒙地卡羅計畫](Sample/Python/DYNAMIC_MARKET_MAKING_PLAN.md)
 - [原有策略說明](Sample/Python/STRATEGY.md)
 - [Azure 部署說明](azure/README.md)
+- [RDP 白名單管理腳本](azure/Set-TtbRdpAllowlist.ps1)：查核或限制 Azure NSG 3389 至管理端目前 IPv4
