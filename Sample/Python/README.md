@@ -72,6 +72,21 @@ TTB 下單前對帳回覆缺少 `Data`、委託剩餘量/持倉口數缺失、�
 
 **真實 TTB API 的完整回覆格式仍待 #2 核實**；保守拒絕不代表已完成真實帳戶驗收。
 
+## 24/7 加速故障測試（#10）
+
+離線測試完全使用 `ShadowGateway`，不載入 TTB GUI 或向交易 API 下單：
+
+```powershell
+cd Sample/Python
+py -3.13 -m automation.soak_offline --hours 48 --interval-minutes 10
+```
+
+固定日期從 2026-10-13 開始，以虛擬時鐘模擬 48 小時，涵蓋日盤、夜盤、休市及午夜切換，每 10 分鐘送入一筆有效行情，檢查 quote/decision CSV 每日輪替和行數、持倉仍為零，並輸出 Python traced heap 峰值、保留量、輸出檔總位元組和執行秒數。此測試已加入 GitHub Actions，超過檔案/記憶體門檻或資料遺失會使 CI 失敗。
+
+`test_soak_faults.py` 另注入行情寫入及健康檔同時失敗、交易 Journal 寫入失敗、並行 HTTP status 查詢、以及 `/readyz` 對行情過期／暫停的拒絕。Worker 當機時保證 `stop_event` 設置，外部 supervisor 才能察覺錯誤並執行既有 fail-closed 流程。
+
+**限制**：48 小時指的是加速市場時鐘，不是實際連續運行 48 小時；報價負載與 Windows 真正開機登入、TTB GUI 斷線及 broker 競態無法只靠此測試保證。#10 尚需實際 VM soak、完整 supervisor 故障注入與資源監測證據。
+
 ## 交易日曆與契約到期（#6）
 
 `ttb/calendar.py` 支援官方公告的開休市日及 TXF／MTX／TMF 契約月碼 `A`～`L`、年份個位數。2026 年日曆在 [automation/taifex_calendar_2026.json](automation/taifex_calendar_2026.json)，來源為[期交所 115 年開休市公告](https://www.taifex.com.tw/file/taifex/CHINESE/11/attach/台期交字第1140003036號函.pdf)。此檔只涵蓋 2026 年，不能預設適用 2027 年；公告若修改，須先更新並複核。

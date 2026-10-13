@@ -29,6 +29,8 @@ jobs:
         run: python -m unittest discover -v
       - name: Compile Python modules
         run: python -m compileall -q .
+      - name: Accelerated 48-hour offline shadow soak
+        run: python -m automation.soak_offline --hours 48 --interval-minutes 10
       - name: Validate CLI
         run: python sim_hft_bot.py --help
       - name: Parse automation PowerShell scripts

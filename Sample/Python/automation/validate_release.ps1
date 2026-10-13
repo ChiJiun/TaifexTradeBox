@@ -19,6 +19,7 @@ $requiredFiles = @(
     'reconcile_ttb.py',
     'ttb_readonly_capture.py',
     'ttb_order_probe.py',
+    'automation\soak_offline.py',
     'OPERATOR_RUNBOOK.md',
     'requirements.txt',
     'ttb\api.py',

@@ -165,7 +165,7 @@ class BotEngine:
         self.recorder = CsvRecorder(output)
         self.queue: queue.Queue[Quote] = queue.Queue(maxsize=20_000)
         self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._run, name="strategy-engine", daemon=True)
+        self.thread = threading.Thread(target=self._run_guarded, name="strategy-engine", daemon=True)
         self.last_decision_at = 0.0
         self.last_quote: Quote | None = None
         self.started_at = time.monotonic()
@@ -435,6 +435,22 @@ class BotEngine:
             snapshot,
         )
         return decision
+
+    def _run_guarded(self) -> None:
+        # Even disk-full failures in the health reporter must stop the main
+        # process. Otherwise the worker thread can die while main() waits
+        # forever on an event that was never set.
+        try:
+            self._run()
+        except BaseException as exc:
+            self.fatal_error = self.fatal_error or f"uncaught strategy worker failure: {exc}"
+            LOG.exception("strategy worker crashed; forcing fail-closed shutdown")
+            try:
+                self.health.update(state="error", fatal_error=self.fatal_error)
+            except Exception:
+                LOG.exception("cannot persist failure to health file")
+            finally:
+                self.stop_event.set()
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
