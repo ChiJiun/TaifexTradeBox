@@ -64,6 +64,24 @@ py -3.13 sim_hft_bot.py `
 
 **委託所有權防護（#11）**：TTB gateway 會拒絕執行期間新出現、且沒有被 bot 以委託編號識別的 working/filled order（包含手動委託）。即使該委託的方向、價格和數量剛好符合 pending intent，也**不能**據此當成 bot 自己的單。若 `NEWORDER` 成功但沒有回傳可驗證的委託編號，bot 同樣會停機，將 pending 狀態交由人工確認。此限制可能使目前的 TTB API 無法直接無人值守下單；須完成真實回覆格式驗證後再設計安全的 ID correlation，不應直接移除防護。錯誤時健康狀態會包含 `active_orders.unknown_orders` 和 `active_orders.unsafe_reason`。
 
+## 異常中斷與人工對帳
+
+`reconcile_ttb.py` 提供唯讀檢查 TTB 全帳戶（包含不同商品）持倉與未成交單的 CLI：
+
+```powershell
+py -3.13 reconcile_ttb.py
+```
+
+唯讀輸出不會清除 `manual-reconciliation-required.flag`。必須先在 TTB GUI 確認正確虛擬帳戶、所有商品空倉/無掛單且 bot 已停止；只有在獨立重複查詢均通過後，才可執行：
+
+```powershell
+py -3.13 reconcile_ttb.py --clear-flag `
+  --confirm-virtual-account --confirm-flat-account `
+  --confirm-no-working-orders --confirm-bot-stopped
+```
+
+稽核紀錄寫入 `output/reconciliation/`，這個 CLI 不會自動下單、撤單或平倉。實際競賽/帳戶身分仍需要 GUI 人工確認，不能只相信 API 回覆。完整流程參見 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md)。
+
 ## 虛擬帳戶委託／撤單 smoke test
 
 在策略 live 模式之前先執行：
@@ -207,5 +225,6 @@ py -3.13 optimize_virtual_competition.py "output/runs/quotes-*.csv" `
 - [DYNAMIC_MARKET_MAKING_PLAN.md](DYNAMIC_MARKET_MAKING_PLAN.md)：動態報價、三成交模型、蒙地卡羅與候選策略
 - [STRATEGY.md](STRATEGY.md)：原有策略說明
 - [Azure 部署指南](../../azure/README.md)：Windows VM、TTB 啟動與 24/7 監控
+- [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md)：停機鎖定、全帳戶對帳、人工授權安全恢復
 
 所有績效結論都必須使用扣除費用與稅、按日樣本外切分的實際回放或虛擬成交資料驗證；synthetic 測試只驗證程式邏輯。

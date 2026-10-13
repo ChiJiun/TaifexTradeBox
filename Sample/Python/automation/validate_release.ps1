@@ -16,11 +16,14 @@ function Add-Check([string]$Name, [bool]$Ok, [string]$Details = '') {
 
 $requiredFiles = @(
     'sim_hft_bot.py',
+    'reconcile_ttb.py',
+    'OPERATOR_RUNBOOK.md',
     'requirements.txt',
     'ttb\api.py',
     'ttb\engine.py',
     'ttb\market_data.py',
     'ttb\orders.py',
+    'ttb\reconciliation.py',
     'ttb\runtime.py',
     'ttb\status_server.py',
     'automation\config.example.json',
@@ -67,6 +70,9 @@ try {
 
         & py.exe -3.13 sim_hft_bot.py --help *> $null
         Add-Check 'cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 reconcile_ttb.py --help *> $null
+        Add-Check 'reconcile-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
         if (-not $SkipUnitTests) {
             & py.exe -3.13 -m unittest discover -q
