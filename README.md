@@ -18,6 +18,7 @@ Sample/Python/
   ttb/risk.py               TTB 委託前風控與跨重啟委託速率計數
   ttb/contracts.py          TAIFEX 臺指/小臺/微臺商品乘數解析與安全驗證
   ttb/journal.py            append-only、hash-chained 交易事件與跨當機成交回建
+  ttb/calendar.py           交易所休市日、到期日、契約代碼與人工換月閘門
   strategies/               可替換的策略範例
   strategy_core.py          策略、microprice、OFI 與模擬成交核心
   sim_hft_bot.py            組合上述模組的命令列入口
@@ -163,6 +164,7 @@ mstsc /v:20.189.93.22
 ### 「24/7」的實際界線
 
 - Bot 可以全天候常駐，休市時寫入 `waiting_market` 健康狀態；預設同時辨識日盤 `08:45–13:45` 與夜盤 `15:00–05:00`，並可由 CLI 覆寫或停用夜盤。
+- 2026 年臺指系列的休市/特殊交易日由 `automation/taifex_calendar_2026.json` 控管；2027 年日曆尚未核准前，不會繼續沿用 2026 日曆。到期月合約最後交易日上午 13:30 收盤，當日下午沒有夜盤；期滿不可在原商品自動開新倉，須人工完成換月與帳戶核對。
 - 同一交易日的 realized PnL、drawdown halt、勝負 streak 與 sizing 狀態會原子化寫入 `output/risk-state.json`；程序重啟後會恢復，避免藉由重啟意外洗掉風控。
 - 本機 `127.0.0.1:8765` 提供 `/healthz`、`/readyz` 與 `/status`，供 VM watchdog 或監控代理 probe；不要把此 port 公開到 Internet。
 - 行情 ZMQ 訂閱使用精確商品 topic、有限緩衝區、時間與成交量完整性檢查；拒收重複、亂序或過期的 tick，不把舊訊息視為有效新行情。詳細拒收計數見 health。

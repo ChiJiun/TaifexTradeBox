@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .calendar import TradingCalendar, ContractInfo, CalendarCoverageError
+
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
 SessionPhase = Literal["regular", "after_hours", "closed"]
@@ -31,6 +33,7 @@ class SessionStatus:
     trading_day: str
     minutes_since_open: float
     minutes_until_close: float
+    reason: str = ""
 
     @property
     def trading(self) -> bool:
@@ -52,6 +55,8 @@ class SessionSchedule:
     after_hours_open: str = "15:00"
     after_hours_close: str = "05:00"
     include_after_hours: bool = True
+    calendar: TradingCalendar | None = None
+    contract: ContractInfo | None = None
 
     def __post_init__(self) -> None:
         ro = _parse_clock(self.regular_open)
@@ -83,6 +88,9 @@ class SessionSchedule:
         rc = _parse_clock(self.regular_close)
         ao = _parse_clock(self.after_hours_open)
         ac = _parse_clock(self.after_hours_close)
+
+        if self.calendar is not None:
+            return self._calendar_status(local, minute, ro, rc, ao, ac)
 
         if weekday < 5 and ro <= minute < rc:
             return SessionStatus(
@@ -123,6 +131,56 @@ class SessionSchedule:
             0.0,
             0.0,
         )
+
+    def _calendar_status(
+        self, local: datetime, minute: float,
+        ro: int, rc: int, ao: int, ac: int,
+    ) -> SessionStatus:
+        assert self.calendar is not None
+        day = local.date()
+        day_text = day.isoformat()
+        closed = lambda reason: SessionStatus("closed", day_text, 0.0, 0.0, reason)
+        try:
+            expiry = self.contract.last_trading_day(self.calendar) if self.contract else None
+            if expiry is not None and day > expiry:
+                return closed("manual_contract_rollover_required")
+
+            current_open = self.calendar.is_trading_day(day)
+            warn = (
+                "contract_expiring_soon" if expiry and 0 < (expiry - day).days <= 7
+                else "contract_expiry_today" if expiry == day
+                else ""
+            )
+            regular_close = min(rc, 13 * 60 + 30) if expiry == day else rc
+            if current_open and ro <= minute < regular_close:
+                return SessionStatus(
+                    "regular", day_text,
+                    minute - ro, regular_close - minute, warn,
+                )
+
+            if self.include_after_hours:
+                if current_open and minute >= ao and expiry != day:
+                    next_date = self.calendar.next_trading_day(day)
+                    return SessionStatus(
+                        "after_hours", next_date.isoformat(),
+                        minute - ao, 24 * 60 - minute + ac, warn,
+                    )
+                # A night session before a holiday/weekend keeps running
+                # until 05:00 on the following calendar day, using the same
+                # NEXT VALID trading-day key as the prior evening.
+                previous = day - timedelta(days=1)
+                if minute < ac and self.calendar.is_trading_day(previous) and expiry != previous:
+                    next_date = self.calendar.next_trading_day(previous)
+                    return SessionStatus(
+                        "after_hours", next_date.isoformat(),
+                        24 * 60 - ao + minute, ac - minute, warn,
+                    )
+            return closed(
+                "contract_expiry_today" if expiry == day else
+                "exchange_holiday" if not current_open else "outside_trading_hours"
+            )
+        except CalendarCoverageError:
+            return closed("calendar_unverified")
 
 
 class RiskStateStore:

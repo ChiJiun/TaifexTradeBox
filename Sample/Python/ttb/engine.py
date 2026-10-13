@@ -346,6 +346,19 @@ class BotEngine:
                 ),
             ) if position else ()
             decision = StrategyDecision(intents, decision.features, True, "outside entry session")
+        elif getattr(session, "reason", "") == "contract_expiry_today":
+            position = self.ledger.position
+            intents = (
+                OrderIntent(
+                    "sell" if position > 0 else "buy",
+                    quote.bid if position > 0 else quote.ask,
+                    abs(position), "risk_exit", "contract expiry",
+                ),
+            ) if position else ()
+            decision = StrategyDecision(
+                intents, decision.features, True,
+                "expiry day: exit only; manual rollover required",
+            )
         elif session.minutes_since_open < entry_delay_minutes and not self.ledger.position:
             decision = StrategyDecision((), decision.features, True, "session opening delay")
         elif session.minutes_until_close <= entry_cutoff_minutes and not self.ledger.position:
@@ -396,6 +409,7 @@ class BotEngine:
             state="healthy" if not decision.halted else "paused",
             session_phase=session.phase,
             trading_day=session.trading_day,
+            calendar_reason=getattr(session, "reason", ""),
             last_quote_exchange_time=quote.exchange_time,
             last_quote_monotonic=quote.received_at,
             last_price=quote.last,
@@ -486,11 +500,19 @@ class BotEngine:
                         if hasattr(self.gateway, "cancel_all"):
                             self.gateway.cancel_all()  # type: ignore[attr-defined]
                         self.closed_cleanup_done = True
-                    state = "waiting_market" if self.ledger.position == 0 else "manual_reconciliation_required"
+                    manual_required = getattr(session, "reason", "") in {
+                        "calendar_unverified", "manual_contract_rollover_required",
+                        "contract_expiry_today",
+                    }
+                    state = (
+                        "manual_reconciliation_required" if manual_required or self.ledger.position != 0
+                        else "waiting_market"
+                    )
                     self.health.update(
                         state=state,
                         session_phase=session.phase,
                         trading_day=session.trading_day,
+                        calendar_reason=getattr(session, "reason", ""),
                         position=self.ledger.position,
                     )
                 continue

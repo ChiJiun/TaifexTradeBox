@@ -178,7 +178,7 @@ Get-Content C:\TTB\Sample\Python\output\supervisor\supervisor.log -Tail 50
 
 ### 無人值守限制
 
-- Bot 可以跨休市時段常駐，但只有交易時段會產生入口委託。
+- Bot 可以跨休市時段常駐，但只有交易時段會產生入口委託。2026 年官方開休市日期由 `Sample/Python/automation/taifex_calendar_2026.json` 管理；未提供新年度驗證日曆不得在 2027 年繼續 live 交易。到期日/換月只允許人工確認，不能帶倉自動換月。
 - TTB 登入、競賽選擇與持倉核對仍依賴 GUI；Windows 重開機後可能需要人工處理。
 - 程式會用委託報告與 `QUERYRESTOREFILLREPORT()` 交叉對帳 broker position；但異常退出後仍不會自動重啟 live 模式，因為 GUI 競賽選擇、登入狀態與未知外部委託仍需要人工確認。
 - 登出 Windows 會終止 GUI 與互動式排程；只關閉 RDP 視窗不會登出。

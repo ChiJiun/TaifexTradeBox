@@ -173,6 +173,32 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(payload["Side1"], "2")
         self.assertEqual(payload["TimeInForce"], "2")
 
+    def test_gateway_refuses_old_contract_exposure_before_manual_rollover(self):
+        for mode in ("working", "position"):
+            with self.subTest(mode=mode):
+                module = FakeModule()
+                if mode == "working":
+                    module.QUERYRESTOREREPORT = lambda: {
+                        "Code": "0000",
+                        "Data": [{
+                            "ORDNO": "OLD", "COMD_ID": "TMFJ6", "VOLM": "1",
+                            "LESS_VOLM": "1", "STAT": "委託成功",
+                        }],
+                    }
+                else:
+                    module.QUERYRESTOREFILLREPORT = lambda: {
+                        "Code": "0000",
+                        "Data": [{"Hold": "1", "ComdID1": "TMFJ6", "ComdBS1": "1"}],
+                    }
+                config = StrategyConfig(symbol="TMFK6")
+                with tempfile.TemporaryDirectory() as folder:
+                    gateway = TTBOrderGateway(
+                        module, config, PositionLedger(config), 0.25,
+                        risk_counters_path=Path(folder) / "rates.json",
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "TTB account"):
+                        gateway.before_decision(quote())
+
     def test_gateway_refuses_startup_with_existing_working_order(self):
         module = FakeModule()
         module.QUERYRESTOREREPORT = lambda: {
