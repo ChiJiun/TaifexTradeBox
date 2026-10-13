@@ -141,9 +141,18 @@ py -3.13 reconcile_ttb.py --clear-flag `
 
 稽核紀錄寫入 `output/reconciliation/`，這個 CLI 不會自動下單、撤單或平倉。實際競賽/帳戶身分仍需要 GUI 人工確認，不能只相信 API 回覆。完整流程參見 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md)。
 
-## 虛擬帳戶委託／撤單 smoke test
+## 真實 TTB API 驗證準備（#2）
 
-在策略 live 模式之前先執行：
+**先進行完全唯讀的去識別化擷取，不會下單或撤單：**
+
+```powershell
+cd C:\TTB\Sample\Python
+py -3.13 ttb_readonly_capture.py
+```
+
+輸出到 `output/api-captures/ttb-readonly-*.json`，只保留委託/持倉的必要欄位、對單號加鹽雜湊，保證金僅保留欄位名稱與型別，不保存原始帳戶識別資訊或金額。**人工檢視輸出是否仍含有敏感欄位後**才能將去識別化 fixture 用於 GitHub 測試。TTB 帳戶身分仍必須從 GUI 確認，API 未證實可以判別競賽帳戶。實際執行時沒有已核對的資料就不要猜 `--available-margin-field`。
+
+以下 smoke test **真的會送出一口虛擬限價單並嘗試撤單**，只能在 GUI 已確認正確競賽、帳戶空倉且 bot 已停止後，由操作員明確授權執行：
 
 ```powershell
 py -3.13 ttb_order_probe.py `
@@ -151,19 +160,19 @@ py -3.13 ttb_order_probe.py `
   --side buy `
   --distance-ticks 2000 `
   --confirm-virtual-order-probe `
-  --confirm-flat-account
+  --confirm-flat-account `
+  --confirm-bot-stopped
 ```
 
-流程如下：
+保護措施：
 
-1. 查詢現有委託；若發現相同商品仍有 working order，拒絕測試。
-2. 等待 `TMFJ6` 最新行情。
-3. 以最佳買價下方 2,000 ticks 的 1 口限價送出 `NEWORDER`。
-4. 從 API 回覆或委託回報取得委託編號。
-5. 立即呼叫 `CANCELORDER`，輪詢至終態，再查詢成交回報。
-6. 將結果寫到 `output/order-probes/order-probe-*.json`。
+1. 若 Supervisor 的停機／待對帳旗標存在則拒絕探測。
+2. 對全帳戶**所有商品**連續做兩次持倉及掛單檢查；有部位、掛單、資料不完整或 API 錯誤時，**零送單**。
+3. 遠價送出 1 口 `NEWORDER` 後，**只能使用 API 回覆中可信任的 `OrdNo` 撤單**。缺號不會從方向、價格、口數推斷單號或撤銷不明委託，必須人工對帳。
+4. 取得 `OrdNo` 才嘗試 `CANCELORDER`，等待終態，再重複查詢全帳戶持倉／工作中委託。此持倉 endpoint 是 `QUERYRESTOREFILLREPORT`，**不是歷史逐筆成交明細**。
+5. 僅成功完成探測時輸出 `output/order-probes/order-probe-*.json`；若出現 API 例外或未知委託狀態，請查看 TTB GUI，不能憑程式退出碼假設單已撤銷。
 
-遠價不等於絕對不會成交。若輸出中的 `unexpected_fill_quantity` 大於零，程式會以非零狀態碼結束，必須人工核對／平倉，不能繼續啟動策略。
+遠價不保證零成交，也不能排除 API 回報延遲或撤單與成交競態。實際 TTB 回覆資料尚未驗證，**Issue #2 不會因此關閉**。
 
 ## Azure 常駐執行
 

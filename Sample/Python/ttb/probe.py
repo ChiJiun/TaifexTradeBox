@@ -13,13 +13,11 @@ from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response
 from .orders import (
     _float,
     _response_rows,
-    _side,
     _value,
     is_terminal_order,
-    is_working_order,
     order_number,
-    order_symbol,
 )
+from .reconciliation import inspect_account
 
 
 @dataclass
@@ -32,7 +30,7 @@ class OrderProbeResult:
     order_accepted: bool = False
     cancel_accepted: bool = False
     cancel_confirmed: bool = False
-    fill_query_succeeded: bool = False
+    position_query_succeeded: bool = False
     unexpected_fill_quantity: int = 0
     message: str = ""
 
@@ -47,31 +45,6 @@ def far_limit_price(quote: Quote, side: str, tick_size: float, distance_ticks: i
     units = shifted / tick_size
     rounded = math.floor(units) if side == "buy" else math.ceil(units)
     return round(rounded * tick_size, 10)
-
-
-def _matching_order_no(
-    response: Any,
-    *,
-    baseline: set[str],
-    symbol: str,
-    side: str,
-    price: float,
-    quantity: int = 1,
-) -> str:
-    for row in _response_rows(response):
-        number = order_number(row)
-        if not number or number in baseline:
-            continue
-        row_symbol = order_symbol(row)
-        if row_symbol and row_symbol != symbol.upper():
-            continue
-        if _side(_value(row, "BS", "Side", "ComdBS1")) != side:
-            continue
-        row_price = _float(_value(row, "ORDR_PRCE", "Price", default=0))
-        row_qty = int(_float(_value(row, "VOLM", "OrderQty", default=0)))
-        if math.isclose(row_price, price, abs_tol=1e-9) and row_qty in (0, quantity):
-            return number
-    return ""
 
 
 class OrderProbe:
@@ -100,18 +73,14 @@ class OrderProbe:
         self.poll_seconds = max(0.1, poll_seconds)
 
     def run(self, quote: Quote) -> OrderProbeResult:
-        baseline_response = self.api.query_orders()
-        if not is_success_response(baseline_response):
-            raise RuntimeError(f"unable to query existing orders: {baseline_response}")
-        baseline_rows = _response_rows(baseline_response)
-        working = [
-            order_number(row)
-            for row in baseline_rows
-            if (not order_symbol(row) or order_symbol(row) == self.symbol) and is_working_order(row)
-        ]
-        if working:
-            raise RuntimeError("working orders already exist; probe refused: " + ", ".join(working))
-        baseline = {order_number(row) for row in baseline_rows if order_number(row)}
+        # This is deliberately account-wide: a manual position in any symbol
+        # must block the only API order probe. The query cannot verify the
+        # selected GUI account identity; operator confirmation remains required.
+        for _ in range(2):
+            inspection = inspect_account(self.api, self.symbol)
+            if inspection.open_positions or inspection.working_orders:
+                raise RuntimeError("TTB account not flat or has working orders; probe refused")
+            time.sleep(self.poll_seconds)
         price = far_limit_price(quote, self.side, self.tick_size, self.distance_ticks)
         result = OrderProbeResult(
             symbol=self.symbol,
@@ -126,21 +95,13 @@ class OrderProbe:
             )
             result.order_accepted = True
             order_no = extract_order_no(response)
-            deadline = time.monotonic() + self.ack_timeout
-            while not order_no and time.monotonic() < deadline:
-                report = self.api.query_orders()
-                if is_success_response(report):
-                    order_no = _matching_order_no(
-                        report,
-                        baseline=baseline,
-                        symbol=self.symbol,
-                        side=self.side,
-                        price=price,
-                    )
-                if not order_no:
-                    time.sleep(self.poll_seconds)
             if not order_no:
-                raise RuntimeError("order was accepted but no order number appeared; reconcile manually")
+                # A same-price/side/quantity order found by polling may be
+                # manual/unowned. Never bind or cancel it on a guess.
+                raise RuntimeError(
+                    "order accepted without a verified OrdNo; do not guess or cancel; "
+                    "reconcile all TTB orders and positions manually"
+                )
             result.order_no = order_no
             self.api.cancel_order(order_no)
             result.cancel_accepted = True
@@ -163,23 +124,24 @@ class OrderProbe:
                     result.cancel_confirmed = True
                     break
                 time.sleep(self.poll_seconds)
-            fills = self.api.query_fills()
-            result.fill_query_succeeded = is_success_response(fills)
-            if result.fill_query_succeeded:
-                fill_report_quantity = sum(
-                    int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", "VOLM", default=0)))
-                    for row in _response_rows(fills)
-                    if order_number(row) == order_no
-                )
+            # QUERYRESTOREFILLREPORT is open *position* inventory, not a
+            # historical execution list. Never equate missing order IDs with
+            # no fills: look for ANY account-wide open position.
+            for _ in range(2):
+                final_account = inspect_account(self.api, self.symbol)
+                result.position_query_succeeded = True
                 result.unexpected_fill_quantity = max(
                     result.unexpected_fill_quantity,
-                    fill_report_quantity,
+                    sum(item["quantity"] for item in final_account.open_positions),
                 )
+                if final_account.working_orders:
+                    result.cancel_confirmed = False
+                time.sleep(self.poll_seconds)
             if result.unexpected_fill_quantity:
                 result.message = "UNEXPECTED FILL: manually reconcile and flatten the virtual account"
-            elif not result.fill_query_succeeded:
+            elif not result.position_query_succeeded:
                 result.message = (
-                    "order report shows zero fills, but fill-report verification failed; "
+                    "post-cancel account position verification failed; "
                     "reconcile the virtual account manually"
                 )
             elif result.cancel_confirmed:

@@ -73,7 +73,8 @@ powershell -ExecutionPolicy Bypass -File automation\check_ttb_health.ps1
 ## 下一步
 
 - #2：使用 TTB 真實虛擬帳戶回覆校準欄位、部分成交與帳戶/競賽識別。
-- #5：建立 durable event journal，才能可靠辨識 crash 前 bot-owned 委託及回建完整 session 交易紀錄。
-- #4：在下單前依可驗證的 `QUERYMARGIN` 欄位執行 broker-side 風控。
+- #5：durable event journal 已實作；但僅靠事件記錄仍不能推定缺失訂單號的委託所有權。
+- #4：保證金欄位必須依 #2 的去識別化實際回覆加以確認；未確認前 live 新進場一律拒絕。
+- #2：可先執行 `py -3.13 ttb_readonly_capture.py` 擷取僅含欄位結構的 API 樣本，絕不自動下單。正式虛擬一口 smoke probe 須 GUI 人工驗證後執行。
 
 目前**沒有自動撤單/平倉功能**：在缺乏可信任 ownership 證據時，保留由 GUI 人工操作更安全。
