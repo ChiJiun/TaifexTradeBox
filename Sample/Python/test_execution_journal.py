@@ -138,6 +138,15 @@ class JournalRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "absent from journal"):
             self._restore(engine)
 
+    def test_corrupt_risk_snapshot_is_not_overwritten_during_shutdown(self):
+        path = self.root / "risk-state.json"
+        path.write_text("{corrupt", encoding="utf-8")
+        engine = self._engine()
+        with self.assertRaisesRegex(RuntimeError, "unreadable"):
+            self._restore(engine)
+        engine.close()
+        self.assertEqual(path.read_text(encoding="utf-8"), "{corrupt")
+
     def test_loss_halt_recovers_even_if_checkpoint_not_updated(self):
         for kind, side, price in (
             ("BUY", "buy", 20000), ("SELL", "sell", 19998),

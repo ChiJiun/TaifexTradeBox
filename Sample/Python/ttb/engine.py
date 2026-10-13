@@ -188,6 +188,7 @@ class BotEngine:
             config.symbol,
         )
         self.current_trading_day = ""
+        self._risk_state_ready = False
         self._previous_halt_reason = ""
         self.flatten_on_shutdown = flatten_on_shutdown
         self.health = HealthReporter(
@@ -215,6 +216,7 @@ class BotEngine:
         if trading_day == self.current_trading_day:
             return
         self.current_trading_day = trading_day
+        self._risk_state_ready = False
         saved = self.risk_state.load(trading_day)
         if hasattr(self.gateway, "set_trading_day"):
             self.gateway.set_trading_day(trading_day)  # type: ignore[attr-defined]
@@ -280,9 +282,10 @@ class BotEngine:
                 if hasattr(self.strategy, "halt_reason"):
                     self.strategy.halt_reason = "journal_recovered_max_drawdown"
             self._previous_halt_reason = str(getattr(self.strategy, "halt_reason", ""))
+        self._risk_state_ready = True
 
     def _checkpoint_risk_state(self) -> None:
-        if not self.current_trading_day:
+        if not self.current_trading_day or not self._risk_state_ready:
             return
         strategy_state = {
             name: getattr(self.strategy, name)
