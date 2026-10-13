@@ -64,6 +64,14 @@ py -3.13 sim_hft_bot.py `
 
 **委託所有權防護（#11）**：TTB gateway 會拒絕執行期間新出現、且沒有被 bot 以委託編號識別的 working/filled order（包含手動委託）。即使該委託的方向、價格和數量剛好符合 pending intent，也**不能**據此當成 bot 自己的單。若 `NEWORDER` 成功但沒有回傳可驗證的委託編號，bot 同樣會停機，將 pending 狀態交由人工確認。此限制可能使目前的 TTB API 無法直接無人值守下單；須完成真實回覆格式驗證後再設計安全的 ID correlation，不應直接移除防護。錯誤時健康狀態會包含 `active_orders.unknown_orders` 和 `active_orders.unsafe_reason`。
 
+## 重要安全修正與商品參數
+
+`--point-value` 不再預設 200：TXF、MTX、TMF 會分別依期交所契約規格自動使用 **200、50、10 元／點**。其他商品必須明確指定，且已知商品不接受錯誤覆寫；`--fee-per-fill`、稅率仍必須依商品及虛擬競賽規則校準。這也修正過去範例 `TMFJ6` 可能用 200 元／點錯算損益與曝險的問題。
+
+TTB 下單前對帳回覆缺少 `Data`、委託剩餘量/持倉口數缺失、持倉方向不明時一律 fail-closed，不會把未知狀態解釋為空倉。單筆委託數量也由 gateway 限制不得超過 `--max-order-qty`。週五夜盤跨至週六凌晨仍屬下一個營業日的風控交易日；損毀或不同商品的 `risk-state.json` 不再被忽略並重置當日損益。
+
+**真實 TTB API 的完整回覆格式仍待 #2 核實**；保守拒絕不代表已完成真實帳戶驗收。
+
 ## Live 下單前風控（#4）
 
 TTB gateway 在送新入口單之前會檢查：

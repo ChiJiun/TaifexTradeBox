@@ -213,6 +213,19 @@ class RiskGatewayTests(unittest.TestCase):
         result = gateway.snapshot()
         self.assertIn("error", result["rate_counters"])
 
+    def test_gateway_blocks_oversized_intent_before_broker_api(self):
+        module, gateway = self.gateway(
+            limits=PreTradeLimits(
+                max_notional=100_000_000, minimum_available_margin=1000,
+                available_margin_field="Available",
+            )
+        )
+        # max_order_qty=1 even if aggregate inventory is increased later.
+        gateway.config.max_inventory = 5
+        with self.assertRaisesRegex(PreTradeRiskError, "max_order_qty"):
+            gateway.sync((OrderIntent("buy", 20000, 5, "entry", "custom strategy"),), quote())
+        self.assertEqual(module.orders, 0)
+
     def test_valid_entry_consumes_durable_rate_budget(self):
         module, gateway = self.gateway()
         gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())

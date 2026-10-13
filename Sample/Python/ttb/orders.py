@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from dataclasses import asdict
@@ -32,14 +33,18 @@ def _recursive_json(value: Any) -> Any:
 
 
 def _response_rows(response: Any) -> list[dict[str, Any]]:
+    """Broker reports must be explicit; malformed/missing Data is NOT empty."""
     parsed = _recursive_json(response)
-    if isinstance(parsed, dict):
-        parsed = _recursive_json(parsed.get("Data", parsed.get("data", [])))
-    if isinstance(parsed, dict):
-        return [parsed]
-    if isinstance(parsed, list):
-        return [row for row in parsed if isinstance(row, dict)]
-    return []
+    if not isinstance(parsed, dict) or not is_success_response(parsed):
+        raise RuntimeError("TTB report returned an invalid/non-success response")
+    if "Data" not in parsed and "data" not in parsed:
+        raise RuntimeError("TTB report missing Data; cannot assume an empty account")
+    rows = _recursive_json(parsed.get("Data", parsed.get("data")))
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError("TTB report has an unsupported Data shape")
+    return rows
 
 
 def _value(row: dict[str, Any], *keys: str, default: Any = "") -> Any:
@@ -72,13 +77,32 @@ def order_symbol(row: dict[str, Any]) -> str:
     return str(_value(row, "COMD_ID", "ComdID1", "Symbol", default="")).split(".")[0].upper()
 
 
+def _strict_quantity(value: Any, context: str) -> int:
+    try:
+        number = float(str(value).replace(",", ""))
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"TTB {context} is malformed") from exc
+    if not math.isfinite(number) or number < 0 or not number.is_integer():
+        raise RuntimeError(f"TTB {context} is invalid")
+    return int(number)
+
+
 def order_remaining(row: dict[str, Any]) -> int:
-    remaining = int(_float(_value(row, "LESS_VOLM", "RemainQty", "RemainingQty", default=0)))
-    if remaining:
-        return remaining
-    ordered = int(_float(_value(row, "VOLM", "OrderQty", default=0)))
-    filled = int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0)))
-    return max(0, ordered - filled)
+    remaining = _value(row, "LESS_VOLM", "RemainQty", "RemainingQty", default=None)
+    if remaining is not None:
+        return _strict_quantity(remaining, "order remaining quantity")
+    ordered = _value(row, "VOLM", "OrderQty", default=None)
+    filled = _value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=None)
+    if ordered is not None and filled is not None:
+        total = _strict_quantity(ordered, "order quantity")
+        deal = _strict_quantity(filled, "filled quantity")
+        if deal > total:
+            raise RuntimeError("TTB filled quantity exceeds order quantity")
+        return total - deal
+    status = str(_value(row, "STAT", "Status", default="")).strip().lower()
+    if any(token in status for token in ("刪", "取消", "完全成交", "全部成交", "cancel", "filled", "rejected", "拒絕")):
+        return 0
+    raise RuntimeError("TTB cannot determine order remaining quantity")
 
 
 def is_terminal_order(row: dict[str, Any]) -> bool:
@@ -99,9 +123,15 @@ def reported_position(response: Any, symbol: str) -> int:
     target = symbol.split(".")[0].upper()
     total = 0
     for row in _response_rows(response):
-        hold = int(_float(_value(row, "Hold", "HOLD", "PositionQty", "Qty", default=0)))
-        if hold <= 0:
+        raw_hold = _value(row, "Hold", "HOLD", "PositionQty", "Qty", default=None)
+        if raw_hold is None:
+            raise RuntimeError("TTB position report missing Hold/quantity")
+        hold = _strict_quantity(raw_hold, "position quantity")
+        if not hold:
             continue
+        if not any(_value(row, *keys, default="") for keys in
+                   (("ComdID1", "COMD_ID", "Symbol"), ("ComdID2",))):
+            raise RuntimeError("TTB position report contains a position with no symbol")
         for symbol_keys, side_keys in (
             (("ComdID1", "COMD_ID", "Symbol"), ("ComdBS1", "BS", "Side")),
             (("ComdID2",), ("ComdBS2",)),
@@ -109,7 +139,10 @@ def reported_position(response: Any, symbol: str) -> int:
             leg_symbol = str(_value(row, *symbol_keys, default="")).split(".")[0].upper()
             if not leg_symbol or leg_symbol != target:
                 continue
-            side = _side(_value(row, *side_keys, default=""))
+            side_value = str(_value(row, *side_keys, default="")).strip().lower()
+            if side_value not in {"1", "b", "buy", "買", "買別", "買進", "2", "s", "sell", "賣", "賣出"}:
+                raise RuntimeError("TTB position report has an unknown side")
+            side = _side(side_value)
             total += hold if side == "buy" else -hold
     return total
 
@@ -363,6 +396,8 @@ class TTBOrderGateway:
                 self._place(wanted)
 
     def _place(self, intent: OrderIntent) -> None:
+        if intent.quantity > self.config.max_order_qty:
+            raise PreTradeRiskError("order exceeds configured max_order_qty")
         validate_exposure(intent, self.ledger.position, self.active, self.config, self.risk_limits)
         now = time.time()
         if intent.role == "entry":

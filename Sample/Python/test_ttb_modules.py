@@ -67,7 +67,9 @@ class FakeModule:
         return {"Code": "0000", "Data": [{"Available": "10000000"}]}
 
     def QUERYRESTOREFILLREPORT(self):
-        return self._ok("fills")
+        response = self._ok("fills")
+        response["Data"] = []
+        return response
 
     def QUERYRESTOREREPORT(self):
         return {"Code": "0000", "Data": []}

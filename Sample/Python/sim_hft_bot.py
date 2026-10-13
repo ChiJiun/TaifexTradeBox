@@ -17,6 +17,7 @@ from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
 from ttb.runtime import SessionSchedule
 from ttb.status_server import StatusServer
 from ttb.risk import PreTradeLimits
+from ttb.contracts import point_value_for
 from ttb.orders import (
     ShadowGateway,
     TTBOrderGateway,
@@ -46,7 +47,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="http://localhost:8080")
     parser.add_argument("--zmq-port", type=int, default=51141)
     parser.add_argument("--tick-size", type=float, default=1.0)
-    parser.add_argument("--point-value", type=float, default=200.0)
+    parser.add_argument("--point-value", type=float, default=None,
+                        help="NTD per index point; TXF=200, MTX=50, TMF=10 are auto-resolved")
     parser.add_argument("--fee-per-fill", type=float, default=100.0)
     parser.add_argument("--tax-rate", type=float, default=0.00002)
     parser.add_argument("--slippage-ticks", type=float, default=0.0)
@@ -148,7 +150,7 @@ def build_config(args: argparse.Namespace) -> StrategyConfig:
     config = StrategyConfig(
         symbol=args.symbol.upper(),
         tick_size=args.tick_size,
-        point_value=args.point_value,
+        point_value=point_value_for(args.symbol, args.point_value),
         fee_per_fill=args.fee_per_fill,
         tax_rate=args.tax_rate,
         slippage_ticks=args.slippage_ticks,

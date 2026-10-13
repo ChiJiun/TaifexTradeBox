@@ -139,7 +139,8 @@ class RiskStateStoreTests(unittest.TestCase):
             self.assertEqual(restored["fill_count"], 7)
             self.assertEqual(restored["halt_reason"], "session loss limit")
             self.assertEqual(store.load("2026-10-01"), {})
-            self.assertEqual(RiskStateStore(path, "TXFJ6").load("2026-09-30"), {})
+            with self.assertRaisesRegex(RuntimeError, "symbol mismatched"):
+                RiskStateStore(path, "TXFJ6").load("2026-09-30")
 
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["version"], 1)

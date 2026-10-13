@@ -104,9 +104,15 @@ class SessionSchedule:
                 )
             # Early-morning ticks already fall on that regular trading date.
             if 1 <= weekday <= 5 and minute < ac:
+                # Saturday 00:00-05:00 still belongs to Friday's night
+                # session and is accounted for on the next business day.
+                trading_day = (
+                    self._next_business_day(local - timedelta(days=1))
+                    if weekday == 5 else local.date().isoformat()
+                )
                 return SessionStatus(
                     "after_hours",
-                    local.date().isoformat(),
+                    trading_day,
                     (24 * 60 - ao) + minute,
                     ac - minute,
                 )
@@ -141,13 +147,15 @@ class RiskStateStore:
                 return {}
             try:
                 value = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return {}
-        if value.get("version") != self.VERSION:
-            return {}
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError("persisted risk state unreadable; manual reconciliation required") from exc
+        if not isinstance(value, dict) or value.get("version") != self.VERSION:
+            raise RuntimeError("persisted risk state format invalid; manual reconciliation required")
         if str(value.get("symbol", "")).upper() != self.symbol:
-            return {}
-        if value.get("trading_day") != trading_day:
+            raise RuntimeError("persisted risk state symbol mismatched; manual reconciliation required")
+        if not isinstance(value.get("trading_day"), str):
+            raise RuntimeError("persisted risk state trading day missing; manual reconciliation required")
+        if value["trading_day"] != trading_day:
             return {}
         return value
 
