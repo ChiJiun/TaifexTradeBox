@@ -19,6 +19,10 @@ $requiredFiles = @(
     'reconcile_ttb.py',
     'ttb_readonly_capture.py',
     'ttb_order_probe.py',
+    'walk_forward_oos.py',
+    'replay_market_maker.py',
+    'monte_carlo_market_maker.py',
+    'optimize_virtual_competition.py',
     'automation\soak_offline.py',
     'OPERATOR_RUNBOOK.md',
     'requirements.txt',
@@ -87,6 +91,9 @@ try {
 
         & py.exe -3.13 ttb_order_probe.py --help *> $null
         Add-Check 'probe-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 walk_forward_oos.py --help *> $null
+        Add-Check 'walkforward-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
         if (-not $SkipUnitTests) {
             & py.exe -3.13 -m unittest discover -q
