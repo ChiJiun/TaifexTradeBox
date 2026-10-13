@@ -1,6 +1,6 @@
 # TTB 獨立見價見量策略原型
 
-> 此頁保留初版研究說明。執行器目前改用雙邊 microprice 策略，最新參數、操作與限制請見 [MARKET_MAKER.md](MARKET_MAKER.md)。下方舊版恢復加碼規則不再由預設執行器使用。
+> **歷史研究草案（非操作指令）**。此頁保留原型，部分 IOC、soft recovery 與倉位加碼描述並不是目前預設執行行為。唯一操作手冊是 [OPERATIONS.md](OPERATIONS.md)，實作策略請見 [MARKET_MAKER.md](MARKET_MAKER.md)，切勿執行本頁舊版 live 例子。
 
 這個原型專門針對期交所虛擬交易所的「獨立成交」見價見量模式，不應把 shadow
 績效解讀成實盤可得績效。若競賽使用「機率分配成交」或逐筆撮合，必須另行調整成交模型。
@@ -37,18 +37,9 @@ Shadow 模式不送出委託，而是把後續真實 tick 對既有模擬掛單�
 先用輸出檔比較不同 `target-ticks`、`signal-threshold`、`max-hold-seconds`。至少應觀察完整日盤與夜盤，
 不要只用單一高波動時段選參數。
 
-## 切換 TTB 虛擬送單
+## TTB 虛擬送單（歷史草案，不可直接執行）
 
-只有在 shadow 結果穩定、競賽帳戶與商品代碼確認正確後才執行：
-
-```powershell
-python sim_hft_bot.py --symbol TXFA7 --mode ttb --confirm-virtual-orders `
-  --point-value 200 --fee-per-fill 100 --tax-rate 0.00002 --target-ticks 4
-```
-
-`--mode ttb` 會真的向目前登入的 TTB 虛擬帳戶送單。程式預設每個方向只保留一筆有效委託，
-關閉時會嘗試撤銷仍由程式追蹤的委託。若 TTB 回報格式與範例不同，程式會停止該次操作並留下錯誤紀錄，
-不會在無法確認訂單狀態時持續加單。
+`--mode ttb` 會真的向 GUI 當前登入的虛擬帳戶送單。這個舊原型尚未納入現在的 `--max-notional`、已驗證保證金欄位、跨重啟 Journal 及人工對帳防護，因此原本的 live 範例已刪除。請以 [OPERATIONS.md](OPERATIONS.md) 作為唯一操作依據，待 #2/#4 完成後再由操作員啟用。
 
 ## 驗證
 

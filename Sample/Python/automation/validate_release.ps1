@@ -25,6 +25,9 @@ $requiredFiles = @(
     'optimize_virtual_competition.py',
     'automation\soak_offline.py',
     'OPERATOR_RUNBOOK.md',
+    'OPERATIONS.md',
+    'MARKET_MAKER.md',
+    'automation\check_docs_consistency.py',
     'requirements.txt',
     'ttb\api.py',
     'ttb\engine.py',
@@ -94,6 +97,9 @@ try {
 
         & py.exe -3.13 walk_forward_oos.py --help *> $null
         Add-Check 'walkforward-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 -m automation.check_docs_consistency *> $null
+        Add-Check 'docs-consistency' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
         if (-not $SkipUnitTests) {
             & py.exe -3.13 -m unittest discover -q

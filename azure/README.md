@@ -1,5 +1,7 @@
 # Azure Windows VM 部署指南（TTB 虛擬交易）
 
+> **本頁只處理 VM／Windows 部署。唯一操作手冊為 [Sample/Python/OPERATIONS.md](../Sample/Python/OPERATIONS.md)**；出現異常須使用 [OPERATOR_RUNBOOK.md](../Sample/Python/OPERATOR_RUNBOOK.md)，不能以過往部署紀錄證明現行環境可安全交易。
+
 TTB 是 Windows GUI 程式，並透過本機 `localhost:8080` / ZMQ `51141` 提供資料。因此部署型態應是**單台 Windows VM**；不要使用 Linux Container、Azure Functions 或 VMSS。
 
 ## 1. 建議規格與成本
@@ -84,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File azure\Set-TtbRdpAllowlist.ps1 -Apply
 mstsc /v:20.189.93.22
 ```
 
-### 目前部署狀態（2026-09-24）
+### 歷史部署紀錄（2026-09-24，非當前已核實狀態）
 
 - 專案最新版已部署到 `C:\TTB\Sample\Python`，Azure 端 37 個單元測試通過。
 - `TTB Automation` 排程正在執行，完整啟動參數為 `TMFJ6`、`market-maker`、`shadow`；沒有傳入任何允許虛擬委託的旗標。
@@ -136,17 +138,12 @@ py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow
 cd C:\TTB\Sample\Python
 py -3.13 ttb_order_probe.py `
   --symbol TMFJ6 --side buy --distance-ticks 2000 `
-  --confirm-virtual-order-probe --confirm-flat-account
+  --confirm-virtual-order-probe --confirm-flat-account --confirm-bot-stopped
 ```
 
 成功標準是：新單 API 接受、取得委託編號、撤單 API 接受、委託報告進入終態，而且成交數量為零。結果位於 `output\order-probes`。即使價格離市場很遠，也不能保證絕不成交；任何非零成交量都必須先人工處理。
 
-```powershell
-cd C:\TTB\Sample\Python
-py -3.13 sim_hft_bot.py `
-  --symbol <ACTIVE_SYMBOL> --mode ttb `
-  --confirm-virtual-orders --confirm-flat-account
-```
+上述 probe **真的會送出虛擬委託**；必須先取得正確 GUI 帳戶人工確認、關閉自動 bot、完成全帳戶空倉和無掛單檢查。**目前不提供可直接複製的 live 啟動命令**：除兩個人工確認之外，還需要 #2/#4 核實的 margin 欄位、數值單位及名目曝險限額（見 [OPERATIONS.md](../Sample/Python/OPERATIONS.md)）。缺少驗證即維持 shadow。
 
 若 TTB、RDP 或網路異常，策略不能保證遠端平倉；恢復連線後必須先檢查 TTB 的實際持倉與委託，再重啟 bot。這是虛擬帳戶也必須遵守的操作安全界線。
 

@@ -1,5 +1,7 @@
 # TTB Python 策略程式
 
+> **唯一操作入口：[OPERATIONS.md](OPERATIONS.md)**。本頁說明技術模組及範例，若與操作手冊衝突，應先依操作手冊處理。
+
 這個目錄包含 TTB 虛擬交易的行情監控、委託模組、策略執行器、離線回放器與測試。策略目標是研究「見價見量」成交規則下的 microprice / order-flow market making；目前不宣稱已取得 alpha，也不保證獲利。
 
 ## 多模組架構
@@ -43,7 +45,7 @@ py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow
 
 同一交易日的風控狀態預設保存到 `output/risk-state.json`，包含 realized PnL、peak equity、halt reason 與 sizing streak；程序重啟時會恢復。這個檔案只用於 session risk persistence，不用來恢復未知持倉或工作中委託，live TTB 仍以 API 對帳為準並 fail closed。
 
-本機監控端點預設綁定 `127.0.0.1:8765`：`/healthz` 表示程序存活、`/readyz` 在需要人工對帳時回 503、`/status` 回傳完整 health snapshot。可用 `--status-port 0` 停用。
+本機監控端點預設綁定 `127.0.0.1:8765`：`/healthz` 表示程序存活、`/readyz` **僅在 `healthy` 回 ready，其餘狀態回 503**、`/status` 回傳完整 health snapshot。可用 `--status-port 0` 停用。
 
 也可以用同一個行情、委託和帳本模組執行範例均線策略：
 
@@ -52,13 +54,7 @@ py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow `
   --strategy moving-average --short-window 5 --long-window 20 --entry-ticks 0.5
 ```
 
-只有在確認 TTB 帳戶空倉、沒有未成交單，並人工檢查過 shadow 紀錄後，才可使用虛擬下單模式：
-
-```powershell
-py -3.13 sim_hft_bot.py `
-  --symbol <ACTIVE_SYMBOL> --mode ttb --strategy moving-average `
-  --confirm-virtual-orders --confirm-flat-account
-```
+**虛擬下單仍不可直接依兩個確認旗標啟用。** 必須完成 #2/#4 真實 API／margin 單位驗收、所有工作中委託與持倉對帳，並配置正確的限額後才可由操作員考慮切換。詳細安全流程以 [OPERATIONS.md](OPERATIONS.md) 為準；舊版缺少必要風控的 live 指令已移除。
 
 異常退出、網路中斷或重啟後，必須先在 TTB 檢查實際掛單與部位，再重啟程式。不可把此程式視為保證斷線平倉的無人值守系統。
 
