@@ -537,11 +537,13 @@ class BotEngine:
             except Exception as exc:
                 self.fatal_error = str(exc)
                 LOG.exception("strategy cycle failed; stopping for reconciliation")
+                gateway_snapshot = self.gateway.snapshot()
                 self.health.update(
                     state="error",
                     fatal_error=self.fatal_error,
                     position=self.ledger.position,
-                    active_orders=self.gateway.snapshot(),
+                    active_orders=gateway_snapshot,
+                    risk_block_reason=gateway_snapshot.get("risk_block_reason", ""),
                 )
                 self.stop_event.set()
 

@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from strategy_core import Fill, IndependentFillSimulator, OrderIntent, PositionLedger, Quote, StrategyConfig
 
 from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response
-from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, parse_available_margin, validate_exposure
+from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, assess_pretrade
 from .journal import ExecutionJournal
 
 
@@ -238,6 +238,7 @@ class TTBOrderGateway:
         # side/price/quantity cannot distinguish a bot order from a manual one.
         self.unknown_order_nos: set[str] = set()
         self.unsafe_reason = ""
+        self.risk_block_reason = ""
 
     def set_trading_day(self, trading_day: str) -> None:
         if self.current_trading_day != trading_day:
@@ -441,22 +442,24 @@ class TTBOrderGateway:
                 self._place(wanted)
 
     def _place(self, intent: OrderIntent) -> None:
-        if intent.quantity > self.config.max_order_qty:
-            raise PreTradeRiskError("order exceeds configured max_order_qty")
-        validate_exposure(intent, self.ledger.position, self.active, self.config, self.risk_limits)
         now = time.time()
-        if intent.role == "entry":
-            self.order_rate.assert_entry_budget(now)
-            limits = self.risk_limits
-            if limits.minimum_available_margin <= 0 or not limits.available_margin_field:
-                raise PreTradeRiskError(
-                    "live entries require a verified --available-margin-field and --min-available-margin"
-                )
-            margin = parse_available_margin(
-                self.api.query_margin(), limits.available_margin_field
+        try:
+            assess_pretrade(
+                intent, self.ledger.position, self.active, self.config,
+                self.risk_limits, order_rate=self.order_rate, now=now,
+                margin_supplier=self.api.query_margin,
             )
-            if margin < limits.minimum_available_margin:
-                raise PreTradeRiskError("available TTB margin below required headroom")
+        except PreTradeRiskError as exc:
+            self.risk_block_reason = str(exc)
+            # A crash in audit persistence itself also blocks the order.
+            self.record_event("risk_block", {
+                "reason": self.risk_block_reason,
+                "role": intent.role,
+                "side": intent.side,
+                "quantity": intent.quantity,
+            })
+            raise
+        self.risk_block_reason = ""
         # Persist the attempt before the network side effect; do not allow a
         # process restart to reset the rate budget or replay a failed order.
         self.order_rate.record("order", now)
@@ -658,6 +661,7 @@ class TTBOrderGateway:
             "pending": {side: asdict(value["intent"]) for side, value in self.pending.items()},
             "unknown_orders": sorted(self.unknown_order_nos),
             "unsafe_reason": self.unsafe_reason,
+            "risk_block_reason": self.risk_block_reason,
             "reported_position": self.reported_position,
             "position_mismatch_polls": self.position_mismatch_polls,
             "rate_counters": rate_counters,

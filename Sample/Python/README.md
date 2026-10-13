@@ -115,7 +115,15 @@ TTB gateway 在送新入口單之前會檢查：
 - `--max-notional`：依商品乘數與委託價估算的名目曝險上限，live 進場**必須明確設定正數**。
 - `--available-margin-field` 與 `--min-available-margin`：從 `QUERYMARGIN()` 的指定欄位確認可用保證金下限；**欄位必須先由真實 TTB 虛擬帳戶的回報驗證，不得猜測**。未提供欄位或回覆格式不確定則拒絕新入口。
 
-次數統計先寫入 `output/rate-counters-SYMBOL.json` 再送 API，正常重啟不會歸零。該檔案**不可人工重設**，也不會被 14 天的 CSV cleanup 移除。持倉風險退出採 reduce-only 驗證，仍允許在超過一般進場速率限制時執行風險退出。`QUERYMARGIN()` 實際欄位語義仍待 #2 端到端驗收確認。
+次數統計先寫入 `output/rate-counters-SYMBOL.json` 再送 API，正常重啟不會歸零。該檔案**不可人工重設**，也不會被 14 天的 CSV cleanup 移除。持倉風險退出採 reduce-only 驗證，仍允許在超過一般進場速率限制時執行風險退出。
+
+Gateway 的保證金、持倉/未成交單名目曝險、單筆委託口數和送單頻率已統一交由 `ttb.risk.assess_pretrade()` 驗證。若不符合條件，**不會呼叫 `NEWORDER`**；封鎖原因記錄於 Journal 的 `risk_block` 事件，並顯示在 `gateway.snapshot().risk_block_reason` 和健康狀態的 `risk_block_reason`。可使用以下完全離線、以合成 margin fixture 測試同一份風控程式碼：
+
+```powershell
+py -3.13 -m unittest test_shared_pretrade_policy -v
+```
+
+此測試不會連到 TTB。合成 fixture 只驗證判斷和阻擋機制，**不代表 `QUERYMARGIN` 真實欄位及單位已證實**，也不應以合成欄位啟用 live。`QUERYMARGIN()` 實際欄位語義仍待 #2 端到端驗收確認。
 
 使用 supervisor 切換 `config.json` 為 live 時，`extraArgs` **必須**額外包含（以下全為待人工校準的 placeholder，不能直接用於 live）：
 
