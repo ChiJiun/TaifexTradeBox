@@ -34,7 +34,7 @@ jobs:
       - name: Parse automation PowerShell scripts
         shell: pwsh
         run: |
-          $scripts = Get-ChildItem -Path automation -Filter '*.ps1' -File
+          $scripts = Get-ChildItem -Path automation, '../../azure' -Filter '*.ps1' -File
           foreach ($script in $scripts) {
             $tokens = $null
             $errors = $null
