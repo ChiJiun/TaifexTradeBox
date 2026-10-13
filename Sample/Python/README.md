@@ -72,6 +72,14 @@ TTB 下單前對帳回覆缺少 `Data`、委託剩餘量/持倉口數缺失、�
 
 **真實 TTB API 的完整回覆格式仍待 #2 核實**；保守拒絕不代表已完成真實帳戶驗收。
 
+## 行情完整性、積壓與停止指令（#13）
+
+即時訂閱改成精確商品 ZMQ topic `TTB$Tick$SYMBOL`；ZMQ `RCVHWM=1000` 防止無限制佇列膨脹。若網路層積壓超過上限，底層訊息可能被捨棄；策略端 20,000 筆 queue 滿時採**丟棄最舊行情**，但若進入策略的行情等待超過 2 秒則停機，不會拿過時報價繼續下單。
+
+`QuoteMonitor` 對有效報價檢查重複內容、倒退時間、成交量異常重置與 TickTime 對照臺北時間的延遲（預設 `--max-exchange-lag-seconds 15`）。無法解析 TickTime 的即時訊息同樣拒絕；拒絕的訊息不會進入策略，因此不會把行情中斷狀態偽裝成正常。`/status`、`health.json` 的 `market_data` 包含 `received`、`accepted`、`duplicates`、`out_of_order`、`lagged`、`volume_resets` 等計數。由於 TTB 真實 TickTime 格式尚待 #2 驗證，若資料不符合 `HH:MM:SS[.fraction]`，會安全拒絕而非猜測時區或解除保護。
+
+Supervisor 傳遞 `--stop-file output/supervisor/stop.requested`，bot 每秒檢查是否收到停止請求並執行既有關機對帳；若當時仍有持倉或撤單尚未確認，仍可能留下人工對帳旗標。不得把 stop file 當成「保證立即平倉」的命令。
+
 ## Live 下單前風控（#4）
 
 TTB gateway 在送新入口單之前會檢查：
