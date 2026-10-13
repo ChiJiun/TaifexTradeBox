@@ -25,6 +25,8 @@ $requiredFiles = @(
     'ttb\orders.py',
     'ttb\reconciliation.py',
     'ttb\contracts.py',
+    'ttb\calendar.py',
+    'automation\taifex_calendar_2026.json',
     'ttb\journal.py',
     'ttb\risk.py',
     'ttb\runtime.py',

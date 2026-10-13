@@ -291,21 +291,29 @@ class TTBOrderGateway:
                 for row in rows
                 if order_number(row)
             }
+            # A one-symbol bot must not start when another contract has
+            # unowned account exposure (including the old expiry month).
+            # Otherwise a manual symbol edit could effectively cross-roll an
+            # unresolved position without reconciliation.
             working = [
-                order_number(row)
-                for row in rows
-                if (not order_symbol(row) or order_symbol(row) == self.config.symbol.upper())
-                and is_working_order(row)
+                order_number(row) or "UNKNOWN"
+                for row in rows if is_working_order(row)
             ]
             if working:
                 raise RuntimeError(
-                    "Working orders already exist for this symbol; reconcile manually before startup: "
+                    "Working orders already exist in TTB account; reconcile manually before startup: "
                     + ", ".join(working)
                 )
-            if self.reported_position:
+            open_positions = [
+                row for row in _response_rows(position_response)
+                if _strict_quantity(
+                    _value(row, "Hold", "HOLD", "PositionQty", "Qty", default=None),
+                    "position quantity",
+                ) > 0
+            ]
+            if open_positions:
                 raise RuntimeError(
-                    "Non-flat TTB position exists for this symbol; reconcile manually before startup: "
-                    f"{self.config.symbol} position={self.reported_position}"
+                    "Non-flat TTB account position exists; reconcile ALL symbols before startup"
                 )
             self.bootstrapped = True
             LOG.info(

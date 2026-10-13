@@ -52,6 +52,35 @@ if (Test-Path -LiteralPath $ConfigPath) {
                 [string]::IsNullOrWhiteSpace($extras[$marginFieldIndex + 1])) {
                 Add-Failure 'ttb mode requires a verified --available-margin-field in extraArgs'
             }
+            $calendarIndex = [array]::IndexOf($extras, '--calendar-file')
+            $calendarName = 'automation\taifex_calendar_2026.json'
+            if ($calendarIndex -ge 0) {
+                if (($calendarIndex + 1) -ge $extras.Count) {
+                    Add-Failure 'ttb mode --calendar-file is missing its argument'
+                } else {
+                    $calendarName = $extras[$calendarIndex + 1]
+                }
+            }
+            $calendarPath = if ([System.IO.Path]::IsPathRooted($calendarName)) {
+                $calendarName
+            } else {
+                Join-Path $WorkDir $calendarName
+            }
+            if (-not (Test-Path -LiteralPath $calendarPath)) {
+                Add-Failure "verified TAIFEX calendar missing: $calendarPath"
+            } else {
+                try {
+                    $calendar = Get-Content -Raw -LiteralPath $calendarPath | ConvertFrom-Json
+                    $today = (Get-Date).Date
+                    $start = [datetime]::ParseExact([string]$calendar.starts, 'yyyy-MM-dd', $null)
+                    $end = [datetime]::ParseExact([string]$calendar.ends, 'yyyy-MM-dd', $null)
+                    if ($today -lt $start -or $today -gt $end) {
+                        Add-Failure "TAIFEX calendar has no verified coverage for $($today.ToString('yyyy-MM-dd'))"
+                    }
+                } catch {
+                    Add-Failure "TAIFEX calendar is invalid: $($_.Exception.Message)"
+                }
+            }
         }
     } catch {
         Add-Failure "Config JSON invalid: $($_.Exception.Message)"

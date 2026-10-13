@@ -14,7 +14,9 @@ from strategy_core import PositionLedger, StrategyConfig
 from ttb.api import TTBApi
 from ttb.engine import BotEngine, CsvRecorder
 from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
-from ttb.runtime import SessionSchedule
+from ttb.runtime import SessionSchedule, TAIPEI_TZ
+from ttb.calendar import TradingCalendar, ContractInfo, CalendarCoverageError
+from datetime import datetime
 from ttb.status_server import StatusServer
 from ttb.risk import PreTradeLimits
 from ttb.contracts import point_value_for
@@ -105,6 +107,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--after-hours-open", default="15:00")
     parser.add_argument("--after-hours-close", default="05:00")
     parser.add_argument("--disable-after-hours", action="store_true")
+    parser.add_argument("--calendar-file", type=Path,
+                        default=Path("automation/taifex_calendar_2026.json"),
+                        help="TAIFEX verified trading-day calendar; update each year before live trading")
     parser.add_argument("--risk-state-file", type=Path, default=Path("output") / "risk-state.json")
     parser.add_argument("--stop-file", type=Path, default=None,
                         help="operator stop request file; supervisor passes output/supervisor/stop.requested")
@@ -258,12 +263,29 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     strategy = build_strategy(args, config, ledger)
+    calendar = None
+    contract = None
+    try:
+        if args.calendar_file.exists():
+            calendar = TradingCalendar.from_file(args.calendar_file)
+        elif args.mode == "ttb":
+            raise CalendarCoverageError("TTB live requires a verified --calendar-file")
+        if calendar is not None:
+            contract = ContractInfo.from_symbol(config.symbol, datetime.now(TAIPEI_TZ).year)
+    except (CalendarCoverageError, ValueError) as exc:
+        if args.mode == "ttb":
+            raise SystemExit(f"TTB live calendar/contract validation failed: {exc}") from exc
+        LOG.warning("shadow calendar unavailable or contract unsupported: %s", exc)
+        calendar = None
+        contract = None
     schedule = SessionSchedule(
         regular_open=args.regular_open,
         regular_close=args.regular_close,
         after_hours_open=args.after_hours_open,
         after_hours_close=args.after_hours_close,
         include_after_hours=not args.disable_after_hours,
+        calendar=calendar,
+        contract=contract,
     )
     engine = BotEngine(
         config,

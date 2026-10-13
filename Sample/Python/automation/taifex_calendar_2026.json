@@ -1,0 +1,26 @@
+{
+  "starts": "2026-01-01",
+  "ends": "2026-12-31",
+  "closed_dates": [
+    "2026-01-01",
+    "2026-02-12",
+    "2026-02-13",
+    "2026-02-16",
+    "2026-02-17",
+    "2026-02-18",
+    "2026-02-19",
+    "2026-02-20",
+    "2026-02-27",
+    "2026-04-03",
+    "2026-04-06",
+    "2026-05-01",
+    "2026-06-19",
+    "2026-09-25",
+    "2026-09-28",
+    "2026-10-09",
+    "2026-10-26",
+    "2026-12-25"
+  ],
+  "source": "TAIFEX 115-year announced exchange opening/closing dates (2025-10-30): https://www.taifex.com.tw/file/taifex/CHINESE/11/attach/台期交字第1140003036號函.pdf",
+  "note": "Official calendar may be amended; review each year. Lunar New Year last trading day 2026-02-11 night session through 2026-02-12 05:00 belongs to 2026-02-23."
+}
