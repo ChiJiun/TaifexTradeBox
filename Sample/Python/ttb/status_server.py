@@ -34,7 +34,10 @@ class StatusServer:
                     return
                 state = snapshot()
                 bot_state = str(state.get("state", "unknown"))
-                ready = bot_state not in {"error", "manual_reconciliation_required"}
+                # Liveness (/healthz) differs from trading readiness.
+                # A stale, paused, stopped or unknown bot must never appear
+                # ready to a supervisor or load-balancer health check.
+                ready = bot_state == "healthy"
                 if self.path == "/healthz":
                     payload = {"ok": True, "state": bot_state}
                     status = HTTPStatus.OK
