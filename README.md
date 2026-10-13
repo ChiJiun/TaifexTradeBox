@@ -178,6 +178,19 @@ mstsc /v:20.189.93.22
 az vm deallocate --resource-group a112502533_rg_3957 --name ttb-sim-01
 ```
 
+## Windows CI 與離線 Release 驗證
+
+每個發往 `main` 的 pull request，以及推送至 `main` 的 commit，都會由 [GitHub Actions / Validate Python and PowerShell](.github/workflows/validate.yml) 使用 Windows runner、Python 3.13 執行：安裝 `requirements.txt`、`unittest`、`compileall`、CLI `--help`、所有 automation PowerShell 腳本語法檢查，以及 `validate_release.ps1 -SkipUnitTests`。測試與語法錯誤會導致 CI job 失敗；可以從該次 GitHub Actions run 取得完整執行 log。CI 不啟動 TTB GUI，也不送出任何委託，不需要 GitHub secrets。
+
+本機或 Azure 發版前可執行：
+
+```powershell
+cd Sample/Python
+powershell -ExecutionPolicy Bypass -File automation/validate_release.ps1 -WorkDir (Get-Location).Path
+```
+
+CI 成功**不能取代** TTB 虛擬帳戶的人工驗證（[#2](https://github.com/ChiJiun/TaifexTradeBox/issues/2)）。正式部署還須通過 `preflight_ttb.ps1`，確認登入帳戶、持倉、委託、API 回覆及環境安全。此 CI 的角色是守住可重現的離線測試與封裝完整性。
+
 ## 研究與驗收原則
 
 目前實作是研究版本，尚未完成官方撮合器的端到端校準。下一步應取得多個交易日資料，按日期做樣本內/樣本外切分，至少檢查：
