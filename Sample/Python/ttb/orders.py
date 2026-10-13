@@ -12,6 +12,7 @@ from strategy_core import Fill, IndependentFillSimulator, OrderIntent, PositionL
 
 from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response
 from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, parse_available_margin, validate_exposure
+from .journal import ExecutionJournal
 
 
 LOG = logging.getLogger("ttb.orders")
@@ -201,6 +202,7 @@ class TTBOrderGateway:
         poll_seconds: float,
         risk_limits: PreTradeLimits | None = None,
         risk_counters_path: Path | None = None,
+        journal_dir: Path | None = None,
     ) -> None:
         self.api = module_or_api if isinstance(module_or_api, TTBApi) else TTBApi(module_or_api)
         # Keep the old public attribute for code that inspected it.
@@ -225,10 +227,26 @@ class TTBOrderGateway:
             config.symbol,
             self.risk_limits,
         )
+        self.journal = ExecutionJournal(
+            journal_dir or ((risk_counters_path.parent / "journal") if risk_counters_path
+                            else Path("output") / "journal"),
+            config.symbol,
+        )
+        self.current_trading_day = ""
+        self._last_broker_report: dict[str, Any] | None = None
         # Order ownership must be proven by an API-returned order ID; matching
         # side/price/quantity cannot distinguish a bot order from a manual one.
         self.unknown_order_nos: set[str] = set()
         self.unsafe_reason = ""
+
+    def set_trading_day(self, trading_day: str) -> None:
+        if self.current_trading_day != trading_day:
+            self.current_trading_day = trading_day
+            _, cursors = self.journal.replay_ledger(trading_day, self.config)
+            self.seen_deal_qty = cursors
+
+    def record_event(self, kind: str, payload: dict[str, Any]) -> None:
+        self.journal.append(kind, payload, self.current_trading_day or None)
 
     def _assert_safe(self) -> None:
         if self.unsafe_reason:
@@ -255,6 +273,18 @@ class TTBOrderGateway:
             raise RuntimeError("Position reconciliation failed")
         self.reported_position = reported_position(position_response, self.config.symbol)
         rows = _response_rows(response)
+        report_summary = {
+            "orders": [{
+                "order_no": order_number(row),
+                "symbol": order_symbol(row),
+                "remaining": order_remaining(row),
+                "filled": int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0))),
+            } for row in rows],
+            "reported_position": self.reported_position,
+        }
+        if report_summary != self._last_broker_report:
+            self.record_event("broker_report", report_summary)
+            self._last_broker_report = report_summary
         if not self.bootstrapped:
             self.preexisting_order_nos = {
                 order_number(row)
@@ -340,8 +370,15 @@ class TTBOrderGateway:
                 continue
             deal_total = int(_float(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0)))
             previous = self.seen_deal_qty.get(order_no, 0)
-            if deal_total > previous and price > 0:
+            if deal_total > previous:
+                if price <= 0:
+                    raise RuntimeError("TTB fill price invalid; manual reconciliation required")
                 fill = Fill(side, price, deal_total - previous, order_no, quote.received_at)
+                # Durable append precedes the in-memory ledger mutation.
+                self.record_event("fill", {
+                    "order_id": order_no, "side": side, "price": price,
+                    "quantity": fill.quantity, "deal_total": deal_total,
+                })
                 self.ledger.on_fill(fill)
                 fills.append(fill)
             self.seen_deal_qty[order_no] = max(previous, deal_total)
@@ -415,6 +452,10 @@ class TTBOrderGateway:
         # Persist the attempt before the network side effect; do not allow a
         # process restart to reset the rate budget or replay a failed order.
         self.order_rate.record("order", now)
+        self.record_event("order_intent", {
+            "side": intent.side, "quantity": intent.quantity,
+            "price": intent.price, "role": intent.role,
+        })
         request = TTBOrderRequest(
             symbol=self.config.symbol,
             side=intent.side,
@@ -425,6 +466,10 @@ class TTBOrderGateway:
         response = self.api.new_order(request)
         order_no = extract_order_no(response)
         if order_no:
+            self.record_event("order_ack", {
+                "order_no": order_no, "side": intent.side,
+                "quantity": intent.quantity, "price": intent.price,
+            })
             self.owned_order_nos.add(order_no)
             self.active[intent.side] = {
                 "order_no": order_no,
@@ -457,7 +502,9 @@ class TTBOrderGateway:
         except Exception as exc:
             counter_failure = exc
             LOG.critical("unable to persist cancel attempt; still attempting safety cancel: %s", exc)
+        self.record_event("cancel_intent", {"side": side, "order_no": order_no})
         self.api.cancel_order(order_no)
+        self.record_event("cancel_ack", {"side": side, "order_no": order_no})
         LOG.info("TTB CANCEL %s %s", side, order_no)
         self.cancel_requested.add(order_no)
         if counter_failure:
@@ -517,6 +564,10 @@ class TTBOrderGateway:
                 side = "sell" if self.reported_position > 0 else "buy"
                 price = quote.bid if side == "sell" else quote.ask
                 self.order_rate.record("order", time.time())
+                self.record_event("order_intent", {
+                    "side": side, "quantity": abs(self.reported_position),
+                    "role": "shutdown_flatten", "price": price,
+                })
                 response = self.api.new_order(
                     TTBOrderRequest(
                         symbol=self.config.symbol,
@@ -528,6 +579,11 @@ class TTBOrderGateway:
                 )
                 order_no = extract_order_no(response)
                 if order_no:
+                    self.record_event("order_ack", {
+                        "order_no": order_no, "side": side,
+                        "quantity": abs(self.reported_position), "price": price,
+                        "role": "shutdown_flatten",
+                    })
                     self.owned_order_nos.add(order_no)
                     self.active[side] = {
                         "order_no": order_no,

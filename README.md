@@ -17,6 +17,7 @@ Sample/Python/
   ttb/reconciliation.py     全帳戶唯讀對帳與稽核工具核心
   ttb/risk.py               TTB 委託前風控與跨重啟委託速率計數
   ttb/contracts.py          TAIFEX 臺指/小臺/微臺商品乘數解析與安全驗證
+  ttb/journal.py            append-only、hash-chained 交易事件與跨當機成交回建
   strategies/               可替換的策略範例
   strategy_core.py          策略、microprice、OFI 與模擬成交核心
   sim_hft_bot.py            組合上述模組的命令列入口

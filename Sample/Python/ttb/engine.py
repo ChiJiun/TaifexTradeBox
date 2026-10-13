@@ -188,6 +188,7 @@ class BotEngine:
             config.symbol,
         )
         self.current_trading_day = ""
+        self._previous_halt_reason = ""
         self.flatten_on_shutdown = flatten_on_shutdown
         self.health = HealthReporter(
             health_path or output / "health.json",
@@ -215,6 +216,8 @@ class BotEngine:
             return
         self.current_trading_day = trading_day
         saved = self.risk_state.load(trading_day)
+        if hasattr(self.gateway, "set_trading_day"):
+            self.gateway.set_trading_day(trading_day)  # type: ignore[attr-defined]
         if saved:
             self.ledger.realized_pnl = float(saved.get("realized_pnl", 0.0))
             self.ledger.peak_realized_pnl = float(saved.get("peak_realized_pnl", self.ledger.realized_pnl))
@@ -249,6 +252,34 @@ class BotEngine:
             ):
                 if hasattr(self.strategy, name):
                     setattr(self.strategy, name, value)
+
+        # The durable fill stream is authoritative after a crash between
+        # broker fill, ledger update and risk-state checkpoint. An incomplete
+        # historic state is never silently reset when the journal is empty.
+        if hasattr(self.gateway, "journal"):
+            journal = self.gateway.journal  # type: ignore[attr-defined]
+            recovered, _cursors = journal.replay_ledger(trading_day, self.config)
+            for event in journal.events(trading_day):
+                if event["kind"] == "risk_halt_transition" and hasattr(self.strategy, "halt_reason"):
+                    self.strategy.halt_reason = str(event["payload"].get("current", ""))
+            if recovered.position != 0:
+                raise RuntimeError("execution journal has open position; manual TTB reconciliation required")
+            if saved and int(saved.get("fill_count", 0)) > recovered.fill_count:
+                raise RuntimeError("risk snapshot contains fills absent from journal; manual reconciliation required")
+            self.ledger.realized_pnl = recovered.realized_pnl
+            self.ledger.peak_realized_pnl = recovered.peak_realized_pnl
+            self.ledger.fees_and_tax = recovered.fees_and_tax
+            self.ledger.fill_count = recovered.fill_count
+            if self.ledger.realized_pnl <= -self.config.daily_loss_limit:
+                if hasattr(self.strategy, "halt_reason"):
+                    self.strategy.halt_reason = "journal_recovered_daily_loss_limit"
+            elif (
+                self.ledger.peak_realized_pnl - self.ledger.realized_pnl
+                >= self.config.max_drawdown
+            ):
+                if hasattr(self.strategy, "halt_reason"):
+                    self.strategy.halt_reason = "journal_recovered_max_drawdown"
+            self._previous_halt_reason = str(getattr(self.strategy, "halt_reason", ""))
 
     def _checkpoint_risk_state(self) -> None:
         if not self.current_trading_day:
@@ -343,6 +374,14 @@ class BotEngine:
         min_interval = self.config.min_quote_interval_ms / 1000.0
         if not urgent and quote.received_at - self.last_decision_at < min_interval:
             return None
+        halt_reason = str(getattr(self.strategy, "halt_reason", ""))
+        if hasattr(self.gateway, "record_event") and halt_reason != self._previous_halt_reason:
+            self.gateway.record_event(  # type: ignore[attr-defined]
+                "risk_halt_transition",
+                {"previous": self._previous_halt_reason, "current": halt_reason,
+                 "position": self.ledger.position, "realized_pnl": self.ledger.realized_pnl},
+            )
+            self._previous_halt_reason = halt_reason
         self.gateway.sync(decision.intents, quote)
         self.last_decision_at = quote.received_at
         self.decision_count += 1
@@ -491,6 +530,17 @@ class BotEngine:
                 LOG.exception("final shutdown reconciliation failed")
         elif hasattr(self.gateway, "cancel_all"):
             self.gateway.cancel_all()  # type: ignore[attr-defined]
+        try:
+            if hasattr(self.gateway, "record_event"):
+                self.gateway.record_event(  # type: ignore[attr-defined]
+                    "shutdown", {"position": self.ledger.position,
+                                 "fatal_error": self.fatal_error,
+                                 "reconciled": shutdown_reconciled},
+                )
+        except Exception as exc:
+            self.fatal_error = self.fatal_error or str(exc)
+            shutdown_reconciled = False
+            LOG.exception("shutdown journal persistence failed")
         self._checkpoint_risk_state()
         self.recorder.close()
         self.raw_recorder.close()

@@ -296,6 +296,21 @@ class LiveOwnershipSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Unowned TTB"):
             self.poll(module, gateway, [self.row(remaining="0", filled="1")])
 
+    def test_duplicate_broker_fill_report_is_journaled_once(self):
+        module, gateway = self.setup_gateway()
+        gateway.owned_order_nos.add("OWNED1")
+        module.QUERYRESTOREFILLREPORT = lambda: {
+            "Code": "0000",
+            "Data": [{"Hold": "1", "ComdID1": "TXFA7", "ComdBS1": "1"}],
+        }
+        filled = self.row(order_no="OWNED1", filled="1", remaining="0")
+        self.poll(module, gateway, [filled])
+        self.poll(module, gateway, [filled])
+        self.assertEqual(gateway.ledger.position, 1)
+        self.assertEqual(gateway.ledger.fill_count, 1)
+        events = gateway.journal.events(gateway.journal.local_day())
+        self.assertEqual([event["kind"] for event in events].count("fill"), 1)
+
     def test_two_bot_owned_working_orders_on_same_side_fail_closed(self):
         module, gateway = self.setup_gateway()
         gateway.owned_order_nos.update({"ONE", "TWO"})
