@@ -24,6 +24,7 @@ $requiredFiles = @(
     'ttb\market_data.py',
     'ttb\orders.py',
     'ttb\reconciliation.py',
+    'ttb\contracts.py',
     'ttb\risk.py',
     'ttb\runtime.py',
     'ttb\status_server.py',

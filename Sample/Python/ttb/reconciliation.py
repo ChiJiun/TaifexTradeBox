@@ -91,7 +91,11 @@ def inspect_account(api: AccountReader, symbol: str) -> AccountSnapshot:
             total_raw = _value(row, "VOLM", "OrderQty", default=None)
             filled_raw = _value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=None)
             if total_raw is None or filled_raw is None:
-                if is_terminal_order(row) and status:
+                terminal_status = any(
+                    token in status.lower()
+                    for token in ("刪", "取消", "完全成交", "全部成交", "cancel", "filled", "rejected", "拒絕")
+                )
+                if terminal_status:
                     remaining = 0
                 else:
                     raise AccountInspectionError("order report cannot determine remaining quantity")
