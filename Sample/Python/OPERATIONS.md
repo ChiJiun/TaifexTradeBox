@@ -9,6 +9,19 @@
 - **尚未驗收**：正確虛擬競賽帳戶身分、真實 TTB `QUERYMARGIN` 欄位／單位、下單與取消競態，以及 GUI 重啟後完整恢復（#2/#4/#10）。
 - **禁止**：無人值守啟用 `--mode ttb`、不明來源委託的猜測式撤單、帶倉換月、手動刪除異常對帳旗標。
 
+## 0. VM 唯讀健康稽核（#10）
+
+Windows VM 目前是否能持續監控，不應僅依 Task Scheduler 顯示 `Running` 推斷。執行不修改 VM 的稽核指令：
+
+```powershell
+cd C:\TTB\Sample\Python
+powershell -ExecutionPolicy Bypass -File automation\audit_vm_readiness.ps1 -WorkDir (Get-Location).Path
+```
+
+回報 JSON 會列出 TTB 進程、API/行情監聽埠、Automation/Health Watchdog 工作排程、心跳年齡、bot 狀態、人工待對帳旗標及部署必備檔案。任何必要項缺失即 exit 2；`safeForSupervisedShadowSoak=true` **僅表示 Shadow 監控前置條件通過，不表示帳戶驗證通過或允許 Live**。`supervisedLiveTradingApproved` 一律為 false，直到 #2/#4 真實端到端驗收完成。
+
+2026-10-14 Azure VM 只讀查核曾看到 `TTB Automation` 處於 Running，但 bot 健康狀態為 `stale_market_data`，且缺少 `TTB Health Watchdog` 排程、`health_watchdog.ps1`、最新 `ttb_readonly_capture.py` 和 release validator。**不能把該 VM 宣稱為已達成 24/7 完整運行。** 此稽核不會自行升級現有執行中的交易程式；請在人工安排維護與 dry-run 後再部署。
+
 ## 1. VM、GUI 與環境
 
 實際 TTB GUI 應在互動式 Windows 工作階段登入。VM 實際 RDP NSG 僅限已核准的管理來源 IP，若 IP 改變，使用 [RDP allowlist 工具](../../azure/Set-TtbRdpAllowlist.ps1) 更新，不要改回公網 `*`。

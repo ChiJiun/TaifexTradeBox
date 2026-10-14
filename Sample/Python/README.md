@@ -147,6 +147,10 @@ py -3.13 sim_hft_bot.py --symbol TXFA7 --mode shadow `
 
 `previous_day_equity` 必須事先從正確帳戶核實；未提供時，CompetitionPnlShaping 預設拒絕新進場。停機原因由 engine 的既有風控快照保存。配置參數可以序列化為 JSON，但不能以此繞過單筆口數、保證金、名目曝險或委託頻率限制。有限攤平（02）與最終 TSMC 組合（05）仍未實作，現有策略也尚未通過真實 TTB 資料的 walk-forward 成效及 Live API 驗收。
 
+## VM 實際運行稽核（#10）
+
+`automation/audit_vm_readiness.ps1` 會唯讀查核 VM 的 TTB GUI、8080/51141 服務、Scheduled Tasks（含 Watchdog）、`health.json` 心跳、待對帳旗標及本機部署工具版本，回傳 JSON 與成功／失敗 exit code。與 48 小時加速測試不同，這可在真正的 VM 上協助指出不符合 24/7 運行要求的缺口。詳細執行方式與 2026-10-14 實測限制見 [OPERATIONS.md](OPERATIONS.md#0-vm-唯讀健康稽核10)。
+
 ## 24/7 加速故障測試（#10）
 
 離線測試完全使用 `ShadowGateway`，不載入 TTB GUI 或向交易 API 下單：
