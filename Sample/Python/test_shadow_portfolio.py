@@ -73,8 +73,41 @@ class IsolatedPortfolioTests(unittest.TestCase):
             "position": position, "last_price": price, "marked_pnl": pnl,
             "updated_at": (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat(),
             "trading_day": "2026-10-14",
+            "last_quote_wall_utc": datetime.now(timezone.utc).isoformat(),
         }
         path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_fresh_heartbeat_cannot_hide_stale_exchange_quote(self):
+        settings = self.config()
+        first, second = settings.instances
+        self.write_health(first, position=1, price=20000, pnl=-100)
+        self.write_health(second, position=0, price=20000, pnl=0)
+        file = runtime_paths(self.output, first)["health"]
+        row = json.loads(file.read_text(encoding="utf-8"))
+        row["last_quote_wall_utc"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        # Heartbeat remains fresh, but trading risk is UNVALUED.
+        file.write_text(json.dumps(row), encoding="utf-8")
+        with self.assertRaisesRegex(PortfolioSafetyError, "invalid/stale"):
+            evaluate_portfolio(settings, self.output, now=datetime.now(timezone.utc))
+        with self.assertRaisesRegex(PortfolioSafetyError, "bad initial health"):
+            awaiting_initial_quotes(settings, self.output, datetime.now(timezone.utc))
+
+    def test_flat_market_closed_old_quote_waits_without_risk_pass(self):
+        settings = self.config()
+        first, second = settings.instances
+        self.write_health(first, position=0, price=20000, pnl=0, state="waiting_market")
+        self.write_health(second, position=0, price=20000, pnl=0, state="waiting_market")
+        file = runtime_paths(self.output, first)["health"]
+        row = json.loads(file.read_text(encoding="utf-8"))
+        row["last_quote_wall_utc"] = (
+            datetime.now(timezone.utc) - timedelta(hours=6)
+        ).isoformat()
+        file.write_text(json.dumps(row), encoding="utf-8")
+        self.assertTrue(awaiting_initial_quotes(settings, self.output, datetime.now(timezone.utc)))
+        with self.assertRaises(PortfolioSafetyError):
+            evaluate_portfolio(settings, self.output, now=datetime.now(timezone.utc))
 
     def test_portfolio_global_losses_drawdown_notional_and_stale_fail_closed(self):
         settings = self.config()

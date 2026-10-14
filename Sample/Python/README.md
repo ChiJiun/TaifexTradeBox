@@ -126,7 +126,7 @@ py -3.13 -m automation.shadow_portfolio --config automation/shadow_portfolio.jso
 powershell -ExecutionPolicy Bypass -File automation/install_shadow_portfolio_task.ps1
 ```
 
-組合損益採各實例期貨帳本的 `marked_pnl`（扣估計平倉成本），名目曝險按 `abs(position) × last_price × point_value`；它們**不是** broker 證實的可用保證金或帳戶風險指標。**程式碼會拒絕 manifest 中的 `mode=ttb` 或任何企圖以額外參數覆寫 Shadow 的行為。** #12 尚需 broker 多商品保證金與全帳戶統一限額、同時下單競態及真實 VM 長期運行驗收，因此只完成 Shadow 子集。正常操作不得手動清除全域停機旗標；先查明事件原因並重新驗收。
+組合損益採各實例期貨帳本的 `marked_pnl`（扣估計平倉成本），名目曝險按 `abs(position) × last_price × point_value`；它們**不是** broker 證實的可用保證金或帳戶風險指標。特別注意：`health.updated_at` 僅表示 bot 程序仍更新健康資訊，**不代表行情新鮮**。組合監控另外要求 `last_quote_wall_utc` 未超過心跳容忍時間；如果帶倉而行情過期，會 Fail-Closed；若休市、空倉且報價過期，則維持 `waiting_first_quotes`（未通過風控驗收），直到下一筆可驗證行情抵達。**程式碼會拒絕 manifest 中的 `mode=ttb` 或任何企圖以額外參數覆寫 Shadow 的行為。** #12 尚需 broker 多商品保證金與全帳戶統一限額、同時下單競態及真實 VM 長期運行驗收，因此只完成 Shadow 子集。正常操作不得手動清除全域停機旗標；先查明事件原因並重新驗收。
 
 ## 策略模組（#9，僅離線研究驗證）
 
