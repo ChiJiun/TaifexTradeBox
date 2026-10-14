@@ -110,6 +110,24 @@ py -3.13 walk_forward_oos.py output/runs `
 
 內建門檻：留存期至少 100 次平倉循環、費後損益正值、正確持倉結束、回撤不超過 30 萬元、最差單日不低於負 20 萬元、任何單日不獨占超過 50% 正報酬、成交率至少 1%、`probabilistic` Monte Carlo 虧損率不高於 10%。CLI 只允許**加嚴**這些限制。Sharpe 報告為「未年化日 Sharpe」，不得直接視為年化值。三種成交模型不是 broker 實際成交承諾；研究驗收也**不是自動下單核准**，仍須 #2/#4 真實 API/保證金與帳戶人工驗收。
 
+## 多商品 Shadow 組合監控（#12，**不允許 multi-live**）
+
+`automation/shadow_portfolio.py` 可依 JSON manifest 同時管理 2–10 個不同商品的 Shadow 子程序，每個實例擁有獨立 `output/portfolio/instances/INSTANCE_ID/` 下的 health、risk-state、Journal、logs、stop-file，以及各自的 `127.0.0.1` HTTP port。監控端彙總**已估值損益及名目曝險**，依事前門檻執行全域停機；任何子程序異常退出、健康資料損毀、超過心跳期限、交易日不一致或風控超限，都會建立 `portfolio-halt.flag` 並要求全體停止。跨重啟的日內權益峰值保留於 `portfolio-risk-state.json`，不會因重啟清零；`portfolio-health.json` 提供彙總狀態。
+
+```powershell
+cd Sample/Python
+Copy-Item automation/shadow_portfolio.example.json automation/shadow_portfolio.json
+# 更新 symbol（必須為當前有效合約）、商品乘數、費用與限額
+py -3.13 -m automation.shadow_portfolio --config automation/shadow_portfolio.json
+# 唯讀 dry-run 確認每個子程序的參數與路徑後，才啟動：
+py -3.13 -m automation.shadow_portfolio --config automation/shadow_portfolio.json --run
+
+# VM Windows Task Scheduler：預設 dry-run，明確 -Apply 才註冊 Shadow 任務
+powershell -ExecutionPolicy Bypass -File automation/install_shadow_portfolio_task.ps1
+```
+
+組合損益採各實例期貨帳本的 `marked_pnl`（扣估計平倉成本），名目曝險按 `abs(position) × last_price × point_value`；它們**不是** broker 證實的可用保證金或帳戶風險指標。**程式碼會拒絕 manifest 中的 `mode=ttb` 或任何企圖以額外參數覆寫 Shadow 的行為。** #12 尚需 broker 多商品保證金與全帳戶統一限額、同時下單競態及真實 VM 長期運行驗收，因此只完成 Shadow 子集。正常操作不得手動清除全域停機旗標；先查明事件原因並重新驗收。
+
 ## 策略模組（#9，僅離線研究驗證）
 
 三個新模組可透過 `--strategy-module` 載入，且**所有委託都必須經過 TTB Gateway**，沒有直接送單權限：

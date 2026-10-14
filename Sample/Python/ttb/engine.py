@@ -413,6 +413,18 @@ class BotEngine:
             last_quote_exchange_time=quote.exchange_time,
             last_quote_monotonic=quote.received_at,
             last_price=quote.last,
+            point_value=self.config.point_value,
+            marked_pnl=round(
+                self.ledger.mark_to_market(
+                    quote.bid if self.ledger.position > 0 else
+                    quote.ask if self.ledger.position < 0 else quote.last
+                )
+                - abs(self.ledger.position) * (
+                    self.config.fee_per_fill
+                    + abs(quote.last * self.config.point_value * self.config.tax_rate)
+                    + self.config.slippage_ticks * self.config.tick_value
+                ), 2,
+            ),
             last_decision=decision.reason,
             position=self.ledger.position,
             realized_pnl=round(self.ledger.realized_pnl, 2),
