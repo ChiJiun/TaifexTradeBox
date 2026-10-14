@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 import signal
@@ -46,6 +47,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="optional custom strategy as module:Class; class must accept (config, ledger) and implement decide(quote)",
     )
+    parser.add_argument("--strategy-params-json", default="{}",
+                        help="JSON object passed as explicit keyword arguments to --strategy-module")
     parser.add_argument("--host", default="http://localhost:8080")
     parser.add_argument("--zmq-port", type=int, default=51141)
     parser.add_argument("--tick-size", type=float, default=1.0)
@@ -203,7 +206,15 @@ def _load_strategy_class(spec: str) -> type[Any]:
 def build_strategy(args: argparse.Namespace, config: StrategyConfig, ledger: PositionLedger) -> Any:
     if args.strategy_module:
         strategy_class = _load_strategy_class(args.strategy_module)
-        strategy = strategy_class(config, ledger)
+        try:
+            params = json.loads(args.strategy_params_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("--strategy-params-json must contain valid JSON") from exc
+        if not isinstance(params, dict) or len(params) > 20 or len(args.strategy_params_json) > 4096:
+            raise ValueError("--strategy-params-json must be a small JSON object")
+        if any(not isinstance(key, str) or key.startswith("_") for key in params):
+            raise ValueError("invalid strategy parameter name")
+        strategy = strategy_class(config, ledger, **params)
         if not callable(getattr(strategy, "decide", None)):
             raise TypeError(f"custom strategy {args.strategy_module} must implement decide(quote)")
         return strategy

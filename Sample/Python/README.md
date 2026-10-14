@@ -110,6 +110,25 @@ py -3.13 walk_forward_oos.py output/runs `
 
 內建門檻：留存期至少 100 次平倉循環、費後損益正值、正確持倉結束、回撤不超過 30 萬元、最差單日不低於負 20 萬元、任何單日不獨占超過 50% 正報酬、成交率至少 1%、`probabilistic` Monte Carlo 虧損率不高於 10%。CLI 只允許**加嚴**這些限制。Sharpe 報告為「未年化日 Sharpe」，不得直接視為年化值。三種成交模型不是 broker 實際成交承諾；研究驗收也**不是自動下單核准**，仍須 #2/#4 真實 API/保證金與帳戶人工驗收。
 
+## 策略模組（#9，僅離線研究驗證）
+
+三個新模組可透過 `--strategy-module` 載入，且**所有委託都必須經過 TTB Gateway**，沒有直接送單權限：
+
+```powershell
+py -3.13 sim_hft_bot.py --symbol TXFA7 --mode shadow `
+  --strategy-module strategies.sticky_maker:StickyOneTickMaker
+
+py -3.13 sim_hft_bot.py --symbol TXFA7 --mode shadow `
+  --strategy-module strategies.order_flow_maker:OrderFlowGatedMaker `
+  --strategy-params-json '{"entry_threshold":0.25,"short_window":8,"long_window":40}'
+
+py -3.13 sim_hft_bot.py --symbol TXFA7 --mode shadow `
+  --strategy-module strategies.competition_pnl:CompetitionPnlShaping `
+  --strategy-params-json '{"previous_day_equity":2000000,"daily_profit_fraction":0.002}'
+```
+
+`previous_day_equity` 必須事先從正確帳戶核實；未提供時，CompetitionPnlShaping 預設拒絕新進場。停機原因由 engine 的既有風控快照保存。配置參數可以序列化為 JSON，但不能以此繞過單筆口數、保證金、名目曝險或委託頻率限制。有限攤平（02）與最終 TSMC 組合（05）仍未實作，現有策略也尚未通過真實 TTB 資料的 walk-forward 成效及 Live API 驗收。
+
 ## 24/7 加速故障測試（#10）
 
 離線測試完全使用 `ShadowGateway`，不載入 TTB GUI 或向交易 API 下單：
