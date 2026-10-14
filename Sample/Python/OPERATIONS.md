@@ -18,7 +18,7 @@ cd C:\TTB\Sample\Python
 powershell -ExecutionPolicy Bypass -File automation\audit_vm_readiness.ps1 -WorkDir (Get-Location).Path
 ```
 
-回報 JSON 會列出 TTB 進程、API/行情監聽埠、Automation/Health Watchdog 工作排程、心跳年齡、**最後有效行情 UTC 時間距今秒數**、bot 狀態、人工待對帳旗標及部署必備檔案。當 `healthy` 但行情過期／時間缺失時會列出 `accepted_quote_missing_or_stale`，不能以健康檔心跳推斷交易就緒。休市空倉可繼續監控，但 `tradingReady=false`；若有持倉且價格過期則視為不可驗收。任何必要項缺失即 exit 2；`safeForSupervisedShadowSoak=true` **僅表示 Shadow 監控前置條件通過，不表示帳戶驗證通過或允許 Live**。`supervisedLiveTradingApproved` 一律為 false，直到 #2/#4 真實端到端驗收完成。
+回報 JSON 會列出 TTB 進程、API/行情監聽埠、Automation/Health Watchdog 工作排程、心跳年齡、**最後有效行情 UTC 時間距今秒數**、bot 狀態、人工待對帳旗標及部署必備檔案。當 `healthy` 但行情過期／時間缺失時會列出 `accepted_quote_missing_or_stale`，不能以健康檔心跳推斷交易就緒。休市空倉可繼續監控，但 `tradingReady=false`；若有持倉且價格過期則視為不可驗收。報告另有 `runtimeSafetyFeatures`，會檢查實際部署的 `sim_hft_bot.py`、`ttb/engine.py`、`ttb/market_data.py` 是否包含逾時強制停機、交易所行情延遲、行情順序完整性，以及最新有效行情 UTC 時間欄位。任一缺少就標記 `missing_runtime_feature_*`，避免舊版 VM 因為額外複製了新工具便被誤判。此判斷是部署版本差異偵測，**不是**程式來源簽章或無漏洞的證明。任何必要項缺失即 exit 2；`safeForSupervisedShadowSoak=true` **僅表示 Shadow 監控前置條件通過，不表示帳戶驗證通過或允許 Live**。`supervisedLiveTradingApproved` 一律為 false，直到 #2/#4 真實端到端驗收完成。
 
 2026-10-14 Azure VM 只讀查核曾看到 `TTB Automation` 處於 Running，但 bot 健康狀態為 `stale_market_data`，且缺少 `TTB Health Watchdog` 排程、`health_watchdog.ps1`、最新 `ttb_readonly_capture.py` 和 release validator。**不能把該 VM 宣稱為已達成 24/7 完整運行。** 此稽核不會自行升級現有執行中的交易程式；請在人工安排維護與 dry-run 後再部署。
 
