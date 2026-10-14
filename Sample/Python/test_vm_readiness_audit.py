@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import subprocess
 import sys
@@ -11,6 +12,43 @@ from pathlib import Path
 
 @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell/Task Scheduler audit")
 class VmReadinessAuditTests(unittest.TestCase):
+    def run_audit(self, directory):
+        script = Path(__file__).parent / "automation" / "audit_vm_readiness.ps1"
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(script), "-WorkDir", directory],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", timeout=25,
+        )
+        return result, json.loads(result.stdout)
+
+    def test_fresh_heartbeat_with_stale_quote_is_not_trading_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            health_file = Path(directory) / "output" / "health.json"
+            health_file.parent.mkdir(parents=True, exist_ok=True)
+            now = datetime.now(timezone.utc)
+            row = {
+                "symbol": "TMFJ6", "mode": "shadow", "state": "healthy",
+                "position": 0, "updated_at": now.isoformat(),
+                "last_quote_wall_utc": (now - timedelta(hours=4)).isoformat(),
+            }
+            health_file.write_text(json.dumps(row), encoding="utf-8")
+            proc, report = self.run_audit(directory)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertTrue(report["health"]["heartbeatFresh"])
+            self.assertFalse(report["health"]["acceptedQuoteFresh"])
+            self.assertFalse(report["tradingReady"])
+            self.assertIn("accepted_quote_missing_or_stale", report["blockers"])
+            row["state"] = "waiting_market"
+            health_file.write_text(json.dumps(row), encoding="utf-8")
+            _proc, closed = self.run_audit(directory)
+            self.assertFalse(closed["tradingReady"])
+            self.assertNotIn("accepted_quote_missing_or_stale", closed["blockers"])
+            row["position"] = 1
+            health_file.write_text(json.dumps(row), encoding="utf-8")
+            _proc, holding = self.run_audit(directory)
+            self.assertIn("unvalued_position_during_market_close", holding["blockers"])
+
     def test_missing_runtime_files_return_structured_nonready(self):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(__file__).parent / "automation" / "audit_vm_readiness.ps1"

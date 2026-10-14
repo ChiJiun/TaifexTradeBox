@@ -43,6 +43,10 @@ $health = [ordered]@{
     mode = $null
     state = $null
     heartbeatFresh = $false
+    acceptedQuoteFresh = $false
+    acceptedQuoteAgeSeconds = $null
+    positionKnown = $false
+    positionOpen = $false
     ageSeconds = $null
 }
 if ($health.exists) {
@@ -55,6 +59,16 @@ if ($health.exists) {
         $health.state = [string]$row.state
         $health.ageSeconds = [math]::Round($age, 2)
         $health.heartbeatFresh = ($age -ge -10 -and $age -le $MaxHeartbeatAgeSeconds)
+        $health.positionKnown = $null -ne $row.position
+        if ($health.positionKnown) {
+            $health.positionOpen = ([double]$row.position -ne 0)
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.last_quote_wall_utc)) {
+            $last = [datetimeoffset]::Parse([string]$row.last_quote_wall_utc)
+            $quoteAge = ([datetimeoffset]::UtcNow - $last.ToUniversalTime()).TotalSeconds
+            $health.acceptedQuoteAgeSeconds = [math]::Round($quoteAge, 2)
+            $health.acceptedQuoteFresh = ($quoteAge -ge -10 -and $quoteAge -le $MaxHeartbeatAgeSeconds)
+        }
     } catch {
         $health.readable = $false
     }
@@ -84,6 +98,13 @@ if (-not $tasks.watchdog.installed) { $issues.Add('watchdog_task_missing') }
 if (-not $health.readable) { $issues.Add('health_missing_or_unreadable') }
 elseif (-not $health.heartbeatFresh) { $issues.Add('health_heartbeat_stale') }
 if ($health.readable -and -not $healthyState) { $issues.Add('unhealthy_bot_state') }
+if ($health.readable -and -not $health.positionKnown) { $issues.Add('position_unknown') }
+if ($health.readable -and $health.state -eq 'healthy' -and -not $health.acceptedQuoteFresh) {
+    $issues.Add('accepted_quote_missing_or_stale')
+}
+if ($health.readable -and $health.state -eq 'waiting_market' -and $health.positionOpen -and -not $health.acceptedQuoteFresh) {
+    $issues.Add('unvalued_position_during_market_close')
+}
 if ($flagPresent) { $issues.Add('manual_reconciliation_required') }
 foreach ($key in $required.Keys) {
     if (-not $required[$key]) { $issues.Add('missing_' + $key) }
@@ -92,6 +113,7 @@ $result = [ordered]@{
     schema = 'ttb-vm-readiness-v1'
     checkedAt = (Get-Date).ToUniversalTime().ToString('o')
     safeForSupervisedShadowSoak = ($issues.Count -eq 0)
+    tradingReady = ($issues.Count -eq 0 -and $health.state -eq 'healthy' -and $health.acceptedQuoteFresh)
     supervisedLiveTradingApproved = $false
     ttbProcess = $processRunning
     api8080 = $apiListening
