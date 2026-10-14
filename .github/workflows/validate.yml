@@ -35,6 +35,8 @@ jobs:
         run: python -m automation.check_binary_integrity
       - name: Accelerated 48-hour offline shadow soak
         run: python -m automation.soak_offline --hours 48 --interval-minutes 10
+      - name: Validate isolated shadow-portfolio manifest (dry run only)
+        run: python -m automation.shadow_portfolio --config automation/shadow_portfolio.example.json
       - name: Walk-forward synthetic smoke (must fail readiness gate)
         shell: pwsh
         run: |

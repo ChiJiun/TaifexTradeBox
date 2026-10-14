@@ -1,0 +1,26 @@
+{
+  "limits": {
+    "daily_loss_ntd": 20000,
+    "max_drawdown_ntd": 15000,
+    "max_abs_notional_ntd": 20000000,
+    "heartbeat_age_seconds": 45
+  },
+  "instances": [
+    {
+      "id": "micro-tx",
+      "symbol": "TMFJ6",
+      "mode": "shadow",
+      "status_port": 8811,
+      "point_value": 10,
+      "extra_args": ["--fee-per-fill", "25", "--tax-rate", "0.00002"]
+    },
+    {
+      "id": "mini-tx",
+      "symbol": "MTXJ6",
+      "mode": "shadow",
+      "status_port": 8812,
+      "point_value": 50,
+      "extra_args": ["--fee-per-fill", "50", "--tax-rate", "0.00002"]
+    }
+  ]
+}
