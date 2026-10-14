@@ -49,6 +49,29 @@ class VmReadinessAuditTests(unittest.TestCase):
             _proc, holding = self.run_audit(directory)
             self.assertIn("unvalued_position_during_market_close", holding["blockers"])
 
+    def test_code_feature_drift_is_reported_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ttb").mkdir(parents=True)
+            (root / "sim_hft_bot.py").write_text("# old runtime", encoding="utf-8")
+            (root / "ttb" / "engine.py").write_text("# old engine", encoding="utf-8")
+            (root / "ttb" / "market_data.py").write_text("# old quote feed", encoding="utf-8")
+            _proc, report = self.run_audit(directory)
+            self.assertTrue(all(not status for status in report["runtimeSafetyFeatures"].values()))
+            self.assertIn("missing_runtime_feature_staleFatalGuard", report["blockers"])
+            self.assertIn("missing_runtime_feature_quoteSequenceIntegrity", report["blockers"])
+
+            (root / "sim_hft_bot.py").write_text(
+                "# --stale-fatal-seconds --max-exchange-lag-seconds", encoding="utf-8")
+            (root / "ttb" / "engine.py").write_text(
+                "# stale_fatal_seconds last_quote_wall_utc", encoding="utf-8")
+            (root / "ttb" / "market_data.py").write_text(
+                "# max_exchange_lag_seconds\nclass MarketDataIntegrity: pass", encoding="utf-8")
+            _proc, newer = self.run_audit(directory)
+            self.assertTrue(all(newer["runtimeSafetyFeatures"].values()))
+            self.assertNotIn("missing_runtime_feature_staleFatalGuard", newer["blockers"])
+            self.assertFalse(newer["safeForSupervisedShadowSoak"])
+
     def test_missing_runtime_files_return_structured_nonready(self):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(__file__).parent / "automation" / "audit_vm_readiness.ps1"
@@ -66,6 +89,7 @@ class VmReadinessAuditTests(unittest.TestCase):
             self.assertFalse(report["requiredFiles"]["captureCli"])
             self.assertIn("health_missing_or_unreadable", report["blockers"])
             self.assertIn("watchdog", report["tasks"])
+            self.assertFalse(report["runtimeSafetyFeatures"]["staleFatalGuard"])
 
 
 if __name__ == "__main__":

@@ -84,6 +84,30 @@ $required = [ordered]@{
     operatorRunbook = Test-Path -LiteralPath (Join-Path $WorkDir 'OPERATOR_RUNBOOK.md')
     binaryManifest = Test-Path -LiteralPath $manifest
 }
+# A folder can contain old runtime code even after newer helper scripts
+# have been copied into place. Flag missing runtime *capabilities* separately.
+# This is a deployment-drift heuristic, not cryptographic provenance.
+$runtimeFeatures = [ordered]@{
+    staleFatalGuard = $false
+    exchangeLagGuard = $false
+    quoteSequenceIntegrity = $false
+    acceptedQuoteWallTime = $false
+}
+try {
+    $bot = Get-Content -Raw -LiteralPath (Join-Path $WorkDir 'sim_hft_bot.py') -ErrorAction Stop
+    $engine = Get-Content -Raw -LiteralPath (Join-Path $WorkDir 'ttb\engine.py') -ErrorAction Stop
+    $feed = Get-Content -Raw -LiteralPath (Join-Path $WorkDir 'ttb\market_data.py') -ErrorAction Stop
+    $runtimeFeatures.staleFatalGuard = (
+        $bot.Contains('--stale-fatal-seconds') -and $engine.Contains('stale_fatal_seconds')
+    )
+    $runtimeFeatures.exchangeLagGuard = (
+        $bot.Contains('--max-exchange-lag-seconds') -and $feed.Contains('max_exchange_lag_seconds')
+    )
+    $runtimeFeatures.quoteSequenceIntegrity = $feed.Contains('class MarketDataIntegrity')
+    $runtimeFeatures.acceptedQuoteWallTime = $engine.Contains('last_quote_wall_utc')
+} catch {
+    # Missing or unreadable core source code is unsafe: leave all flags false.
+}
 $processRunning = [bool](Get-Process -Name TTB -ErrorAction SilentlyContinue)
 $apiListening = Test-Listener 8080
 $zmqListening = Test-Listener 51141
@@ -109,6 +133,9 @@ if ($flagPresent) { $issues.Add('manual_reconciliation_required') }
 foreach ($key in $required.Keys) {
     if (-not $required[$key]) { $issues.Add('missing_' + $key) }
 }
+foreach ($key in $runtimeFeatures.Keys) {
+    if (-not $runtimeFeatures[$key]) { $issues.Add('missing_runtime_feature_' + $key) }
+}
 $result = [ordered]@{
     schema = 'ttb-vm-readiness-v1'
     checkedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -122,6 +149,7 @@ $result = [ordered]@{
     health = $health
     manualReconciliationFlag = $flagPresent
     requiredFiles = $required
+    runtimeSafetyFeatures = $runtimeFeatures
     blockers = @($issues)
     note = 'Read-only VM audit. Does not authenticate TTB GUI account, true broker margin or API fills.'
 }
