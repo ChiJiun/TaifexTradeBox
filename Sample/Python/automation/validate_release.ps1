@@ -24,6 +24,7 @@ $requiredFiles = @(
     'monte_carlo_market_maker.py',
     'optimize_virtual_competition.py',
     'automation\soak_offline.py',
+    'automation\audit_vm_readiness.ps1',
     'automation\shadow_portfolio.py',
     'automation\shadow_portfolio.example.json',
     'automation\install_shadow_portfolio_task.ps1',

@@ -1,0 +1,108 @@
+param(
+    [string]$WorkDir = 'C:\TTB\Sample\Python',
+    [int]$MaxHeartbeatAgeSeconds = 60
+)
+
+$ErrorActionPreference = 'Stop'
+if ($MaxHeartbeatAgeSeconds -lt 5) {
+    throw 'MaxHeartbeatAgeSeconds must be >=5'
+}
+$healthFile = Join-Path $WorkDir 'output\health.json'
+$reconciliation = Join-Path $WorkDir 'output\supervisor\manual-reconciliation-required.flag'
+
+function Test-Listener([int]$Port) {
+    try {
+        return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    } catch {
+        return $false
+    }
+}
+function Task-Summary([string]$Name) {
+    try {
+        $task = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+        $info = Get-ScheduledTaskInfo -TaskName $Name -ErrorAction Stop
+        return [ordered]@{
+            installed = $true
+            state = [string]$task.State
+            lastTaskResult = [int64]$info.LastTaskResult
+        }
+    } catch {
+        return [ordered]@{ installed = $false; state = 'missing'; lastTaskResult = $null }
+    }
+}
+
+$tasks = [ordered]@{
+    gui = Task-Summary 'TTB GUI'
+    automation = Task-Summary 'TTB Automation'
+    watchdog = Task-Summary 'TTB Health Watchdog'
+}
+$health = [ordered]@{
+    exists = Test-Path -LiteralPath $healthFile
+    readable = $false
+    symbol = $null
+    mode = $null
+    state = $null
+    heartbeatFresh = $false
+    ageSeconds = $null
+}
+if ($health.exists) {
+    try {
+        $row = Get-Content -Raw -LiteralPath $healthFile | ConvertFrom-Json
+        $age = ([datetime]::UtcNow - ([datetime]$row.updated_at).ToUniversalTime()).TotalSeconds
+        $health.readable = $true
+        $health.symbol = [string]$row.symbol
+        $health.mode = [string]$row.mode
+        $health.state = [string]$row.state
+        $health.ageSeconds = [math]::Round($age, 2)
+        $health.heartbeatFresh = ($age -ge -10 -and $age -le $MaxHeartbeatAgeSeconds)
+    } catch {
+        $health.readable = $false
+    }
+}
+
+$binaryRoot = Split-Path -Parent (Split-Path -Parent $WorkDir)
+$manifest = Join-Path $binaryRoot 'azure\runtime_binaries.json'
+$required = [ordered]@{
+    captureCli = Test-Path -LiteralPath (Join-Path $WorkDir 'ttb_readonly_capture.py')
+    reconcileCli = Test-Path -LiteralPath (Join-Path $WorkDir 'reconcile_ttb.py')
+    releaseValidator = Test-Path -LiteralPath (Join-Path $WorkDir 'automation\validate_release.ps1')
+    healthWatchdogScript = Test-Path -LiteralPath (Join-Path $WorkDir 'automation\health_watchdog.ps1')
+    operatorRunbook = Test-Path -LiteralPath (Join-Path $WorkDir 'OPERATOR_RUNBOOK.md')
+    binaryManifest = Test-Path -LiteralPath $manifest
+}
+$processRunning = [bool](Get-Process -Name TTB -ErrorAction SilentlyContinue)
+$apiListening = Test-Listener 8080
+$zmqListening = Test-Listener 51141
+$flagPresent = Test-Path -LiteralPath $reconciliation
+$healthyState = $health.state -in @('healthy', 'waiting_market')
+$issues = [System.Collections.Generic.List[string]]::new()
+if (-not $processRunning) { $issues.Add('ttb_gui_process_not_running') }
+if (-not $apiListening) { $issues.Add('api_port_8080_missing') }
+if (-not $zmqListening) { $issues.Add('quote_port_51141_missing') }
+if (-not $tasks.automation.installed) { $issues.Add('automation_task_missing') }
+if (-not $tasks.watchdog.installed) { $issues.Add('watchdog_task_missing') }
+if (-not $health.readable) { $issues.Add('health_missing_or_unreadable') }
+elseif (-not $health.heartbeatFresh) { $issues.Add('health_heartbeat_stale') }
+if ($health.readable -and -not $healthyState) { $issues.Add('unhealthy_bot_state') }
+if ($flagPresent) { $issues.Add('manual_reconciliation_required') }
+foreach ($key in $required.Keys) {
+    if (-not $required[$key]) { $issues.Add('missing_' + $key) }
+}
+$result = [ordered]@{
+    schema = 'ttb-vm-readiness-v1'
+    checkedAt = (Get-Date).ToUniversalTime().ToString('o')
+    safeForSupervisedShadowSoak = ($issues.Count -eq 0)
+    supervisedLiveTradingApproved = $false
+    ttbProcess = $processRunning
+    api8080 = $apiListening
+    quote51141 = $zmqListening
+    tasks = $tasks
+    health = $health
+    manualReconciliationFlag = $flagPresent
+    requiredFiles = $required
+    blockers = @($issues)
+    note = 'Read-only VM audit. Does not authenticate TTB GUI account, true broker margin or API fills.'
+}
+$result | ConvertTo-Json -Depth 8
+if ($issues.Count -gt 0) { exit 2 }
+exit 0
