@@ -1,6 +1,6 @@
 # 見價見量虛擬競賽策略索引
 
-> **候選策略設計文件，不代表五份都有對應可執行程式。** 目前 CLI 內建 `market-maker`、`moving-average` 和明確指定的自訂 strategy-module 介面；請以 [OPERATIONS.md](../OPERATIONS.md) 決定如何執行。未完成實作與測試之前，不能宣稱這些文件的策略已可交易。
+> **截至目前，策略 01、03、04 已有可執行、通過離線測試的模組；策略 02 有限攤平與 05 最終組合仍屬研究規格，尚未驗收。** 完成離線實作不代表完成 TTB 真實成交與保證金驗收。既有 CLI 仍支援內建 `market-maker`、`moving-average`，以及 `--strategy-module`。參考 [OPERATIONS.md](../OPERATIONS.md)。
 
 本目錄的 Markdown 文件專門研究期交所新一代虛擬交易所及「縱橫期海」類競賽。
 核心假設是：委託送出後，模擬撮合器會依後續真實市場逐筆成交價量及委買賣價量判斷成交，且不同模擬交易人的委託彼此獨立，不需要爭奪真實市場排隊順位。
@@ -11,11 +11,11 @@
 
 | 文件 | 核心功能 | 適合階段 |
 |---|---|---|
-| [01_STICKY_ONE_TICK_MARKET_MAKING.md](01_STICKY_ONE_TICK_MARKET_MAKING.md) | 在最佳買賣價維持黏著限價單，反覆取得一跳費後利潤 | 基礎策略、主要獲利來源 |
-| [02_COST_ADJUSTED_BOUNDED_LADDER.md](02_COST_ADJUSTED_BOUNDED_LADDER.md) | 價格不利時以數學計算最小加碼量，限制層數後等待小幅反彈 | 處理首筆成交後的短期逆向移動 |
-| [03_ORDER_FLOW_GATED_MAKER.md](03_ORDER_FLOW_GATED_MAKER.md) | 用 microprice、OFI 與近期成交流取消有毒的一側 | 降低單邊行情的逆選擇 |
-| [04_COMPETITION_PNL_SHAPING.md](04_COMPETITION_PNL_SHAPING.md) | 依每日報酬夏普門檻設計獲利封頂、損失停機與資格管理 | 提高進入夏普前 30 名的機率 |
-| [05_TSMC_VIRTUAL_MAX_COMBINED.md](05_TSMC_VIRTUAL_MAX_COMBINED.md) | 將前四項整合為完整台積電期貨狀態機 | 最終競賽候選策略 |
+| [01_STICKY_ONE_TICK_MARKET_MAKING.md](01_STICKY_ONE_TICK_MARKET_MAKING.md) | 黏著委託、持倉後只退出及一跳費後成本檢查 | **已實作** `strategies.sticky_maker:StickyOneTickMaker`（離線驗證） |
+| [02_COST_ADJUSTED_BOUNDED_LADDER.md](02_COST_ADJUSTED_BOUNDED_LADDER.md) | 成本調整有限加碼 | **研究中，未實作**：需先驗證實際成交／保證金 |
+| [03_ORDER_FLOW_GATED_MAKER.md](03_ORDER_FLOW_GATED_MAKER.md) | 根據現有 microprice、OFI、成交流分數做單邊過濾，另設波動過濾 | **已實作** `strategies.order_flow_maker:OrderFlowGatedMaker`（權重未校準） |
+| [04_COMPETITION_PNL_SHAPING.md](04_COMPETITION_PNL_SHAPING.md) | 依已核實的前日權益，做保守 MTM 盈利封頂、損失及回撤停機 | **部分實作** `strategies.competition_pnl:CompetitionPnlShaping`（未實作資格統計／權益加碼） |
+| [05_TSMC_VIRTUAL_MAX_COMBINED.md](05_TSMC_VIRTUAL_MAX_COMBINED.md) | 跨策略的台積電期貨組合狀態機 | **研究中，未實作** |
 
 ## 建議研究順序
 

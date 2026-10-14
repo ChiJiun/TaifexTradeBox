@@ -9,7 +9,7 @@ import math
 from collections import deque
 from dataclasses import fields
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ttb.contracts import point_value_for
 
@@ -49,12 +49,14 @@ def replay(
     latency_ms: float = 0.0,
     seed: int | None = None,
     initial_capital: float | None = None,
+    strategy_factory: Callable[[StrategyConfig, PositionLedger], Any] | None = None,
 ) -> dict[str, Any]:
     """Run one path; open inventory is marked but never assumed liquidated."""
     if initial_capital is not None and initial_capital <= 0:
         raise ValueError("initial_capital must be positive")
     ledger = PositionLedger(config)
-    strategy = MicropriceMarketMaker(config, ledger)
+    strategy = (strategy_factory(config, ledger)
+                if strategy_factory else MicropriceMarketMaker(config, ledger))
     simulator = make_fill_simulator(
         fill_model,
         touch_fill_probability=touch_fill_probability,
@@ -201,7 +203,7 @@ def replay(
         "max_marked_drawdown": drawdown,
         "inventory_unit_seconds": inventory_seconds,
         "inventory_exposure_ratio": inventory_seconds / duration if duration > 0 else 0.0,
-        "halt_reason": strategy.halt_reason,
+        "halt_reason": getattr(strategy, "halt_reason", ""),
         "fill_model": fill_model,
         "model": MODEL_NOTES[fill_model],
         "assumptions": {
