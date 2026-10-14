@@ -75,7 +75,7 @@ py -3.13 sim_hft_bot.py --symbol <CURRENT_VERIFIED_SYMBOL> --mode shadow
 - 自收到過行情起，持續超過預設 **120 秒** 的中斷會 Fail-Closed 結束（可用 `--stale-fatal-seconds` 調整）。收到連續預設 **3 筆**新鮮行情後才可能恢復正常報價。
 - 程式在同一風控交易日保存 `risk-state.json`，並將成交等事件寫入 Journal。**不能將持久化風控等同於自動辨識或回復帳戶未知持倉。** 回覆矛盾、磁碟故障、Journal 損毀都應停止並人工對帳。
 - Ctrl+C／停止旗標會啟動既有關機對帳；**預設不會保證主動平倉**。`--flatten-on-shutdown`（Supervisor `flattenOnShutdown`）只有在允許條件下**嘗試**平倉，可能失敗或部分成交，並不是可靠的斷線平倉保證。
-- `/healthz` 表示程序存活，`/readyz` **只有 `healthy` 才 ready**，`/status` 提供完整 health。休市 `waiting_market` 不表示故障，但也不是交易就緒。
+- `/healthz` 表示程序存活，`/readyz` **只有 `healthy` 才 ready**，`/status` 提供完整 health。休市 `waiting_market` 不表示故障，但也不是交易就緒。特別是 `health.updated_at` 可在無有效行情時持續更新；驗證行情新鮮度必須使用 `last_quote_wall_utc`／`last_quote_exchange_time` 及 QuoteMonitor 的完整性計數器，不可只看心跳時間。
 
 ## 4. 異常與人工恢復
 

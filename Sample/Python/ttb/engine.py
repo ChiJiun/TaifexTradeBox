@@ -412,6 +412,10 @@ class BotEngine:
             calendar_reason=getattr(session, "reason", ""),
             last_quote_exchange_time=quote.exchange_time,
             last_quote_monotonic=quote.received_at,
+            # Heartbeats are refreshed independently while waiting for ticks.
+            # Keep the actual accepted quote wall time separate, so portfolio
+            # risk monitors cannot mistake stale prices for fresh valuations.
+            last_quote_wall_utc=datetime.now(timezone.utc).isoformat(),
             last_price=quote.last,
             point_value=self.config.point_value,
             marked_pnl=round(

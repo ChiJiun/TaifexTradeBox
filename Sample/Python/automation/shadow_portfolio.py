@@ -197,6 +197,13 @@ def child_command(instance: Instance, root: Path, python: str | None = None) -> 
     ]
 
 
+def _quote_age_seconds(health: dict[str, Any], now: datetime) -> float:
+    last = datetime.fromisoformat(health["last_quote_wall_utc"])
+    if last.tzinfo is None:
+        raise ValueError("last_quote_wall_utc must include timezone")
+    return (now - last.astimezone(timezone.utc)).total_seconds()
+
+
 def evaluate_portfolio(
     config: PortfolioConfig,
     root: Path,
@@ -220,6 +227,7 @@ def evaluate_portfolio(
             if updated.tzinfo is None:
                 raise ValueError("naive updated_at")
             age = (now - updated.astimezone(timezone.utc)).total_seconds()
+            quote_age = _quote_age_seconds(value, now)
             position = int(value["position"])
             pnl = float(value["marked_pnl"])
             last_price = float(value["last_price"])
@@ -230,6 +238,7 @@ def evaluate_portfolio(
             if (value["symbol"] != item.symbol or value["mode"] != "shadow"
                 or value["state"] in ("error", "manual_reconciliation_required", "stale_market_data")
                 or age < -10 or age > config.limits.heartbeat_age_seconds
+                or quote_age < -10 or quote_age > config.limits.heartbeat_age_seconds
                 or not math.isfinite(pnl) or not math.isfinite(last_price)
                 or last_price <= 0 or isinstance(value["position"], bool)):
                 raise ValueError("invalid / stale health state")
@@ -275,10 +284,16 @@ def awaiting_initial_quotes(config: PortfolioConfig, root: Path, now: datetime) 
                                       "stale_market_data", "stopped")
                 or not -10 <= age <= config.limits.heartbeat_age_seconds):
                 raise ValueError("unhealthy pre-quote child")
-            if "last_price" not in data:
+            # A healthy-looking heartbeat says only the process is alive.
+            # It does NOT prove an old last_price can still value inventory.
+            quote_fresh = False
+            if "last_price" in data and "last_quote_wall_utc" in data:
+                quote_age = _quote_age_seconds(data, now)
+                quote_fresh = -10 <= quote_age <= config.limits.heartbeat_age_seconds
+            if not quote_fresh:
                 if data["state"] not in ("starting", "running", "waiting_market"):
                     raise ValueError("cannot value pending child")
-                if int(data.get("position", 0)) != 0:
+                if type(data.get("position", 0)) is not int or data.get("position", 0) != 0:
                     raise ValueError("unvalued open position")
                 pending = True
         except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
