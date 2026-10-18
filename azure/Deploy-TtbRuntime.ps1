@@ -31,7 +31,7 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $work = Join-Path $env:TEMP "ttb-deploy-$stamp"
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $zip = Join-Path $work 'runtime.zip'
-& git -C $repo archive --format=zip -o $zip $commit Sample/Python azure/runtime_binaries.json
+& git -C $repo archive --format=zip -o $zip $commit Sample/Python azure/runtime_binaries.json azure/README.md
 if ($LASTEXITCODE -ne 0) { throw 'git archive failed' }
 $sha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
 $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($zip))
@@ -110,9 +110,15 @@ Expand-Archive -LiteralPath $zip -DestinationPath $staging -Force
 robocopy (Join-Path $staging 'Sample\Python') $work /E /XF config.json /XD output /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "copy failed (robocopy $LASTEXITCODE)" }
 New-Item -ItemType Directory -Path (Join-Path $root 'azure') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $staging 'azure\runtime_binaries.json') -Destination (Join-Path $root 'azure\runtime_binaries.json') -Force
+foreach ($name in 'runtime_binaries.json', 'README.md') {
+    # check_docs_consistency reads the repo-level azure\README.md.
+    Copy-Item -LiteralPath (Join-Path $staging "azure\$name") -Destination (Join-Path $root "azure\$name") -Force
+}
 
 $failures = @()
+# Windows PowerShell 5.1 turns native stderr into terminating errors under
+# 'Stop'; rely on exit codes so a failed check still reaches the rollback.
+$ErrorActionPreference = 'Continue'
 Push-Location $work
 try {
     $env:PYTHONUTF8 = '1'
@@ -129,6 +135,7 @@ try {
 } finally {
     Pop-Location
 }
+$ErrorActionPreference = 'Stop'
 if ($failures.Count -gt 0) {
     robocopy $backup $work /E /XD output /NFL /NDL /NJH /NJS /NP | Out-Null
     Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
