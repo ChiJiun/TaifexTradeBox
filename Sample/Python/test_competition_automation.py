@@ -402,6 +402,10 @@ class CompetitionConfigTests(unittest.TestCase):
         self.assertIn("Test-AutoRecoveryAllowed", supervisor)
         self.assertIn("exclusiveBotAccount", supervisor)
         self.assertIn("--confirm-exclusive-bot-account", supervisor)
+        # TTB opens its API ports only after login: login must come first.
+        self.assertLess(supervisor.index("(Invoke-TtbLogin) -ne 0"), supervisor.index("Test-LocalPort 8080) -or"))
+        self.assertIn("'--stop-file', $botStopFile", supervisor)
+        self.assertIn("TTB process exited", supervisor)
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")
         self.assertNotIn("Register-ScheduledTask -TaskName 'TTB GUI'", installer)
 

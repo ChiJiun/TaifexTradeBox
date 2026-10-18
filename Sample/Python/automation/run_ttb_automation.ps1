@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $statusDir = Join-Path $WorkDir 'output\supervisor'
 $stopFile = Join-Path $statusDir 'stop.requested'
+$botStopFile = Join-Path $statusDir 'bot-stop.requested'
 $reconcileFlag = Join-Path $statusDir 'manual-reconciliation-required.flag'
 $supervisorLog = Join-Path $statusDir 'supervisor.log'
 New-Item -ItemType Directory -Path $statusDir -Force | Out-Null
@@ -107,14 +108,15 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         Write-SupervisorLog 'TTB process started; login required'
         Start-Sleep -Seconds 10
     }
-    if (-not (Test-LocalPort 8080) -or -not (Test-LocalPort 51141)) {
-        Write-SupervisorLog 'waiting for TTB localhost ports 8080 and 51141'
-        Start-Sleep -Seconds 15
-        continue
-    }
+    # TTB opens its local API ports only after login, so log in first.
     if ((Invoke-TtbLogin) -ne 0) {
         Write-SupervisorLog 'TTB is not logged in to the competition; retrying in 60s'
         Start-Sleep -Seconds 60
+        continue
+    }
+    if (-not (Test-LocalPort 8080) -or -not (Test-LocalPort 51141)) {
+        Write-SupervisorLog 'waiting for TTB localhost ports 8080 and 51141'
+        Start-Sleep -Seconds 15
         continue
     }
     if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
@@ -140,7 +142,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         '--symbol', [string]$config.symbol,
         '--mode', [string]$config.mode,
         '--strategy', [string]$config.strategy,
-        '--stop-file', $stopFile,
+        '--stop-file', $botStopFile,
         '--health-file', (Join-Path $WorkDir 'output\health.json'),
         '--log-file', (Join-Path $statusDir 'bot.log')
     )
@@ -164,6 +166,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     $pythonArgs = @('-3.13') + $botArgs
     $botStdout = Join-Path $statusDir 'bot.stdout.log'
     $botStderr = Join-Path $statusDir 'bot.stderr.log'
+    Remove-Item -LiteralPath $botStopFile -Force -ErrorAction SilentlyContinue
     $child = Start-Process `
         -FilePath 'py.exe' `
         -ArgumentList $pythonArgs `
@@ -171,8 +174,17 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         -RedirectStandardOutput $botStdout `
         -RedirectStandardError $botStderr `
         -NoNewWindow `
-        -PassThru `
-        -Wait
+        -PassThru
+    $null = $child.Handle  # keeps ExitCode available after the process ends
+    # The bot cannot notice TTB disappearing while the market is closed, so
+    # ask it to stop gracefully whenever TTB exits or a stop is requested.
+    while (-not $child.WaitForExit(5000)) {
+        $ttbGone = -not (Get-Process -Name TTB -ErrorAction SilentlyContinue)
+        if (($ttbGone -or (Test-Path -LiteralPath $stopFile)) -and -not (Test-Path -LiteralPath $botStopFile)) {
+            Set-Content -LiteralPath $botStopFile -Value (Get-Date -Format o) -Encoding ascii
+            Write-SupervisorLog ("asking bot to stop: {0}" -f $(if ($ttbGone) { 'TTB process exited' } else { 'stop requested' }))
+        }
+    }
     $exitCode = $child.ExitCode
     Write-SupervisorLog "bot exited code=$exitCode"
     if ($config.mode -eq 'ttb' -and $exitCode -ne 0) {
