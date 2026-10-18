@@ -26,6 +26,9 @@ function Test-LocalPort([int]$Port) {
 
 function Invoke-PythonTool([string]$Name, [string[]]$Arguments) {
     # Helper output is JSON without secrets; keep it in the supervisor log.
+    # Windows PowerShell 5.1 turns native stderr into a terminating error
+    # under 'Stop', which would kill the supervisor; exit codes decide here.
+    $ErrorActionPreference = 'Continue'
     $env:PYTHONUTF8 = '1'
     $env:PYTHONIOENCODING = 'utf-8'
     $output = & py.exe -3.13 @Arguments 2>&1 | Out-String
@@ -36,8 +39,9 @@ function Invoke-PythonTool([string]$Name, [string[]]$Arguments) {
 
 function Invoke-TtbLogin {
     if (-not $config.autoLogin) { return 0 }
+    $ErrorActionPreference = 'Continue'
     $loginArgs = @('-m', 'automation.ttb_login', '--config', $ConfigPath, '--ttb-exe', $TtbExe)
-    # TTB only publishes ticks for symbols in its 報價設定 tab; keep the
+    # TTB only publishes ticks for symbols in its quote-settings tab; keep the
     # (resolved) contract subscribed so rollover does not starve the bot.
     $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
