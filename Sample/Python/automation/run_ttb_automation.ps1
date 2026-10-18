@@ -42,8 +42,8 @@ function Invoke-TtbLogin {
     if (-not $config.autoLogin) { return 0 }
     $ErrorActionPreference = 'Continue'
     $loginArgs = @('-m', 'automation.ttb_login', '--config', $ConfigPath, '--ttb-exe', $TtbExe)
-    # TTB only publishes ticks for symbols in its quote-settings tab; keep the
-    # (resolved) contract subscribed so rollover does not starve the bot.
+    # TTB only publishes ticks for symbols in its quote-settings tab; report
+    # (read-only) whether the resolved contract is subscribed.
     $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
     return Invoke-PythonTool 'ttb_login' $loginArgs

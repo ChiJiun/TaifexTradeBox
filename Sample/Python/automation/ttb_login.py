@@ -39,7 +39,7 @@ LOGOUT_ID = "btnLogOut"
 GAME_LIST_ID = "cbGameList"
 SETTINGS_TAB_ID = "tabPage2"
 QUOTES_TAB_ID = "tabPage3"
-SUBSCRIBE_ID = "btnSubscribe"
+QUOTE_GRID_ID = "dvQuote"
 MESSAGES_TAB_ID = "tabPage1"
 APPLY_SETTINGS_ID = "btnApply"
 # TTB's own "resubmit failed orders every 5 seconds" option would create
@@ -307,34 +307,30 @@ class TtbWindow:
         user32.PostMessageW(user32.GetParent(hwnd), WM_COMMAND, (CBN_SELCHANGE << 16) | (control_id & 0xFFFF), hwnd)
 
     def subscribe_quote(self, symbol: str) -> str:
-        """Best effort: TTB only publishes ticks for symbols in 報價設定.
+        """Check (read-only) that symbol is in TTB's 報價設定 grid.
 
-        The quote tab is hidden before login, so its symbol box was not
-        inspectable offline; the first enabled Edit in that tab is used.
+        TTB only publishes ticks for subscribed symbols. The list survives a
+        TTB restart, and 新增訂閱 opens a dialog, so this does not add symbols:
+        a missing contract is reported for the operator to add by hand.
         """
         tab = self.control(QUOTES_TAB_ID, control_type="TabItem")
         if not tab.exists(timeout=2):
             return "quote_tab_missing"
         tab.select()
-        pane = self.control(QUOTES_TAB_ID, control_type="Pane")
-        if not pane.exists(timeout=3):
-            return "quote_tab_unavailable"
-        code = symbol.upper().strip()
-        texts = {element.window_text().strip().upper() for element in pane.descendants()}
-        if code in texts or any(text.startswith(code + " ") for text in texts):
-            result = "already_subscribed"
-        else:
-            boxes = [edit for edit in pane.descendants(control_type="Edit") if edit.is_enabled()]
-            if not boxes or not self.enabled(SUBSCRIBE_ID):
-                return "subscribe_controls_not_found"
-            boxes[0].set_edit_text(code)
-            self.press(SUBSCRIBE_ID)
-            wait_for(self.dismiss_dialogs, 2.0, 0.5)
-            result = "subscribed"
-        back = self.control(MESSAGES_TAB_ID, control_type="TabItem")
-        if back.exists(timeout=1):
-            back.select()
-        return result
+        try:
+            grid = self.control(QUOTE_GRID_ID, control_type="DataGrid")
+            if not grid.exists(timeout=3):
+                return "quote_grid_missing"
+            subscribed = {
+                str(cell.legacy_properties().get("Value", "")).strip().upper()
+                for cell in grid.descendants(control_type="DataItem")
+                if cell.element_info.name.startswith("商品代號")
+            }
+        finally:
+            back = self.control(MESSAGES_TAB_ID, control_type="TabItem")
+            if back.exists(timeout=1):
+                back.select()
+        return "subscribed" if symbol.upper().strip() in subscribed else "NOT_SUBSCRIBED_add_in_TTB_quote_settings"
 
     def dump(self) -> list[str]:
         rows = []
@@ -439,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dump-controls", action="store_true", help="print the TTB UI tree (password hidden)")
     parser.add_argument("--start-timeout", type=float, default=60.0)
     parser.add_argument("--subscribe", action="append", default=[],
-                        help="contract code to keep in TTB 報價設定 (repeatable, best effort)")
+                        help="contract code that must be in TTB 報價設定; checked read-only and reported (repeatable)")
     args = parser.parse_args(argv)
 
     competition = args.competition if args.competition is not None else _config_value(args.config, "ttbCompetition")
