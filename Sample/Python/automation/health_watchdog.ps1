@@ -37,7 +37,13 @@ if ($exitCode -ne 0) {
 
 $lastAlertAt = if ($previous) { $previous.lastAlertAt } else { $null }
 if ($shouldAlert -and $AlertWebhookUrl) {
+    $summary = 'TaifexTradeBox {0} on {1}: exit={2}' -f $kind, $env:COMPUTERNAME, $exitCode
+    $detailText = $output.Trim()
+    if ($detailText.Length -gt 1500) { $detailText = $detailText.Substring(0, 1500) }
     $payload = [ordered]@{
+        # content (Discord) / text (Slack) let common chat webhooks render it.
+        content = "$summary`n$detailText"
+        text = "$summary`n$detailText"
         source = 'TaifexTradeBox'
         kind = $kind
         checkedAt = $now.ToString('o')

@@ -1,11 +1,13 @@
 {
-  "symbol": "TMFJ6",
+  "symbol": "auto:TMF",
   "mode": "shadow",
   "strategy": "market-maker",
   "strategyModule": "",
   "confirmVirtualOrders": false,
   "confirmFlatAccount": false,
   "flattenOnShutdown": false,
+  "autoLogin": false,
+  "ttbCompetition": "",
   "extraArgs": [
     "--base-qty", "1",
     "--max-order-qty", "1",

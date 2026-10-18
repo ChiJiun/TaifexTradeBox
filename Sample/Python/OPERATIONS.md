@@ -7,7 +7,7 @@
 - **已實作**：即時行情訂閱、shadow 模擬、單商品 TTB Gateway、風控、交易日曆、交易事件 Journal、Fail-Closed、操作員停止旗標、健康監控，以及離線 Walk-forward/OOS。
 - **僅可配置**：交易時段、成交成本、各種風控限額、可選的關機平倉嘗試。變更設定不能代表已經完成實際 TTB 驗證。
 - **尚未驗收**：正確虛擬競賽帳戶身分、真實 TTB `QUERYMARGIN` 欄位／單位、下單與取消競態，以及 GUI 重啟後完整恢復（#2/#4/#10）。
-- **禁止**：無人值守啟用 `--mode ttb`、不明來源委託的猜測式撤單、帶倉換月、手動刪除異常對帳旗標。
+- **禁止**：未滿足 [§8 競賽全自動模式](#8-競賽全自動模式opt-in) 全部前提就無人值守啟用 `--mode ttb`、在有人手動交易的帳戶啟用自動恢復、帶倉換月、手動刪除異常對帳旗標。
 
 ## 0. VM 唯讀健康稽核（#10）
 
@@ -106,5 +106,33 @@ py -3.13 ttb_readonly_capture.py
 - [ ] 本機風控狀態、Journal、rate counters 沒有損毀或遺失
 - [ ] 所有未知委託、工作中委託與非零持倉均已由 GUI 人工解決
 - [ ] `mode=shadow` 作為預設；live 的人工驗收阻塞未解除不得切換
+
+## 8. 競賽全自動模式（opt-in）
+
+目標是校內 TTB 模擬競賽開盤時間無人值守：VM 重開機 → Windows 自動登入 → `TTB Automation` 啟動 TTB → 自動登入競賽 → 開盤交易 → 異常時有界自動恢復。各元件：
+
+| 元件 | 作用 |
+|---|---|
+| `symbol: "auto:TMF"`（也支援 `auto:TXF`、`auto:MTX`） | 依核准日曆選近月；到期日當天（13:30 收盤、無夜盤）起改用次月。bot 持倉或有掛單時**不換月**，空倉後以 exit 0 結束，由 supervisor 以新月份重啟。查詢：`py -3.13 -m automation.resolve_symbol auto:TMF` |
+| `automation/ttb_login.py`（`autoLogin: true`） | 以 UI Automation 填入 Windows 認證管理員 `TaifexTradeBox/TTB` 的帳密、按「登入」、選 `ttbCompetition` 競賽，最後以唯讀 API 確認 `QUERYMARGIN`／委託／部位都回 `0000`。登入前強制**關閉** TTB「下單失敗每 5 秒自動重送」（`chkAutoPut`，TTB 預設為開），否則 TTB 會自行重送 bot 不認得的委託；並保持「斷線自動重連」開啟。密碼不寫入檔案或 log。 |
+| `auto_recover_ttb.py`（`autoRecovery`） | bot 非正常退出或啟動時帳戶不乾淨：撤銷**全部**工作中委託、以市價 IOC 平掉 TXF/MTX/TMF 期貨部位、兩次唯讀檢查皆乾淨才清除 `manual-reconciliation-required.flag`，每步驟寫入 `output/reconciliation` 稽核。每日最多 `maxAttemptsPerDay` 次（`output/supervisor/auto-recovery.json` 持久化），超過、遇到選擇權／超量部位、或平倉後仍不平，就維持鎖定並由 Watchdog 告警，回到 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md) 人工流程。休市帶倉會延到下一個交易時段再處理。 |
+| `run_ttb_automation.ps1` | 每輪：確保 TTB 執行 → 等 8080/51141 → 自動登入（失敗每 60 秒重試）→ 需要時自動恢復 → 啟動 bot。 |
+
+**啟用前提（全部滿足才可使用 [config.competition.example.json](automation/config.competition.example.json)）**：
+
+1. 此 TTB 競賽帳戶**只給 bot 交易**（`exclusiveBotAccount: true`）；自動恢復會撤銷所有委託並平掉所有期貨部位。
+2. 在 VM 以 `azureuser` 執行一次 `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號 e-mail> /pass`（互動輸入密碼），並把 `ttbCompetition` 設為 TTB 競賽下拉選單中的名稱（部分字串可，但必須唯一）。
+3. 以 `py -3.13 -m automation.ttb_login --check-only` 確認三個查詢回 `0000`，且輸出 `documented_margin_field_present=true`（廠商手冊 3.9 與 TTB 2025.11.27.1900 的欄位名稱都是 `AVAILABELMARGIN`，拼字如此）。若欄位不存在，bot 的入口委託會被 `risk_block` 擋下而不會亂下單。
+4. 依 [README](README.md#真實-ttb-api-驗證準備2) 完成一次遠價 1 口委託／撤單 probe（#2）。
+5. `--max-notional`、`--min-available-margin` 依競賽初始資金與商品保證金調整；`--daily-loss-limit`／`--max-drawdown` 仍有效。
+6. VM 已執行 [Set-TtbVmHost.ps1](../../azure/Set-TtbVmHost.ps1) `-Apply`，並用 Sysinternals Autologon 設好 Windows 自動登入，否則重開機後沒有互動桌面可跑 TTB。離開 RDP 時用 [Disconnect-RdpToConsole.ps1](../../azure/Disconnect-RdpToConsole.ps1)，不要登出。
+
+GUI 自動登入只在 TTB 2025.11.27.1900 的控制項名稱（`txtAccnt`、`txtPwd`、`btnLogOn`、`cbGameList`）上驗證過；TTB 改版後先用 `py -3.13 -m automation.ttb_login --dump-controls` 檢查。
+
+其他注意事項：
+
+- **報價訂閱在 TTB GUI**：TTBHelp 的 `QUOTEDATA` 只開本機 ZMQ 監聽，TTB 只推送「報價設定」頁已加入的商品。supervisor 會以 `--subscribe <近月代碼>` 讓 `ttb_login` 盡力加入（該頁登入前隱藏，未能離線驗證輸入框），換月前仍建議先在 GUI 手動加入次月；健康狀態出現「no first quote received」即代表沒訂到。
+- **API 連線不再經 TTBHelp 建構子**：`TTBApi.connect` 以相同端點直接 HTTP（10 秒 timeout），並用 TTBHelp 的版本字串做 `CONNECT` 握手。原 TTBHelp 在 TTB 未開或版本不符時會 `os._exit(0)`，supervisor 會誤判為正常結束。
+- **TTB 2026.07.08.1000** 需要 .NET 10 Desktop Runtime；TTB.exe 與 TTBHelp 必須同版（握手會比對版本）。升級須依 [Azure README #4](../../azure/README.md#4-ttb-二進位版本來源控管15) 更新 `runtime_binaries.json` 並在 VM 安裝 .NET 10。
 
 此頁為**操作單一權威來源**。策略研究文件僅用於設計與比較，不應凌駕本操作流程。

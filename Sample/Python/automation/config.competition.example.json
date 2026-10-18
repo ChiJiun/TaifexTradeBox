@@ -1,0 +1,29 @@
+{
+  "symbol": "auto:TMF",
+  "mode": "ttb",
+  "strategy": "market-maker",
+  "strategyModule": "",
+  "confirmVirtualOrders": true,
+  "confirmFlatAccount": true,
+  "flattenOnShutdown": true,
+  "autoLogin": true,
+  "ttbCompetition": "<TTB 競賽列表中的競賽名稱>",
+  "ttbCredentialTarget": "TaifexTradeBox/TTB",
+  "autoRecovery": {
+    "enabled": true,
+    "exclusiveBotAccount": true,
+    "maxAttemptsPerDay": 3,
+    "maxFlattenQty": 2
+  },
+  "extraArgs": [
+    "--base-qty", "1",
+    "--max-order-qty", "1",
+    "--max-inventory", "1",
+    "--quote-stale-seconds", "5",
+    "--stale-fatal-seconds", "120",
+    "--resume-fresh-ticks", "3",
+    "--max-notional", "400000",
+    "--available-margin-field", "AVAILABELMARGIN",
+    "--min-available-margin", "50000"
+  ]
+}

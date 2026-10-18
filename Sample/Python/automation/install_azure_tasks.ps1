@@ -25,7 +25,6 @@ $settings = New-ScheduledTaskSettingsSet `
 
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $RunAsUser
 $dailyTrigger = New-ScheduledTaskTrigger -Daily -At '08:35'
-$ttbAction = New-ScheduledTaskAction -Execute $TtbExe
 $botAction = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$automation`"" `
@@ -40,9 +39,13 @@ $watchdogTrigger = New-ScheduledTaskTrigger `
     -RepetitionInterval (New-TimeSpan -Minutes 5) `
     -RepetitionDuration (New-TimeSpan -Days 3650)
 
-Register-ScheduledTask -TaskName 'TTB GUI' -Action $ttbAction -Trigger $logonTrigger -Principal $principal -Settings $settings -Force | Out-Null
+# The supervisor starts TTB itself (and logs in when autoLogin is enabled). A
+# separate logon task could race it and open a second TTB instance.
+if (Get-ScheduledTask -TaskName 'TTB GUI' -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName 'TTB GUI' -Confirm:$false
+}
 Register-ScheduledTask -TaskName 'TTB Automation' -Action $botAction -Trigger @($logonTrigger, $dailyTrigger) -Principal $principal -Settings $settings -Force | Out-Null
 Register-ScheduledTask -TaskName 'TTB Health Watchdog' -Action $watchdogAction -Trigger $watchdogTrigger -Principal $principal -Settings $settings -Force | Out-Null
 
-Get-ScheduledTask -TaskName 'TTB GUI', 'TTB Automation', 'TTB Health Watchdog' |
+Get-ScheduledTask -TaskName 'TTB Automation', 'TTB Health Watchdog' |
     Select-Object TaskName, State, @{Name='RunAs';Expression={$_.Principal.UserId}}

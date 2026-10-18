@@ -82,3 +82,43 @@ class ContractInfo:
         # Published product rules allow last day to move to the next business
         # day if the third Wednesday is a non-trading day.
         return calendar.next_trading_day(candidate)
+
+    @classmethod
+    def for_month(cls, product: str, year: int, month: int) -> "ContractInfo":
+        code = product.upper().strip()
+        if code not in SUPPORTED_PRODUCTS:
+            raise ValueError(f"unsupported TAIFEX product for automatic rollover: {product}")
+        if not 1 <= month <= 12:
+            raise ValueError("month must be 1-12")
+        return cls(f"{code}{chr(ord('A') + month - 1)}{year % 10}", code, month, year)
+
+
+SUPPORTED_PRODUCTS = ("TXF", "MTX", "TMF")
+AUTO_SYMBOL_PREFIX = "auto:"
+
+
+def front_month_contract(product: str, today: date, calendar: TradingCalendar) -> ContractInfo:
+    """Return the nearest monthly contract that is still the active one.
+
+    The expiring month is abandoned *on* its last trading day: it closes at
+    13:30 with no night session, so new exposure belongs in the next month.
+    Unverified calendar coverage raises instead of guessing an expiry date.
+    """
+    contract = ContractInfo.for_month(product, today.year, today.month)
+    for _ in range(3):
+        if today < contract.last_trading_day(calendar):
+            return contract
+        year, month = (contract.year + 1, 1) if contract.month == 12 else (contract.year, contract.month + 1)
+        contract = ContractInfo.for_month(product, year, month)
+    raise CalendarCoverageError("cannot resolve an active front-month contract")
+
+
+def resolve_symbol(spec: str, today: date, calendar: TradingCalendar | None) -> str:
+    """Resolve ``auto:TMF`` style config symbols; explicit codes pass through."""
+    text = spec.strip()
+    if not text.lower().startswith(AUTO_SYMBOL_PREFIX):
+        return text.upper()
+    if calendar is None:
+        raise CalendarCoverageError("automatic contract rollover requires a verified calendar")
+    return front_month_contract(text[len(AUTO_SYMBOL_PREFIX):], today, calendar).symbol
+

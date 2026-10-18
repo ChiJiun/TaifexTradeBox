@@ -57,6 +57,19 @@ if (Test-Path -LiteralPath $ConfigPath) {
         if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $config.confirmFlatAccount)) {
             Add-Failure 'ttb mode requires both confirmation flags'
         }
+        if ($config.autoLogin) {
+            $target = if ($config.ttbCredentialTarget) { [string]$config.ttbCredentialTarget } else { 'TaifexTradeBox/TTB' }
+            $listing = (& cmdkey.exe "/list:$target" 2>&1 | Out-String)
+            if ($listing -notmatch [regex]::Escape($target)) {
+                Add-Failure "autoLogin requires a Credential Manager entry: cmdkey /generic:$target /user:<email> /pass"
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$config.ttbCompetition)) {
+                Add-Warning 'ttbCompetition is empty; login only succeeds when exactly one competition is listed'
+            }
+        }
+        if ($config.autoRecovery -and $config.autoRecovery.enabled -and -not $config.autoRecovery.exclusiveBotAccount) {
+            Add-Failure 'autoRecovery.enabled requires exclusiveBotAccount=true (nobody trades this account manually)'
+        }
         if ($config.mode -eq 'ttb') {
             $extras = @($config.extraArgs | ForEach-Object { [string]$_ })
             foreach ($name in @('--max-notional', '--min-available-margin')) {

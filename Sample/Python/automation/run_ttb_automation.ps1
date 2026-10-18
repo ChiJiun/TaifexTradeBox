@@ -24,6 +24,42 @@ function Test-LocalPort([int]$Port) {
     return [bool](Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
 }
 
+function Invoke-PythonTool([string]$Name, [string[]]$Arguments) {
+    # Helper output is JSON without secrets; keep it in the supervisor log.
+    $env:PYTHONUTF8 = '1'
+    $env:PYTHONIOENCODING = 'utf-8'
+    $output = & py.exe -3.13 @Arguments 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    Write-SupervisorLog ("{0} exit={1} {2}" -f $Name, $code, ($output.Trim() -replace '\s+', ' '))
+    return $code
+}
+
+function Invoke-TtbLogin {
+    if (-not $config.autoLogin) { return 0 }
+    $loginArgs = @('-m', 'automation.ttb_login', '--config', $ConfigPath, '--ttb-exe', $TtbExe)
+    # TTB only publishes ticks for symbols in its 報價設定 tab; keep the
+    # (resolved) contract subscribed so rollover does not starve the bot.
+    $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
+    return Invoke-PythonTool 'ttb_login' $loginArgs
+}
+
+function Test-AutoRecoveryAllowed {
+    return ($config.mode -eq 'ttb' -and $config.autoRecovery -and $config.autoRecovery.enabled -and
+        $config.autoRecovery.exclusiveBotAccount)
+}
+
+function Invoke-AutoRecovery {
+    $toolArgs = @('auto_recover_ttb.py', '--confirm-exclusive-bot-account')
+    if ($config.autoRecovery.maxAttemptsPerDay) {
+        $toolArgs += @('--max-attempts-per-day', [string]$config.autoRecovery.maxAttemptsPerDay)
+    }
+    if ($config.autoRecovery.maxFlattenQty) {
+        $toolArgs += @('--max-flatten-qty', [string]$config.autoRecovery.maxFlattenQty)
+    }
+    return Invoke-PythonTool 'auto_recover_ttb' $toolArgs
+}
+
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Missing automation config: $ConfigPath. Copy config.example.json and review it first."
 }
@@ -36,7 +72,8 @@ if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $con
 }
 # A scheduled/logon restart must never override an unresolved live failure.
 # The existing preflight check is not necessarily run by Task Scheduler.
-if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
+# Only the audited, bounded auto-recovery (exclusive bot account) may clear it.
+if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag) -and -not (Test-AutoRecoveryAllowed)) {
     Write-SupervisorLog 'refusing live startup: manual reconciliation flag exists'
     throw "Refusing live startup until manual reconciliation is completed: $reconcileFlag"
 }
@@ -61,18 +98,37 @@ if (Test-Path -LiteralPath $cleanupScript) {
 }
 
 while (-not (Test-Path -LiteralPath $stopFile)) {
-    if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
-        Write-SupervisorLog 'refusing further live launches: manual reconciliation flag exists'
-        break
-    }
     if (-not (Get-Process -Name TTB -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $TtbExe)) {
-        Start-Process -FilePath $TtbExe
-        Write-SupervisorLog 'TTB process started; interactive login may still be required'
+        Start-Process -FilePath $TtbExe -WorkingDirectory (Split-Path -Parent $TtbExe)
+        Write-SupervisorLog 'TTB process started; login required'
+        Start-Sleep -Seconds 10
     }
     if (-not (Test-LocalPort 8080) -or -not (Test-LocalPort 51141)) {
         Write-SupervisorLog 'waiting for TTB localhost ports 8080 and 51141'
         Start-Sleep -Seconds 15
         continue
+    }
+    if ((Invoke-TtbLogin) -ne 0) {
+        Write-SupervisorLog 'TTB is not logged in to the competition; retrying in 60s'
+        Start-Sleep -Seconds 60
+        continue
+    }
+    if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
+        if (-not (Test-AutoRecoveryAllowed)) {
+            Write-SupervisorLog 'refusing further live launches: manual reconciliation flag exists'
+            break
+        }
+        $recovery = Invoke-AutoRecovery
+        if ($recovery -eq 3) {
+            Write-SupervisorLog 'auto-recovery deferred (market closed or reports unavailable); retrying in 60s'
+            Start-Sleep -Seconds 60
+            continue
+        }
+        if ($recovery -ne 0) {
+            Write-SupervisorLog 'auto-recovery refused; manual reconciliation required (see OPERATOR_RUNBOOK.md)'
+            break
+        }
+        Write-SupervisorLog 'auto-recovery verified a clean account and cleared the flag'
     }
 
     $botArgs = @(
@@ -117,8 +173,11 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     Write-SupervisorLog "bot exited code=$exitCode"
     if ($config.mode -eq 'ttb' -and $exitCode -ne 0) {
         Set-Content -LiteralPath $reconcileFlag -Value (Get-Date -Format o) -Encoding ascii
-        Write-SupervisorLog 'live virtual-order process will not auto-restart; manual order/position reconciliation required'
-        break
+        if (-not (Test-AutoRecoveryAllowed)) {
+            Write-SupervisorLog 'live virtual-order process will not auto-restart; manual order/position reconciliation required'
+            break
+        }
+        Write-SupervisorLog 'live bot failed; bounded auto-recovery will reconcile before any relaunch'
     }
     Start-Sleep -Seconds 15
 }

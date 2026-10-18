@@ -221,6 +221,29 @@ az vm start --resource-group $rg --name $vm
 
 在 Azure Portal 建立 Cost Management Budget，至少設定 50%、75%、90% 告警。只有在策略已通過 shadow 與人工復核後，才適合把 VM 改成長時間執行；交易期間應優先確保 TTB 與 bot 的進程、磁碟空間和 VM 狀態可觀測。quote/decision CSV 會每日輪替，`cleanup_runtime.ps1` 預設清除 14 天前的 runtime CSV／order-probe 檔，supervisor log 超過 10 MB 會輪替。
 
+## 8. 一鍵部署與無人值守主機（競賽全自動）
+
+**部署已提交的程式到 VM**（本機執行，需 `az login`；不在 VM 存 GitHub token）：
+
+```powershell
+# 乾跑：只打包並顯示 commit / SHA256 / 分段數
+powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1
+# 實際部署
+powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply
+```
+
+`-Apply` 透過 Run Command 分段上傳 `git archive`，在 VM 驗證 SHA256 後：寫入 `stop.requested` 讓 bot 正常停機（120 秒內未停則中止、不改檔）→ 備份到 `C:\TTB\deploy-backups\<時間>` → 覆蓋程式但保留 `automation\config.json` 與 `output\` → `pip install`、二進位雜湊、文件一致性與單元測試 → 任一失敗自動還原 → 重新註冊排程，有登入桌面時啟動 `TTB Automation`。
+
+**主機設定**（一次性）：
+
+1. `Set-TtbVmHost.ps1 -Apply`（VM 上以系統管理員執行，或經 Run Command）：Windows Update 有使用者登入時不自動重開機、時區 Taipei、登入不開 Server Manager。不帶 `-Apply` 只回報狀態。
+2. 以 [Sysinternals Autologon](https://learn.microsoft.com/sysinternals/downloads/autologon) 為 `azureuser` 設定自動登入（密碼以加密 LSA secret 保存）。VM 重開後自動登入 → `TTB Automation` 登入觸發 → supervisor 啟動 TTB 並自動登入競賽。
+3. 以 `azureuser` 執行 `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號> /pass` 儲存 TTB 帳密；`automation\config.json` 以 [config.competition.example.json](../Sample/Python/automation/config.competition.example.json) 為範本，填入 `ttbCompetition`。
+4. 結束 RDP 時在 VM 內以系統管理員執行 `azure\Disconnect-RdpToConsole.ps1`，把工作階段交回主控台，不要登出。
+5. 外部告警：在 `azureuser` 環境變數設定 `TTB_ALERT_WEBHOOK_URL`（Discord/Slack incoming webhook 皆可，payload 含 `content`/`text`）。
+
+啟用 live 的其他前提與自動恢復的邊界見 [OPERATIONS.md §8](../Sample/Python/OPERATIONS.md#8-競賽全自動模式opt-in)。
+
 ## 官方參考
 
 - [Azure for Students](https://azure.microsoft.com/en-us/free/students/)
