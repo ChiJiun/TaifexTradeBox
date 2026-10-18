@@ -114,14 +114,10 @@ class FakeWindow:
     def fill_login(self, credential):
         self.filled = credential
 
-    def control(self, auto_id, **_):
-        window = self
-
-        class Button:
-            def invoke(self):
-                window.clicked = True
-                window.logged = window.login_works
-        return Button()
+    def press(self, auto_id):
+        if auto_id == "btnLogOn":
+            self.clicked = True
+            self.logged = self.login_works
 
     def competitions(self):
         return self.items
@@ -138,10 +134,10 @@ class FakeWindow:
         return "subscribed"
 
     def dialogs(self):
-        return ["帳號或密碼錯誤"]
+        return ["帳號或密碼錯誤"] if self.clicked and not self.logged else []
 
     def dismiss_dialogs(self):
-        pass
+        return self.dialogs()
 
 
 def probe_after(window, target):

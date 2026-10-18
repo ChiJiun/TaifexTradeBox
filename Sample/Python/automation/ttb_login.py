@@ -47,6 +47,13 @@ APPLY_SETTINGS_ID = "btnApply"
 AUTO_RESUBMIT_ID = "chkAutoPut"
 AUTO_RECONNECT_ID = "chkReconnect"
 
+# Win32 messages used instead of blocking UI Automation calls.
+BM_CLICK = 0x00F5
+WM_CLOSE = 0x0010
+WM_COMMAND = 0x0111
+CB_SETCURSEL = 0x014E
+CBN_SELCHANGE = 1
+
 
 class LoginError(RuntimeError):
     """Login could not be completed or verified."""
@@ -195,6 +202,7 @@ class TtbWindow:
         # TTB hides MainForm when minimized to the tray, and UI Automation does
         # not expose hidden windows; restore it (no input is sent).
         wait_for(lambda: reveal_main_window(process), start_timeout)
+        self.process_id = process
         self.app = Application(backend="uia").connect(process=process, timeout=start_timeout)
         self.main = self.app.window(auto_id=MAIN_FORM_ID)
         self.main.wait("exists", timeout=start_timeout)
@@ -206,6 +214,14 @@ class TtbWindow:
         item = self.control(auto_id)
         return item.exists(timeout=1) and item.is_enabled()
 
+    def _hwnd(self, auto_id: str) -> int:
+        return int(self.control(auto_id).handle)
+
+    def press(self, auto_id: str) -> None:
+        """Click via PostMessage: TTB opens modal message boxes from button
+        handlers, and a UIA Invoke would block until someone closes them."""
+        ctypes.windll.user32.PostMessageW(self._hwnd(auto_id), BM_CLICK, 0, 0)
+
     def enforce_settings(self) -> list[str]:
         """Turn off TTB auto-resubmit and keep auto-reconnect on (pre-login only)."""
         changes: list[str] = []
@@ -215,11 +231,19 @@ class TtbWindow:
         tab.select()
         for auto_id, wanted in ((AUTO_RESUBMIT_ID, 0), (AUTO_RECONNECT_ID, 1)):
             box = self.control(auto_id, control_type="CheckBox")
-            if box.exists(timeout=2) and box.is_enabled() and box.get_toggle_state() != wanted:
+            if not (box.exists(timeout=2) and box.is_enabled()):
+                continue
+            # WinForms draws these itself, so BM_GETCHECK is not reliable;
+            # UIA Toggle is (and the checkbox handlers open no dialog).
+            if box.get_toggle_state() != wanted:
                 box.toggle()
+                if not wait_for(lambda: box.get_toggle_state() == wanted, 5.0, 0.2):
+                    raise LoginError(f"could not set {auto_id}")
                 changes.append(f"{auto_id}={'on' if wanted else 'off'}")
         if changes and self.enabled(APPLY_SETTINGS_ID):
-            self.control(APPLY_SETTINGS_ID).invoke()
+            self.press(APPLY_SETTINGS_ID)
+            # TTB confirms with a modal "設定成功" message box; close it.
+            changes.extend(f"dialog:{text}" for text in wait_for(self.dismiss_dialogs, 5.0, 0.5) or [])
         back = self.control(MESSAGES_TAB_ID, control_type="TabItem")
         if back.exists(timeout=1):
             back.select()
@@ -230,36 +254,57 @@ class TtbWindow:
         password = self.control(PASSWORD_ID)
         password.set_edit_text(credential.secret)
 
-    def dialogs(self) -> list[str]:
-        texts = []
-        for window in self.app.windows():
-            if window.element_info.automation_id != MAIN_FORM_ID:
-                body = " ".join(child.window_text() for child in window.descendants() if child.window_text())
-                texts.append((window.window_text() + " " + body).strip()[:200])
-        return texts
+    def _dialog_windows(self) -> list[Any]:
+        from pywinauto import Desktop  # type: ignore[import-not-found]
 
-    def dismiss_dialogs(self) -> None:
-        for window in self.app.windows():
-            if window.element_info.automation_id == MAIN_FORM_ID:
-                continue
-            for button in window.descendants(control_type="Button"):
-                if button.window_text() in {"確定", "OK", "是", "Yes"}:
-                    button.invoke()
-                    break
+        return [
+            window for window in Desktop(backend="win32").windows(visible_only=True)
+            if window.process_id() == self.process_id and window.class_name() == "#32770"
+        ]
+
+    @staticmethod
+    def _dialog_text(window: Any) -> str:
+        body = " ".join(child.window_text() for child in window.children() if child.window_text())
+        return (window.window_text() + " " + body).strip()[:200]
+
+    def dialogs(self) -> list[str]:
+        return [self._dialog_text(window) for window in self._dialog_windows()]
+
+    def dismiss_dialogs(self) -> list[str]:
+        """Close TTB message boxes with their OK button; return their texts."""
+        closed = []
+        for window in self._dialog_windows():
+            closed.append(self._dialog_text(window))
+            buttons = [child for child in window.children()
+                       if child.class_name() == "Button" and child.window_text() in {"確定", "OK", "是", "Yes"}]
+            target = buttons[0].handle if buttons else window.handle
+            ctypes.windll.user32.PostMessageW(target, BM_CLICK if buttons else WM_CLOSE, 0, 0)
+        return closed
+
+    def _combo(self) -> Any:
+        from pywinauto.controls.win32_controls import ComboBoxWrapper  # type: ignore[import-not-found]
+
+        return ComboBoxWrapper(self._hwnd(GAME_LIST_ID))
 
     def competitions(self) -> list[str]:
-        combo = self.control(GAME_LIST_ID, control_type="ComboBox")
-        return [text for text in combo.texts() if text]
+        return [text for text in self._combo().item_texts() if text]
 
     def selected_competition(self) -> str:
-        combo = self.control(GAME_LIST_ID, control_type="ComboBox")
-        try:
-            return combo.selected_text() or ""
-        except Exception:
-            return ""
+        combo = self._combo()
+        index = combo.selected_index()
+        items = combo.item_texts()
+        return items[index] if 0 <= index < len(items) else ""
 
     def select_competition(self, name: str) -> None:
-        self.control(GAME_LIST_ID, control_type="ComboBox").select(name)
+        """CB_SETCURSEL plus a posted CBN_SELCHANGE, which WinForms turns into
+        SelectedIndexChanged (TTB's GameEnter) without blocking on dialogs."""
+        combo = self._combo()
+        index = combo.item_texts().index(name)
+        user32 = ctypes.windll.user32
+        hwnd = int(combo.handle)
+        user32.SendMessageW(hwnd, CB_SETCURSEL, index, 0)
+        control_id = user32.GetDlgCtrlID(hwnd)
+        user32.PostMessageW(user32.GetParent(hwnd), WM_COMMAND, (CBN_SELCHANGE << 16) | (control_id & 0xFFFF), hwnd)
 
     def subscribe_quote(self, symbol: str) -> str:
         """Best effort: TTB only publishes ticks for symbols in 報價設定.
@@ -283,7 +328,8 @@ class TtbWindow:
             if not boxes or not self.enabled(SUBSCRIBE_ID):
                 return "subscribe_controls_not_found"
             boxes[0].set_edit_text(code)
-            self.control(SUBSCRIBE_ID).invoke()
+            self.press(SUBSCRIBE_ID)
+            wait_for(self.dismiss_dialogs, 2.0, 0.5)
             result = "subscribed"
         back = self.control(MESSAGES_TAB_ID, control_type="TabItem")
         if back.exists(timeout=1):
@@ -325,7 +371,8 @@ def ensure_logged_in(
         return result
 
     window = window_factory()
-    actions: list[str] = []
+    # A message box left open (e.g. by an earlier attempt) blocks TTB's UI.
+    actions: list[str] = [f"dialog:{text}" for text in window.dismiss_dialogs()]
     if not window.enabled(LOGOUT_ID):
         actions.extend(window.enforce_settings())
         credential = credential_reader(credential_target)
@@ -333,23 +380,23 @@ def ensure_logged_in(
         actions.append("credentials_filled")
         if not submit:
             return {"ok": False, "action": "filled_without_submit", "steps": actions}
-        window.control(LOGON_ID).invoke()
+        window.press(LOGON_ID)
         actions.append("logon_clicked")
         if not wait_for(lambda: window.enabled(GAME_LIST_ID) or window.enabled(LOGOUT_ID), login_timeout):
-            messages = window.dialogs()
-            window.dismiss_dialogs()
-            raise LoginError(f"TTB login did not complete; dialogs={messages}")
+            raise LoginError(f"TTB login did not complete; dialogs={window.dismiss_dialogs()}")
+        actions.extend(f"dialog:{text}" for text in window.dismiss_dialogs())
 
     items = wait_for(window.competitions, 20.0) or []
     target = choose_competition(list(items), competition)
     if window.selected_competition() != target:
         window.select_competition(target)
         actions.append("competition_selected")
+        actions.extend(f"dialog:{text}" for text in wait_for(window.dismiss_dialogs, 3.0) or [])
 
     verified = wait_for(lambda: (lambda p: p if p.logged_in else None)(probe()), verify_timeout, 3.0)
     if not verified:
         last = probe()
-        messages = window.dialogs()
+        messages = window.dismiss_dialogs()
         raise LoginError(
             f"TTB API still not logged in after selecting {target!r}: codes={last.codes} dialogs={messages}"
         )
