@@ -165,6 +165,20 @@ def default_probe(host: str, zmq_port: int) -> SessionProbe:
     return probe_session(api)
 
 
+def reveal_main_window(process_id: int) -> bool:
+    """Show TTB's MainForm if it is hidden in the tray; True once it is visible."""
+    from pywinauto import Desktop  # type: ignore[import-not-found]
+
+    user32 = ctypes.windll.user32
+    for window in Desktop(backend="win32").windows(visible_only=False, enabled_only=False):
+        if window.process_id() != process_id or not window.window_text().startswith("TTB-Ver"):
+            continue
+        if not user32.IsWindowVisible(window.handle) or user32.IsIconic(window.handle):
+            user32.ShowWindow(window.handle, 9)  # SW_RESTORE
+        return bool(user32.IsWindowVisible(window.handle))
+    return False
+
+
 class TtbWindow:
     """Thin pywinauto wrapper; imported lazily so CI never needs a desktop."""
 
@@ -174,10 +188,14 @@ class TtbWindow:
 
         self._not_found = ElementNotFoundError
         try:
-            self.app = Application(backend="uia").connect(path=str(ttb_exe), timeout=3)
+            process = Application(backend="win32").connect(path=str(ttb_exe), timeout=3).process
         except Exception:
             subprocess.Popen([str(ttb_exe)], cwd=str(ttb_exe.parent))
-            self.app = Application(backend="uia").connect(path=str(ttb_exe), timeout=start_timeout)
+            process = Application(backend="win32").connect(path=str(ttb_exe), timeout=start_timeout).process
+        # TTB hides MainForm when minimized to the tray, and UI Automation does
+        # not expose hidden windows; restore it (no input is sent).
+        wait_for(lambda: reveal_main_window(process), start_timeout)
+        self.app = Application(backend="uia").connect(process=process, timeout=start_timeout)
         self.main = self.app.window(auto_id=MAIN_FORM_ID)
         self.main.wait("exists", timeout=start_timeout)
 
