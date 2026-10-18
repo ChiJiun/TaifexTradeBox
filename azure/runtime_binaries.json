@@ -1,26 +1,27 @@
 {
   "schema_version": 1,
-  "snapshot_recorded_date": "2026-10-13",
+  "snapshot_recorded_date": "2026-10-18",
   "provenance_status": "unverified_repository_snapshot",
   "provenance_note": "Hashes lock currently checked-in artifacts only. The original official download channel, license and TTB/TTBHelp compatibility have not been independently authenticated. TTB.exe is unsigned (Authenticode NotSigned).",
   "artifacts": [
     {
       "path": "TTB.exe",
       "type": "windows-executable",
-      "size_bytes": 2246331,
-      "sha256": "dadd75b8da8989c7a46ab4de54d445f170d14e224949a5520128905f1c1d3d81",
-      "observed_file_version": "2025.11.27.1900",
+      "size_bytes": 8531130,
+      "sha256": "7b97dd0725106643eb3ad78e06dffadc2298d166cc3bfd6c11fd05d8795eb512",
+      "observed_file_version": "2026.07.08.1000",
+      "observed_product_version": "1.1.0",
       "observed_authenticode_status": "NotSigned",
+      "runtime_requirement": "Microsoft .NET 10 Desktop Runtime (x64)",
       "provenance_status": "unverified",
       "deployment_required": true
     },
     {
-      "path": "Sample/Python/TTBHelp.pyc",
-      "type": "python-bytecode",
-      "size_bytes": 7685,
-      "sha256": "431236e5fa04ce769a77fecda96a9aeabe32ad343d40265b56e10004fcf072cc",
-      "pyc_magic_hex": "f30d0d0a",
-      "python_minor": "3.13",
+      "path": "Sample/Python/TTBHelp.py",
+      "type": "python-source",
+      "size_bytes": 3534,
+      "sha256": "040d51f9121d79d96c7bf9c962735f3617377d72acf09eb6877de900fd9796da",
+      "expected_version": "2026.07.08.1000",
       "provenance_status": "unverified",
       "deployment_required": true
     }

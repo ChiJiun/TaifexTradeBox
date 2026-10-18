@@ -32,7 +32,8 @@ class BinaryIntegrityTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(REPO / item["path"], target)
             self.assertTrue(inspect(folder)["snapshot_verified"])
-            with (folder / "Sample" / "Python" / "TTBHelp.pyc").open("ab") as handle:
+            helper = next(item["path"] for item in content["artifacts"] if "TTBHelp" in item["path"])
+            with (folder / helper).open("ab") as handle:
                 handle.write(b"tampered")
             fail = inspect(folder)
             self.assertFalse(fail["snapshot_verified"])

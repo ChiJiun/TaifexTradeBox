@@ -7,7 +7,7 @@
 ## 多模組架構
 
 ```text
-TTBHelp.pyc
+TTBHelp.py（版本字串供 CONNECT 握手）
   └─ ttb/api.py             TTB API：訂閱、新單、刪單、改價、改量、查詢
       ├─ ttb/market_data.py 行情註冊、ZMQ 接收、Quote 轉換
       └─ ttb/orders.py      shadow 模擬與 TTB 委託／成交對帳

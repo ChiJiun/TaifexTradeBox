@@ -33,7 +33,7 @@ py -3.13 -m unittest discover -q
 powershell -ExecutionPolicy Bypass -File automation\validate_release.ps1 -WorkDir (Get-Location).Path
 ```
 
-正式部署前另外執行 `py -3.13 -m automation.check_binary_integrity`，核對 `TTB.exe` 與 `TTBHelp.pyc` 的來源快照 SHA256／Python magic。詳見 [Azure 的二進位供應鏈章節](../../azure/README.md#4-ttb-二進位版本來源控管15)。checksum 通過**不代表官方來源已驗證**。
+正式部署前另外執行 `py -3.13 -m automation.check_binary_integrity`，核對 `TTB.exe` 與 `TTBHelp.py` 的來源快照 SHA256 及兩者版本字串一致。詳見 [Azure 的二進位供應鏈章節](../../azure/README.md#4-ttb-二進位版本來源控管15)。checksum 通過**不代表官方來源已驗證**。
 
 確認 TTB GUI 已登入**正確的模擬競賽帳戶**、有效契約和當年度經人工核准的交易日曆。檢查服務 API 和 quote stream；程式無法憑當前已驗證 API 自動確認 GUI 競賽身分。
 
@@ -133,6 +133,6 @@ GUI 自動登入只在 TTB 2025.11.27.1900 的控制項名稱（`txtAccnt`、`tx
 
 - **報價訂閱在 TTB GUI**：TTBHelp 的 `QUOTEDATA` 只開本機 ZMQ 監聽，TTB 只推送「報價設定」頁已加入的商品。supervisor 會以 `--subscribe <近月代碼>` 讓 `ttb_login` 盡力加入（該頁登入前隱藏，未能離線驗證輸入框），換月前仍建議先在 GUI 手動加入次月；健康狀態出現「no first quote received」即代表沒訂到。
 - **API 連線不再經 TTBHelp 建構子**：`TTBApi.connect` 以相同端點直接 HTTP（10 秒 timeout），並用 TTBHelp 的版本字串做 `CONNECT` 握手。原 TTBHelp 在 TTB 未開或版本不符時會 `os._exit(0)`，supervisor 會誤判為正常結束。
-- **TTB 2026.07.08.1000** 需要 .NET 10 Desktop Runtime；TTB.exe 與 TTBHelp 必須同版（握手會比對版本）。升級須依 [Azure README #4](../../azure/README.md#4-ttb-二進位版本來源控管15) 更新 `runtime_binaries.json` 並在 VM 安裝 .NET 10。
+- **TTB 2026.07.08.1000**（2026-10-18 起的 repo 版本）需要 .NET 10 Desktop Runtime；TTB.exe 與 `TTBHelp.py` 必須同版（握手會比對版本，`check_binary_integrity` 也會檢查）。
 
 此頁為**操作單一權威來源**。策略研究文件僅用於設計與比較，不應凌駕本操作流程。

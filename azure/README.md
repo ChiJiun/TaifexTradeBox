@@ -113,7 +113,7 @@ py -3.13 -m pip install -r Sample/Python/requirements.txt
 
 ## 4. TTB 二進位版本／來源控管（#15）
 
-Repository 的現存 `TTB.exe` 版本資訊為 **2025.11.27.1900**；Windows `Get-AuthenticodeSignature` 的結果是 **NotSigned**。`TTBHelp.pyc` 與 Python 3.13 的 bytecode magic 一致。但**這些資訊並不證明二進位檔案來自期交所官方，或保證 EXE 與 Python API 相容**。原始下載來源、授權條件及 EXE/pyc 組合的實際 TTB 端到端驗收仍待人工查核。
+Repository 的 `TTB.exe` 自 2026-10-18 起為 **2026.07.08.1000**（產品版本 1.1.0，Windows `Get-AuthenticodeSignature` 為 **NotSigned**），需要 **.NET 10 Desktop Runtime (x64)**；同套件附 `TTBHelp.py`（原始碼，取代舊的 `TTBHelp.pyc`），其版本字串必須與 TTB.exe 相同，因為 `CONNECT` 握手會比對版本。這些資訊**不證明**檔案來自期交所官方；原始下載來源與授權仍待人工查核。
 
 本 repo 以 [runtime_binaries.json](runtime_binaries.json) 紀錄**現有 Git 快照**的 SHA256、長度、版本及已知的簽章狀態。每次部署／preflight／CI 必須用 `automation/check_binary_integrity.py` 驗證：
 
@@ -124,7 +124,7 @@ py -3.13 -m automation.check_binary_integrity
 
 SHA256 不一致、檔案不存在或 TTBHelp bytecode magic 與本機 Python 不符時會拒絕部署。驗證工具固定回報 `official_provenance_verified=false`，不可將 checksum pass 當成官方簽章或安全保障。若版本與 VM 上的不同，不要為了繼續下單而直接修改 JSON 或關閉檢查。
 
-**更新步驟**：先從經操作員確認的 TTB 官方平台下載合法版本並保存來源／授權佐證；在獨立 Windows VM 備份 `TTB.exe`、`TTBHelp.pyc`、Journal、config 後，停止 live bot 並核對全帳戶空倉／零掛單；複製新檔至隔離測試環境、檢查檔案版本與 SHA256、重建相容清單；執行全部 offline 單元測試、48h 加速 soak、preflight，接著在正確虛擬帳戶由人工完成 #2 一口委託/撤單、部分成交及 margin 語義驗收；完成 PR 審查後才允許更新正式 VM。來源與授權未確認前**不得自行轉發或鏡像新執行檔**。
+**更新步驟**：先從經操作員確認的 TTB 官方平台下載合法版本並保存來源／授權佐證；在獨立 Windows VM 備份 `TTB.exe`、`TTBHelp.py`、Journal、config 後，停止 live bot 並核對全帳戶空倉／零掛單；複製新檔至隔離測試環境、檢查檔案版本與 SHA256、重建相容清單；執行全部 offline 單元測試、48h 加速 soak、preflight，接著在正確虛擬帳戶由人工完成 #2 一口委託/撤單、部分成交及 margin 語義驗收；完成 PR 審查後才允許更新正式 VM。來源與授權未確認前**不得自行轉發或鏡像新執行檔**。
 
 原本 repo 內的 **12 MB 教學 PDF** 已從往後的 Git source 快照移除（舊歷史仍保留，沒有強推或改寫歷史）；如需教材請由官方競賽網站取得，本機已存在的副本不會被修改。VBA 範例留在 repo，但不得在未檢查巨集與來源前於正式 VM 執行。
 

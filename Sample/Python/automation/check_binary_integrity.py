@@ -37,11 +37,16 @@ def inspect(root: Path) -> dict:
             if item.get("type") == "python-bytecode":
                 header = target.read_bytes()[:4].hex()
                 valid = valid and header == item.get("pyc_magic_hex") and header == importlib.util.MAGIC_NUMBER.hex()
+            elif item.get("type") == "python-source":
+                # TTB's CONNECT handshake compares this string with TTB.exe.
+                version = item.get("expected_version", "")
+                valid = valid and bool(version) and f"'{version}'" in target.read_text(encoding="utf-8-sig")
             result["artifacts"].append({"path": relative, "snapshot_sha256_ok": valid})
             if not valid:
                 result["errors"].append(f"unexpected binary hash/size/Python magic: {relative}")
-        if len(result["artifacts"]) != 2 or len(manifest["artifacts"]) != 2:
-            result["errors"].append("expected both TTB.exe and TTBHelp.pyc")
+        types = sorted(str(item.get("type")) for item in manifest["artifacts"])
+        if len(result["artifacts"]) != 2 or len(types) != 2 or types[1] != "windows-executable":
+            result["errors"].append("expected exactly TTB.exe and one TTBHelp (.py or .pyc)")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         result["errors"].append(f"manifest unreadable or invalid: {exc}")
     result["snapshot_verified"] = not result["errors"]

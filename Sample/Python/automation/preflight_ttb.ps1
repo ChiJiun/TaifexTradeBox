@@ -16,7 +16,7 @@ if (-not (Test-Path -LiteralPath $WorkDir)) { Add-Failure "WorkDir missing: $Wor
 if (-not (Test-Path -LiteralPath $ConfigPath)) { Add-Failure "Config missing: $ConfigPath" }
 if (-not (Test-Path -LiteralPath $TtbExe)) { Add-Failure "TTB executable missing: $TtbExe" }
 
-# Fail closed on an unexpected TTB.exe/TTBHelp.pyc pair. A matching hash
+# Fail closed on an unexpected TTB.exe/TTBHelp pair. A matching hash
 # proves only equivalence to the reviewed repository snapshot, NOT official
 # publisher provenance or a safe TTB GUI session.
 if (Test-Path -LiteralPath $WorkDir) {
