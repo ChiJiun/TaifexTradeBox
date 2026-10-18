@@ -16,14 +16,28 @@
     "maxFlattenQty": 2
   },
   "extraArgs": [
-    "--base-qty", "1",
-    "--max-order-qty", "1",
-    "--max-inventory", "1",
-    "--quote-stale-seconds", "5",
-    "--stale-fatal-seconds", "120",
-    "--resume-fresh-ticks", "3",
-    "--max-notional", "400000",
-    "--available-margin-field", "AVAILABELMARGIN",
-    "--min-available-margin", "50000"
-  ]
+    "--base-qty",
+    "1",
+    "--max-order-qty",
+    "1",
+    "--max-inventory",
+    "1",
+    "--quote-stale-seconds",
+    "5",
+    "--stale-fatal-seconds",
+    "120",
+    "--resume-fresh-ticks",
+    "3",
+    "--max-notional",
+    "1000000",
+    "--available-margin-field",
+    "AVAILABELMARGIN",
+    "--min-available-margin",
+    "50000",
+    "--available-margin-currency",
+    "TWD"
+  ],
+  "liveGate": {
+    "probeBeforeFirstLive": true
+  }
 }

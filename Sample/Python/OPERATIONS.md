@@ -7,7 +7,7 @@
 - **已實作**：即時行情訂閱、shadow 模擬、單商品 TTB Gateway、風控、交易日曆、交易事件 Journal、Fail-Closed、操作員停止旗標、健康監控，以及離線 Walk-forward/OOS。
 - **僅可配置**：交易時段、成交成本、各種風控限額、可選的關機平倉嘗試。變更設定不能代表已經完成實際 TTB 驗證。
 - **尚未驗收**：正確虛擬競賽帳戶身分、真實 TTB `QUERYMARGIN` 欄位／單位、下單與取消競態，以及 GUI 重啟後完整恢復（#2/#4/#10）。
-- **禁止**：未滿足 [§8 競賽全自動模式](#8-競賽全自動模式opt-in) 全部前提就無人值守啟用 `--mode ttb`、在有人手動交易的帳戶啟用自動恢復、帶倉換月、手動刪除異常對帳旗標。
+- **禁止**：未經 [§8](#8-競賽全自動模式opt-in) 的 `set_mode.ps1` 檢查就手改 config 啟用 `--mode ttb`、在有人手動交易的帳戶啟用自動恢復、帶倉換月、手動刪除異常對帳旗標。
 
 ## 0. VM 唯讀健康稽核（#10）
 
@@ -90,7 +90,7 @@ py -3.13 ttb_readonly_capture.py
 
 ## 5. TTB 虛擬下單：目前仍有人工驗收阻塞
 
-只有在完成 #2/#4 真實 API fixture、受控的一口委託/撤銷測試、帳戶全空、保證金欄位及單位和費稅校準、風控門檻確認後，才可由人工操作員評估開啟。除了 `--confirm-virtual-orders`、`--confirm-flat-account`，仍需要正確 `--max-notional`、`--min-available-margin` 和**實測** `--available-margin-field`。缺任何一項將拒絕新增曝險。**目前不提供可直接複製執行的 live 命令，以免誤開單。**
+只有在完成 #2/#4 真實 API fixture、受控的一口委託/撤銷測試、帳戶全空、保證金欄位及單位和費稅校準、風控門檻確認後，才可由人工操作員評估開啟。除了 `--confirm-virtual-orders`、`--confirm-flat-account`，仍需要正確 `--max-notional`、`--min-available-margin` 和**實測** `--available-margin-field`。缺任何一項將拒絕新增曝險。切換方式只有 [§8](#8-競賽全自動模式opt-in) 的 `automation\set_mode.ps1 -Mode ttb`，它會先檢查前提並在首次啟動時自動完成一口委託／撤單測試。
 
 一口 smoke test 會真的送出虛擬委託，僅能依 [README 的嚴格人工流程](README.md#真實-ttb-api-驗證準備2) 執行。即使遠價也可能成交，絕不從相同價格／口數推定委託歸屬。
 
@@ -118,16 +118,26 @@ py -3.13 ttb_readonly_capture.py
 | `auto_recover_ttb.py`（`autoRecovery`） | bot 非正常退出或啟動時帳戶不乾淨：撤銷**全部**工作中委託、以市價 IOC 平掉 TXF/MTX/TMF 期貨部位、兩次唯讀檢查皆乾淨才清除 `manual-reconciliation-required.flag`，每步驟寫入 `output/reconciliation` 稽核。每日最多 `maxAttemptsPerDay` 次（`output/supervisor/auto-recovery.json` 持久化），超過、遇到選擇權／超量部位、或平倉後仍不平，就維持鎖定並由 Watchdog 告警，回到 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md) 人工流程。休市帶倉會延到下一個交易時段再處理。 |
 | `run_ttb_automation.ps1` | 每輪：確保 TTB 執行 → 等 8080/51141 → 自動登入（失敗每 60 秒重試）→ 需要時自動恢復 → 啟動 bot。 |
 
-**啟用前提（全部滿足才可使用 [config.competition.example.json](automation/config.competition.example.json)）**：
+**部署全步驟（依序執行；1–6 一次性，7 以後每次上線）**
 
-1. 此 TTB 競賽帳戶**只給 bot 交易**（`exclusiveBotAccount: true`）；自動恢復會撤銷所有委託並平掉所有期貨部位。
-2. 在 VM 以 `azureuser` 執行一次 `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號 e-mail> /pass`（互動輸入密碼），並把 `ttbCompetition` 設為 TTB 競賽下拉選單中的名稱（部分字串可，但必須唯一）。
-3. 以 `py -3.13 -m automation.ttb_login --check-only` 確認三個查詢回 `0000`，且輸出 `documented_margin_field_present=true`（廠商手冊 3.9 與 TTB 2025.11.27.1900 的欄位名稱都是 `AVAILABELMARGIN`，拼字如此）。若欄位不存在，bot 的入口委託會被 `risk_block` 擋下而不會亂下單。
-4. 依 [README](README.md#真實-ttb-api-驗證準備2) 完成一次遠價 1 口委託／撤單 probe（#2）。
-5. `--max-notional`、`--min-available-margin` 依競賽初始資金與商品保證金調整；`--daily-loss-limit`／`--max-drawdown` 仍有效。
-6. VM 已執行 [Set-TtbVmHost.ps1](../../azure/Set-TtbVmHost.ps1) `-Apply`，並用 Sysinternals Autologon 設好 Windows 自動登入，否則重開機後沒有互動桌面可跑 TTB。離開 RDP 時用 [Disconnect-RdpToConsole.ps1](../../azure/Disconnect-RdpToConsole.ps1)，不要登出。
+| # | 在哪裡 | 動作 |
+|---|---|---|
+| 1 | 本機 | `az login` 後 `powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply`：把已提交的程式碼部署到 VM（備份、測試、失敗自動還原、重新註冊排程）。RDP 連不上時先跑 `azure\Set-TtbRdpAllowlist.ps1 -Apply`。 |
+| 2 | VM（系統管理員 PowerShell） | `powershell -ExecutionPolicy Bypass -File C:\TTB\azure\Set-TtbVmHost.ps1 -Apply`：關閉 Windows Update 自動重開機、時區 Taipei；輸出 `dotnet10`、`vcRuntime` 必須為 true（TTB 2026.07.08 需三個 .NET 10 runtime，pywinauto 需 VC++ 2015-2022 x64）。 |
+| 3 | VM（以 `azureuser`） | `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號 e-mail> /pass`，提示時輸入 TTB 密碼（畫面不顯示）。`cmdkey /list:TaifexTradeBox/TTB` 確認。 |
+| 4 | VM（系統管理員 PowerShell） | `powershell -ExecutionPolicy Bypass -File C:\TTB\azure\Set-TtbAutologon.ps1`：輸入 Windows 密碼，存成 LSA secret。之後 VM 重開機會自動登入 → `TTB Automation` 登入觸發 → 自動開 TTB 並登入競賽。 |
+| 5 | VM（TTB GUI） | 手動登入一次 TTB，選競賽，在「報價設定」加入當月與次月代碼（例如 `TMFJ6`、`TMFK6`）；記下競賽列表中的名稱。 |
+| 6 | VM | `C:\TTB\Sample\Python\automation\config.json`：以 `config.example.json` 為底，設 `symbol: "auto:TMF"`、`autoLogin: true`、`ttbCompetition: "<競賽名稱>"`。`Start-ScheduledTask 'TTB Automation'`，用 `py -3.13 -m automation.ttb_login --check-only` 確認 `logged_in=true`、`twd_available_margin_positive=true`（為 false 表示競賽帳戶尚未出入金，請在競賽網站把資金轉入台幣保證金帳戶）。 |
+| 7 | VM | shadow 觀察至少一個交易時段：`Invoke-RestMethod http://127.0.0.1:8765/status` 的 `state` 應為 `healthy`、`last_quote_wall_utc` 持續更新；`output\supervisor\supervisor.log` 的 `ttb_login` 行應顯示 `"quotes": {"<近月>": "subscribed"}`。 |
+| 8 | VM（系統管理員 PowerShell） | 切換實際下單：`cd C:\TTB\Sample\Python; powershell -ExecutionPolicy Bypass -File automation\set_mode.ps1 -Mode ttb`（乾跑，列出檢查）→ 全部通過後加 `-Apply`。它會套用 [config.competition.example.json](automation/config.competition.example.json) 的風控參數並重啟 supervisor。 |
+| 9 | 自動 | 第一次 live 啟動時 `automation/live_gate.py` 在開盤後自動執行一口遠價委託／撤單測試（每個合約一次，紀錄在 `output\order-probes\verified-<代碼>.json`）；通過才啟動策略，失敗則留下人工對帳旗標並停止。之後每個交易時段自動進出場。 |
+| 10 | 隨時 | 退回 shadow：`set_mode.ps1 -Mode shadow -Apply`。緊急停止：建立 `output\supervisor\stop.requested`（live 會先嘗試平倉再停）。 |
 
-GUI 自動登入只在 TTB 2025.11.27.1900 的控制項名稱（`txtAccnt`、`txtPwd`、`btnLogOn`、`cbGameList`）上驗證過；TTB 改版後先用 `py -3.13 -m automation.ttb_login --dump-controls` 檢查。
+**啟用 live 的硬性前提**：此競賽帳戶**只給 bot 交易**（`exclusiveBotAccount: true`，自動恢復會撤銷所有委託並平掉所有期貨部位）；`set_mode.ps1` 檢查的認證、競賽名稱、API 登入、TWD 可用保證金 > 0、無對帳旗標缺一不可。`--max-notional`／`--min-available-margin` 預設只允許 1 口 TMF，依競賽資金調整。
+
+**風險提醒**：自動化只保證「機器會自己跑」，不保證策略獲利；先以 shadow 的決策與模擬損益判斷是否上真單及口數。
+
+GUI 自動登入已在 TTB 2026.07.08.1000（控制項 `txtAccnt`、`txtPwd`、`btnLogOn`、`cbGameList`、`dvQuote`）的 Azure VM 上實測：關閉 TTB 後 supervisor 自動重開、登入、選競賽並重啟 bot（2026-10-18）。TTB 改版後先用 `py -3.13 -m automation.ttb_login --dump-controls` 檢查。
 
 其他注意事項：
 

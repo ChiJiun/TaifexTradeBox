@@ -137,6 +137,21 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         Write-SupervisorLog 'auto-recovery verified a clean account and cleared the flag'
     }
 
+    if ($config.mode -eq 'ttb' -and ($null -eq $config.liveGate -or $config.liveGate.probeBeforeFirstLive -ne $false)) {
+        # One far-limit order/cancel probe per contract before strategy orders.
+        $gate = Invoke-PythonTool 'live_gate' @('-m', 'automation.live_gate', '--symbol', [string]$config.symbol)
+        if ($gate -eq 3) {
+            Write-SupervisorLog 'live gate deferred (market closed or no quote yet); retrying in 60s'
+            Start-Sleep -Seconds 60
+            continue
+        }
+        if ($gate -ne 0) {
+            Set-Content -LiteralPath $reconcileFlag -Value (Get-Date -Format o) -Encoding ascii
+            Write-SupervisorLog 'live gate failed: one-lot probe did not verify cleanly; manual check required'
+            break
+        }
+    }
+
     $botArgs = @(
         'sim_hft_bot.py',
         '--symbol', [string]$config.symbol,

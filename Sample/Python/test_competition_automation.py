@@ -25,7 +25,7 @@ from ttb.auto_recovery import (
     auto_recover,
 )
 from ttb.calendar import CalendarCoverageError, TradingCalendar, front_month_contract, resolve_symbol
-from ttb.risk import PreTradeLimits, parse_available_margin
+from ttb.risk import PreTradeLimits, PreTradeRiskError, parse_available_margin
 from ttb.session import probe_session
 
 HERE = Path(__file__).parent
@@ -92,6 +92,21 @@ class SessionProbeTests(unittest.TestCase):
     def test_documented_margin_fixture_parses(self):
         response = {"Code": "0000", "Data": json.dumps({"AVAILABELMARGIN": "120,000", "BALN": "500000"})}
         self.assertEqual(parse_available_margin(response, "AVAILABELMARGIN"), 120000.0)
+
+    def test_multi_currency_margin_rows_use_twd_only(self):
+        # Shape observed on the competition account (TTB 2026.07.08): one
+        # row per currency, each with the same field names.
+        rows = [
+            {"CURRENCY": "TWD", "AVAILABELMARGIN": "1,234,567.5", "BALN": "1,300,000"},
+            {"CURRENCY": "USD", "AVAILABELMARGIN": "0", "BALN": "0"},
+            {"CURRENCY": "JPY", "AVAILABELMARGIN": "0", "BALN": "0"},
+            {"CURRENCY": "CNY", "AVAILABELMARGIN": "0", "BALN": "0"},
+        ]
+        response = {"Code": "0000", "Data": json.dumps(rows)}
+        self.assertEqual(parse_available_margin(response, "AVAILABELMARGIN"), 1234567.5)
+        self.assertEqual(parse_available_margin(response, "AVAILABELMARGIN", "usd"), 0.0)
+        with self.assertRaises(PreTradeRiskError):
+            parse_available_margin(response, "AVAILABELMARGIN", "EUR")
 
 
 class FakeWindow:
@@ -379,6 +394,61 @@ class AutoRecoveryTests(unittest.TestCase):
             self.assertEqual(auto_recover_main([]), 2)
 
 
+class LiveGateTests(unittest.TestCase):
+    def setUp(self):
+        from automation import live_gate
+        self.live_gate = live_gate
+        self.tmp = tempfile.TemporaryDirectory()
+        self.probe_dir = Path(self.tmp.name)
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_gate(self, probe, when):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(*when, tzinfo=timezone(timedelta(hours=8)))
+        return self.live_gate.gate(
+            symbol_spec="auto:TMF", calendar_file=HERE / "automation" / "taifex_calendar_2026.json",
+            probe_dir=self.probe_dir, run_probe=probe, now=now,
+        )
+
+    def test_market_closed_defers_without_probing(self):
+        code, report = self.run_gate(lambda s: self.fail("must not probe"), (2026, 10, 18, 12, 0))
+        self.assertEqual((code, report["status"]), (3, "deferred"))
+
+    def test_probe_runs_once_and_is_remembered(self):
+        def probe(symbol):
+            self.calls.append(symbol)
+            return 0
+        code, report = self.run_gate(probe, (2026, 10, 19, 9, 0))
+        self.assertEqual((code, report["status"], self.calls), (0, "verified", ["TMFJ6"]))
+        code, _ = self.run_gate(lambda s: self.fail("already verified"), (2026, 10, 19, 10, 0))
+        self.assertEqual(code, 0)
+        # The next contract needs its own probe.
+        code, report = self.run_gate(probe, (2026, 10, 21, 9, 0))
+        self.assertEqual((code, report["symbol"], self.calls[-1]), (0, "TMFK6", "TMFK6"))
+
+    def test_failed_probe_is_not_retried_the_same_day(self):
+        code, report = self.run_gate(lambda s: 3, (2026, 10, 19, 9, 0))
+        self.assertEqual((code, report["status"]), (2, "failed"))
+        code, report = self.run_gate(lambda s: self.fail("no retry today"), (2026, 10, 19, 11, 0))
+        self.assertEqual((code, report["status"]), (2, "failed"))
+        code, _ = self.run_gate(lambda s: 0, (2026, 10, 20, 9, 0))
+        self.assertEqual(code, 0)
+
+    def test_missing_quote_defers_but_exceptions_fail(self):
+        def no_quote(symbol):
+            raise RuntimeError("no TMFJ6 quote received within 15s")
+        code, _ = self.run_gate(no_quote, (2026, 10, 19, 8, 46))
+        self.assertEqual(code, 3)
+
+        def broken(symbol):
+            raise ConnectionError("TTB down")
+        code, report = self.run_gate(broken, (2026, 10, 19, 9, 0))
+        self.assertEqual((code, report["status"]), (2, "failed"))
+
+
 class CompetitionConfigTests(unittest.TestCase):
     def test_competition_example_passes_live_gates(self):
         config = json.loads((HERE / "automation" / "config.competition.example.json").read_text(encoding="utf-8"))
@@ -392,6 +462,8 @@ class CompetitionConfigTests(unittest.TestCase):
         )
         limits.validate()
         self.assertEqual(args.available_margin_field, "AVAILABELMARGIN")
+        self.assertEqual(args.available_margin_currency, "TWD")
+        self.assertTrue(config["liveGate"]["probeBeforeFirstLive"])
 
     def test_supervisor_and_installer_guards(self):
         supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
@@ -402,6 +474,8 @@ class CompetitionConfigTests(unittest.TestCase):
         self.assertLess(supervisor.index("(Invoke-TtbLogin) -ne 0"), supervisor.index("Test-LocalPort 8080) -or"))
         self.assertIn("'--stop-file', $botStopFile", supervisor)
         self.assertIn("TTB process exited", supervisor)
+        self.assertIn("automation.live_gate", supervisor)
+        self.assertLess(supervisor.index("automation.live_gate"), supervisor.index("launching bot mode="))
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")
         self.assertNotIn("Register-ScheduledTask -TaskName 'TTB GUI'", installer)
 

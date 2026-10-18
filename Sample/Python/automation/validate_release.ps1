@@ -53,6 +53,8 @@ $requiredFiles = @(
     'auto_recover_ttb.py',
     'ttb\auto_recovery.py',
     'ttb\session.py',
+    'automation\live_gate.py',
+    'automation\set_mode.ps1',
     'automation\run_ttb_automation.ps1',
     'automation\check_ttb_health.ps1',
     'automation\health_watchdog.ps1',
@@ -105,6 +107,9 @@ try {
 
         & py.exe -3.13 auto_recover_ttb.py --help *> $null
         Add-Check 'auto-recovery-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 -m automation.live_gate --help *> $null
+        Add-Check 'live-gate-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
         & py.exe -3.13 -m automation.ttb_login --help *> $null
         Add-Check 'ttb-login-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"

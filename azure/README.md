@@ -239,12 +239,12 @@ powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply
 0. 執行環境：TTB 2026.07.08 需要 .NET 10 的 `Microsoft.NETCore.App`、`Microsoft.AspNetCore.App`、`Microsoft.WindowsDesktop.App` 三個 runtime（只裝 Desktop 會啟動失敗）；`ttb_login` 用的 pywinauto 需要 Visual C++ 2015-2022 x64 runtime（`mfc140u.dll`），以 SYSTEM 安裝 pywin32 後另需 `pywin32_postinstall -install`。`Set-TtbVmHost.ps1` 會回報 `dotnet10`、`vcRuntime` 是否就緒。
 
 1. `Set-TtbVmHost.ps1 -Apply`（VM 上以系統管理員執行，或經 Run Command）：Windows Update 有使用者登入時不自動重開機、時區 Taipei、登入不開 Server Manager。不帶 `-Apply` 只回報狀態。
-2. 以 [Sysinternals Autologon](https://learn.microsoft.com/sysinternals/downloads/autologon) 為 `azureuser` 設定自動登入（密碼以加密 LSA secret 保存）。VM 重開後自動登入 → `TTB Automation` 登入觸發 → supervisor 啟動 TTB 並自動登入競賽。
+2. 在 VM 以系統管理員執行 [Set-TtbAutologon.ps1](Set-TtbAutologon.ps1)：下載並驗證簽章的 Sysinternals Autologon，提示輸入 Windows 密碼後存成加密 LSA secret。VM 重開後自動登入 → `TTB Automation` 登入觸發 → supervisor 啟動 TTB 並自動登入競賽。
 3. 以 `azureuser` 執行 `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號> /pass` 儲存 TTB 帳密；`automation\config.json` 以 [config.competition.example.json](../Sample/Python/automation/config.competition.example.json) 為範本，填入 `ttbCompetition`。
 4. 結束 RDP 時在 VM 內以系統管理員執行 `azure\Disconnect-RdpToConsole.ps1`，把工作階段交回主控台，不要登出。
 5. 外部告警：在 `azureuser` 環境變數設定 `TTB_ALERT_WEBHOOK_URL`（Discord/Slack incoming webhook 皆可，payload 含 `content`/`text`）。
 
-啟用 live 的其他前提與自動恢復的邊界見 [OPERATIONS.md §8](../Sample/Python/OPERATIONS.md#8-競賽全自動模式opt-in)。
+完整部署步驟表、`set_mode.ps1` 的 live 切換檢查與自動恢復的邊界見 [OPERATIONS.md §8](../Sample/Python/OPERATIONS.md#8-競賽全自動模式opt-in)。
 
 ## 官方參考
 

@@ -23,6 +23,9 @@ class SessionProbe:
     api_reachable: bool = False
     codes: dict[str, str] = field(default_factory=dict)
     margin_fields: list[str] = field(default_factory=list)
+    # True when the TWD row's AVAILABELMARGIN parses and is positive; the
+    # amount itself is never stored.
+    twd_available_margin_positive: bool = False
     error: str = ""
 
     @property
@@ -71,4 +74,10 @@ def probe_session(api: Any) -> SessionProbe:
         "positions": response_code(positions)[:8],
     }
     probe.margin_fields = _field_names(margin)
+    try:
+        from .risk import parse_available_margin
+
+        probe.twd_available_margin_positive = parse_available_margin(margin, DOCUMENTED_MARGIN_FIELD, "TWD") > 0
+    except Exception:
+        probe.twd_available_margin_positive = False
     return probe

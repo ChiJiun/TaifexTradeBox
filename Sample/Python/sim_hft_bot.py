@@ -98,6 +98,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="TTB QUERYMARGIN field verified from a real virtual-account fixture")
     parser.add_argument("--min-available-margin", type=float, default=0.0,
                         help="mandatory positive margin headroom for TTB live entries")
+    parser.add_argument("--available-margin-currency", default="TWD",
+                        help="QUERYMARGIN row (CURRENCY field) the margin is read from")
     parser.add_argument("--rate-counters-file", type=Path, default=None,
                         help="durable attempt counter file; defaults to output/rate-counters-SYMBOL.json")
     parser.add_argument("--journal-dir", type=Path, default=None,
@@ -306,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         max_notional=args.max_notional,
         minimum_available_margin=args.min_available_margin,
         available_margin_field=args.available_margin_field,
+        available_margin_currency=args.available_margin_currency,
     )
     limits.validate()
     gateway = (
