@@ -43,5 +43,11 @@ if ($Apply) {
     autoLogonUser = Get-Value $winlogon 'DefaultUserName'
     interactiveSession = [bool](Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue)
     ttbRunning = [bool](Get-Process -Name TTB -ErrorAction SilentlyContinue)
+    # TTB 2026.07.08 needs .NET 10 (NETCore, AspNetCore, WindowsDesktop);
+    # pywinauto's win32ui needs the Visual C++ 2015-2022 x64 runtime (mfc140u.dll).
+    dotnet10 = @('Microsoft.NETCore.App', 'Microsoft.AspNetCore.App', 'Microsoft.WindowsDesktop.App' | Where-Object {
+        Get-ChildItem "$env:ProgramFiles\dotnet\shared\$_" -Filter '10.*' -ErrorAction SilentlyContinue
+    }).Count -eq 3
+    vcRuntime = Test-Path (Join-Path $env:WINDIR 'System32\mfc140u.dll')
     lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')
 } | ConvertTo-Json

@@ -180,6 +180,19 @@ class LoginTests(unittest.TestCase):
         )
         self.assertEqual(result["action"], "already_logged_in")
 
+    def test_logged_in_session_survives_broken_gui_tooling(self):
+        from ttb.session import SessionProbe
+        ok = SessionProbe(api_reachable=True, codes={"margin": "0000", "orders": "0000", "positions": "0000"})
+
+        def broken():
+            raise ImportError("DLL load failed while importing win32ui")
+        result = ensure_logged_in(
+            competition="", credential_target="t", ttb_exe=Path("TTB.exe"), probe=lambda: ok,
+            window_factory=broken, quote_symbols=("TMFJ6",),
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["quotes"], {"TMFJ6": "error:ImportError"})
+
     def test_full_login_selects_competition_and_verifies(self):
         window = FakeWindow()
         result = ensure_logged_in(

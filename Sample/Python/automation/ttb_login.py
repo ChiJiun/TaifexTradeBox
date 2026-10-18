@@ -298,7 +298,12 @@ def ensure_logged_in(
     if first.logged_in:
         result = {"ok": True, "action": "already_logged_in", "session": first.as_dict()}
         if quote_symbols:
-            result["quotes"] = _subscribe_all(window_factory(), quote_symbols)
+            try:
+                window = window_factory()
+            except Exception as exc:  # GUI tooling broken must not block a verified session
+                result["quotes"] = {symbol: f"error:{type(exc).__name__}" for symbol in quote_symbols}
+            else:
+                result["quotes"] = _subscribe_all(window, quote_symbols)
         return result
 
     window = window_factory()

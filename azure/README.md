@@ -236,6 +236,8 @@ powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply
 
 **主機設定**（一次性）：
 
+0. 執行環境：TTB 2026.07.08 需要 .NET 10 的 `Microsoft.NETCore.App`、`Microsoft.AspNetCore.App`、`Microsoft.WindowsDesktop.App` 三個 runtime（只裝 Desktop 會啟動失敗）；`ttb_login` 用的 pywinauto 需要 Visual C++ 2015-2022 x64 runtime（`mfc140u.dll`），以 SYSTEM 安裝 pywin32 後另需 `pywin32_postinstall -install`。`Set-TtbVmHost.ps1` 會回報 `dotnet10`、`vcRuntime` 是否就緒。
+
 1. `Set-TtbVmHost.ps1 -Apply`（VM 上以系統管理員執行，或經 Run Command）：Windows Update 有使用者登入時不自動重開機、時區 Taipei、登入不開 Server Manager。不帶 `-Apply` 只回報狀態。
 2. 以 [Sysinternals Autologon](https://learn.microsoft.com/sysinternals/downloads/autologon) 為 `azureuser` 設定自動登入（密碼以加密 LSA secret 保存）。VM 重開後自動登入 → `TTB Automation` 登入觸發 → supervisor 啟動 TTB 並自動登入競賽。
 3. 以 `azureuser` 執行 `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號> /pass` 儲存 TTB 帳密；`automation\config.json` 以 [config.competition.example.json](../Sample/Python/automation/config.competition.example.json) 為範本，填入 `ttbCompetition`。
