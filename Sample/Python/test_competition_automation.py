@@ -474,6 +474,11 @@ class CompetitionConfigTests(unittest.TestCase):
         self.assertLess(supervisor.index("(Invoke-TtbLogin) -ne 0"), supervisor.index("Test-LocalPort 8080) -or"))
         self.assertIn("'--stop-file', $botStopFile", supervisor)
         self.assertIn("TTB process exited", supervisor)
+        # A TTB whose GUI shows the competition but whose API answers 500 never
+        # recovers by retrying login; the supervisor must restart TTB.
+        self.assertIn("$loginFailures -ge $maxLoginFailuresBeforeRestart", supervisor)
+        self.assertLess(supervisor.index("$loginFailures -ge"), supervisor.index("Stop-Process -Name TTB"))
+        self.assertIn("$loginFailures = 0", supervisor)
         self.assertIn("automation.live_gate", supervisor)
         self.assertLess(supervisor.index("automation.live_gate"), supervisor.index("launching bot mode="))
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")
