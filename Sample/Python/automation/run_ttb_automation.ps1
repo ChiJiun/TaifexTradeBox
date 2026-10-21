@@ -102,6 +102,10 @@ if (Test-Path -LiteralPath $cleanupScript) {
     }
 }
 
+# After TTB's server drops the competition selection, the GUI still shows it,
+# so login never reselects and the API answers 500 forever (10/19, 64 hours).
+$maxLoginFailuresBeforeRestart = 3
+$loginFailures = 0
 while (-not (Test-Path -LiteralPath $stopFile)) {
     if (-not (Get-Process -Name TTB -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $TtbExe)) {
         Start-Process -FilePath $TtbExe -WorkingDirectory (Split-Path -Parent $TtbExe)
@@ -110,10 +114,19 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     }
     # TTB opens its local API ports only after login, so log in first.
     if ((Invoke-TtbLogin) -ne 0) {
+        $loginFailures += 1
+        if ($loginFailures -ge $maxLoginFailuresBeforeRestart) {
+            Write-SupervisorLog "TTB login failed $loginFailures times in a row; restarting TTB"
+            Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
+            $loginFailures = 0
+            Start-Sleep -Seconds 5
+            continue
+        }
         Write-SupervisorLog 'TTB is not logged in to the competition; retrying in 60s'
         Start-Sleep -Seconds 60
         continue
     }
+    $loginFailures = 0
     if (-not (Test-LocalPort 8080) -or -not (Test-LocalPort 51141)) {
         Write-SupervisorLog 'waiting for TTB localhost ports 8080 and 51141'
         Start-Sleep -Seconds 15
