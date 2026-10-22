@@ -43,6 +43,15 @@ class QuoteIntegrityTests(unittest.TestCase):
         self.assertEqual(integrity.snapshot()["out_of_order"], 1)
         self.assertEqual(integrity.snapshot()["accepted"], 2)
 
+    def test_accepts_ttb_payload_with_exchange_suffix_on_symbol(self):
+        payload = {
+            "Symbol": "TMFK6.TW-B", "BidPs": 20000, "AskPs": 20001, "BidPv": 2, "AskPv": 3,
+            "Price": 20000, "Qty": 1, "Volume": 100, "TickTime": "09:00:00.000",
+        }
+        integrity = MarketDataIntegrity("TMFK6")
+        self.assertTrue(integrity.validate(Quote.from_ttb(payload)))
+        self.assertEqual(integrity.snapshot()["invalid"], 0)
+
     def test_rejects_old_backlog_and_unparseable_timestamp_in_live_mode(self):
         integrity = MarketDataIntegrity(
             "TXFA7", max_exchange_lag_seconds=5,
