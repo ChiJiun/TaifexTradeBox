@@ -128,6 +128,27 @@ class QuoteIntegrityTests(unittest.TestCase):
         finally:
             subscriber.close()
 
+    def test_zmq_subscriber_accepts_suffixed_topic_but_not_other_contracts(self):
+        import json
+        import zmq
+        context = zmq.Context.instance()
+        publisher = context.socket(zmq.PUB)
+        port = publisher.bind_to_random_port("tcp://127.0.0.1")
+        received = []
+        subscriber = ZmqQuoteSubscriber(port, "TMFK6", received.append)
+        subscriber.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not received and time.monotonic() < deadline:
+                publisher.send_multipart([b"TTB$Tick$TMFK60", json.dumps({"Symbol": "TMFK60"}).encode()])
+                publisher.send_multipart([b"TTB$Tick$TMFK6.TW-B", json.dumps({"Symbol": "TMFK6.TW-B"}).encode()])
+                time.sleep(0.05)
+            self.assertTrue(received, "suffixed topic delivered")
+            self.assertEqual({row["Symbol"] for row in received}, {"TMFK6.TW-B"})
+        finally:
+            subscriber.close()
+            publisher.close(linger=0)
+
 
 if __name__ == "__main__":
     unittest.main()
