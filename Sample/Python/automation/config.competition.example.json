@@ -35,7 +35,8 @@
     "--min-available-margin",
     "50000",
     "--available-margin-currency",
-    "TWD"
+    "TWD",
+    "--disable-after-hours"
   ],
   "liveGate": {
     "probeBeforeFirstLive": true
