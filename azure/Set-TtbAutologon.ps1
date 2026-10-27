@@ -4,7 +4,7 @@ Configure Windows auto-logon for the TTB VM with Sysinternals Autologon.
 
 .DESCRIPTION
 Run ON THE VM in an elevated PowerShell. It downloads Autologon from Microsoft,
-verifies the Authenticode signature, asks for the Windows password (hidden
+verifies the Authenticode signature, asks for the Windows password (credential dialog)
 input) and stores it as an encrypted LSA secret, so the VM logs the user in
 after every reboot and the TTB Automation logon trigger starts TTB.
 The password is never written to disk by this script. Any plain-text
@@ -31,9 +31,12 @@ if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Micr
     throw "unexpected Autologon signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
 }
 
-$secure = Read-Host -Prompt "Windows password for $Domain\$UserName" -AsSecureString
-$plain = [Runtime.InteropServices.Marshal]::PtrToStringUni(
-    [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($secure))
+# A credential dialog accepts Ctrl+V; Read-Host -AsSecureString in an RDP
+# console session keeps only the first pasted character.
+$credential = Get-Credential -UserName "$Domain\$UserName" -Message "Windows password for $Domain\$UserName (used for auto-logon)"
+if (-not $credential) { throw 'Cancelled; nothing was changed.' }
+$secure = $credential.Password
+$plain = $credential.GetNetworkCredential().Password
 try {
     # A wrong (e.g. half-pasted) password would leave the VM stuck at the logon
     # screen after the next reboot, so check it before storing it.
