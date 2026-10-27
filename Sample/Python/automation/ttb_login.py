@@ -222,31 +222,64 @@ class TtbWindow:
         handlers, and a UIA Invoke would block until someone closes them."""
         ctypes.windll.user32.PostMessageW(self._hwnd(auto_id), BM_CLICK, 0, 0)
 
-    def enforce_settings(self) -> list[str]:
-        """Turn off TTB auto-resubmit and keep auto-reconnect on (pre-login only)."""
-        changes: list[str] = []
+    def _settings_tab(self) -> None:
         tab = self.control(SETTINGS_TAB_ID, control_type="TabItem")
         if not tab.exists(timeout=2):
-            return changes
+            raise LoginError(f"TTB settings tab {SETTINGS_TAB_ID} not found; cannot confirm {AUTO_RESUBMIT_ID} is off")
         tab.select()
-        for auto_id, wanted in ((AUTO_RESUBMIT_ID, 0), (AUTO_RECONNECT_ID, 1)):
-            box = self.control(auto_id, control_type="CheckBox")
-            if not (box.exists(timeout=2) and box.is_enabled()):
-                continue
-            # WinForms draws these itself, so BM_GETCHECK is not reliable;
-            # UIA Toggle is (and the checkbox handlers open no dialog).
-            if box.get_toggle_state() != wanted:
+
+    def _back_to_messages(self) -> None:
+        back = self.control(MESSAGES_TAB_ID, control_type="TabItem")
+        if back.exists(timeout=1):
+            back.select()
+
+    def auto_resubmit_state(self) -> str:
+        """Read-only: "off", "on" or "unknown" for TTB's 失敗自動重送 checkbox."""
+        try:
+            self._settings_tab()
+            box = self.control(AUTO_RESUBMIT_ID, control_type="CheckBox")
+            if not box.exists(timeout=2):
+                return "unknown"
+            # WinForms draws these itself, so BM_GETCHECK is not reliable; UIA Toggle is.
+            return {0: "off", 1: "on"}.get(box.get_toggle_state(), "unknown")
+        except LoginError:
+            return "unknown"
+        finally:
+            self._back_to_messages()
+
+    def enforce_settings(self) -> list[str]:
+        """Turn off TTB auto-resubmit (required) and keep auto-reconnect on (best effort).
+
+        Raises LoginError whenever auto-resubmit cannot be switched off and
+        applied: TTB would otherwise resend failed orders the bot never placed.
+        """
+        changes: list[str] = []
+        self._settings_tab()
+        try:
+            for auto_id, wanted, required in ((AUTO_RESUBMIT_ID, 0, True), (AUTO_RECONNECT_ID, 1, False)):
+                box = self.control(auto_id, control_type="CheckBox")
+                if not box.exists(timeout=2):
+                    if required:
+                        raise LoginError(f"{auto_id} not found in TTB settings")
+                    continue
+                if box.get_toggle_state() == wanted:
+                    continue
+                if not box.is_enabled():
+                    if required:
+                        raise LoginError(f"{auto_id} is on and disabled; cannot switch it off")
+                    continue
                 box.toggle()
                 if not wait_for(lambda: box.get_toggle_state() == wanted, 5.0, 0.2):
                     raise LoginError(f"could not set {auto_id}")
                 changes.append(f"{auto_id}={'on' if wanted else 'off'}")
-        if changes and self.enabled(APPLY_SETTINGS_ID):
-            self.press(APPLY_SETTINGS_ID)
-            # TTB confirms with a modal "設定成功" message box; close it.
-            changes.extend(f"dialog:{text}" for text in wait_for(self.dismiss_dialogs, 5.0, 0.5) or [])
-        back = self.control(MESSAGES_TAB_ID, control_type="TabItem")
-        if back.exists(timeout=1):
-            back.select()
+            if changes:
+                if not self.enabled(APPLY_SETTINGS_ID):
+                    raise LoginError(f"{APPLY_SETTINGS_ID} disabled; settings {changes} were not applied")
+                self.press(APPLY_SETTINGS_ID)
+                # TTB confirms with a modal "設定成功" message box; close it.
+                changes.extend(f"dialog:{text}" for text in wait_for(self.dismiss_dialogs, 5.0, 0.5) or [])
+        finally:
+            self._back_to_messages()
         return changes
 
     def fill_login(self, credential: Credential) -> None:
@@ -353,10 +386,22 @@ def ensure_logged_in(
     verify_timeout: float = 45.0,
     submit: bool = True,
     quote_symbols: tuple[str, ...] = (),
+    require_auto_resubmit_off: bool = False,
 ) -> dict[str, Any]:
     first = probe()
     if first.logged_in:
         result = {"ok": True, "action": "already_logged_in", "session": first.as_dict()}
+        if require_auto_resubmit_off:
+            # Live orders: never trust a session someone else logged in (and
+            # possibly left 失敗自動重送 on); GUI errors fail closed.
+            try:
+                window = window_factory()
+            except Exception as exc:
+                raise LoginError(f"cannot open TTB GUI to confirm {AUTO_RESUBMIT_ID} is off: "
+                                 f"{type(exc).__name__}: {exc}") from exc
+            result["steps"] = _confirm_auto_resubmit_off(window)
+            result["quotes"] = _subscribe_all(window, quote_symbols)
+            return result
         if quote_symbols:
             try:
                 window = window_factory()
@@ -396,11 +441,25 @@ def ensure_logged_in(
         raise LoginError(
             f"TTB API still not logged in after selecting {target!r}: codes={last.codes} dialogs={messages}"
         )
+    if require_auto_resubmit_off:
+        # The pre-login step is skipped when the GUI already showed 登出.
+        actions.extend(_confirm_auto_resubmit_off(window))
     return {
         "ok": True, "action": "logged_in", "competition": target,
         "steps": actions, "session": verified.as_dict(),
         "quotes": _subscribe_all(window, quote_symbols),
     }
+
+
+def _confirm_auto_resubmit_off(window: Any) -> list[str]:
+    """Switch 失敗自動重送 off if needed and re-read it; raise unless it reads off."""
+    if window.auto_resubmit_state() == "off":
+        return []
+    steps = window.enforce_settings()
+    state = window.auto_resubmit_state()
+    if state != "off":
+        raise LoginError(f"{AUTO_RESUBMIT_ID} still {state} after enforcing settings; refusing live trading")
+    return steps
 
 
 def _subscribe_all(window: Any, symbols: tuple[str, ...]) -> dict[str, str]:
@@ -436,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start-timeout", type=float, default=60.0)
     parser.add_argument("--subscribe", action="append", default=[],
                         help="contract code that must be in TTB 報價設定; checked read-only and reported (repeatable)")
+    parser.add_argument("--require-auto-resubmit-off", action="store_true",
+                        help="fail unless TTB 失敗自動重送 (chkAutoPut) reads off, even when already logged in (live mode)")
     args = parser.parse_args(argv)
 
     competition = args.competition if args.competition is not None else _config_value(args.config, "ttbCompetition")
@@ -457,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
             window_factory=lambda: TtbWindow(args.ttb_exe, args.start_timeout),
             submit=not args.no_submit,
             quote_symbols=tuple(symbol.upper() for symbol in args.subscribe if symbol.strip()),
+            require_auto_resubmit_off=args.require_auto_resubmit_off,
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result["ok"] else 4

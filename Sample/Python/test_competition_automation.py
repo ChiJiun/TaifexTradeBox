@@ -110,13 +110,16 @@ class SessionProbeTests(unittest.TestCase):
 
 
 class FakeWindow:
-    def __init__(self, items=("115 校內期貨競賽",), logged=False, login_works=True):
+    def __init__(self, items=("115 校內期貨競賽",), logged=False, login_works=True,
+                 auto_resubmit="on", settings_work=True):
         self.items = list(items)
         self.logged = logged
         self.login_works = login_works
         self.selected = ""
         self.filled = None
         self.clicked = False
+        self.auto_resubmit = auto_resubmit
+        self.settings_work = settings_work
 
     def enabled(self, auto_id):
         if auto_id in ("btnLogOut", "cbGameList"):
@@ -124,7 +127,15 @@ class FakeWindow:
         return True
 
     def enforce_settings(self):
+        if not self.settings_work:
+            raise LoginError("chkAutoPut not found")
+        if self.auto_resubmit == "off":
+            return []
+        self.auto_resubmit = "off"
         return ["chkAutoPut=off"]
+
+    def auto_resubmit_state(self):
+        return self.auto_resubmit
 
     def fill_login(self, credential):
         self.filled = credential
@@ -239,6 +250,43 @@ class LoginTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertEqual(result["quotes"], {"TMFK6": "subscribed", "BAD": "error:RuntimeError"})
+
+    def test_live_requires_auto_resubmit_confirmed_off_when_already_logged_in(self):
+        from ttb.session import SessionProbe
+        ok = SessionProbe(api_reachable=True, codes={"margin": "0000", "orders": "0000", "positions": "0000"})
+        window = FakeWindow(logged=True, auto_resubmit="on")
+        result = ensure_logged_in(
+            competition="", credential_target="t", ttb_exe=Path("TTB.exe"), probe=lambda: ok,
+            window_factory=lambda: window, require_auto_resubmit_off=True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(window.auto_resubmit, "off")
+        self.assertIn("chkAutoPut=off", result["steps"])
+
+    def test_live_fails_closed_when_auto_resubmit_cannot_be_confirmed(self):
+        from ttb.session import SessionProbe
+        ok = SessionProbe(api_reachable=True, codes={"margin": "0000", "orders": "0000", "positions": "0000"})
+        for window_factory in (
+            lambda: FakeWindow(logged=True, auto_resubmit="unknown", settings_work=False),
+            lambda: FakeWindow(logged=True, auto_resubmit="on", settings_work=False),
+            lambda: (_ for _ in ()).throw(ImportError("win32ui")),
+        ):
+            with self.assertRaises(LoginError):
+                ensure_logged_in(
+                    competition="", credential_target="t", ttb_exe=Path("TTB.exe"), probe=lambda: ok,
+                    window_factory=window_factory, require_auto_resubmit_off=True,
+                )
+
+    def test_live_checks_auto_resubmit_after_gui_was_already_logged_in(self):
+        # GUI shows 登出 (so the pre-login settings step is skipped) but the API
+        # lost the competition: the final check must still catch chkAutoPut=on.
+        window = FakeWindow(logged=True, auto_resubmit="on", settings_work=False)
+        with self.assertRaises(LoginError):
+            ensure_logged_in(
+                competition="校內", credential_target="t", ttb_exe=Path("TTB.exe"),
+                probe=probe_after(window, "115 校內期貨競賽"), window_factory=lambda: window,
+                login_timeout=0.05, verify_timeout=0.05, require_auto_resubmit_off=True,
+            )
 
     def test_no_submit_stops_before_login(self):
         window = FakeWindow()
