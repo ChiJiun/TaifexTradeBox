@@ -5,7 +5,7 @@ Configure Windows auto-logon for the TTB VM with Sysinternals Autologon.
 .DESCRIPTION
 Run ON THE VM in an elevated PowerShell. It downloads Autologon from Microsoft,
 verifies the Authenticode signature, asks for the Windows password (credential dialog)
-input) and stores it as an encrypted LSA secret, so the VM logs the user in
+and stores it as an encrypted LSA secret, so the VM logs the user in
 after every reboot and the TTB Automation logon trigger starts TTB.
 The password is never written to disk by this script. Any plain-text
 DefaultPassword left in the Winlogon registry key is removed.
