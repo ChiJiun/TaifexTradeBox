@@ -54,6 +54,9 @@ if ($dirty -and $Ref -eq 'HEAD') {
 
 $target = "$SshUser@$Instance"
 $gcloudArgs = @('--project', $Project, '--zone', $Zone, '--quiet')
+# Windows PowerShell 5.1 turns gcloud's stderr progress into terminating errors
+# under 'Stop'; rely on exit codes for the remote steps instead.
+$ErrorActionPreference = 'Continue'
 function Invoke-Vm([string]$Command) {
     & gcloud compute ssh $target @gcloudArgs --command $Command
     if ($LASTEXITCODE -ne 0) { throw "remote command failed ($LASTEXITCODE): $Command" }
@@ -71,8 +74,11 @@ foreach ($name in 'deploy/Install-TtbRuntime.ps1', 'gcp/Bootstrap-TtbVm.ps1', 'a
     [IO.File]::WriteAllText($local, ((& git -C $repo show "${commit}:$name") -join "`r`n"))
     if ($LASTEXITCODE -ne 0) { throw "$name is not in the deployed commit" }
 }
-& gcloud compute scp @gcloudArgs (Get-ChildItem -LiteralPath $work -File).FullName "${target}:$remote/"
-if ($LASTEXITCODE -ne 0) { throw 'gcloud compute scp failed' }
+# gcloud.ps1 collapses an array of sources into one argument; copy one file per call.
+foreach ($file in Get-ChildItem -LiteralPath $work -File) {
+    & gcloud compute scp @gcloudArgs $file.FullName "${target}:$remote/$($file.Name)"
+    if ($LASTEXITCODE -ne 0) { throw "gcloud compute scp failed for $($file.Name)" }
+}
 
 if ($Bootstrap) {
     Write-Host 'Installing runtimes (.NET 10, VC++, Python 3.13)...'
