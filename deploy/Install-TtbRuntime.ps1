@@ -9,7 +9,7 @@ Run Command) and gcp/Deploy-TtbRuntime.ps1 (through SSH). It:
   2. asks the running bot to stop gracefully (stop.requested) and stops the TTB Automation task,
   3. backs up <Root>\Sample\Python (without output\) to <Root>\deploy-backups\<stamp>,
   4. copies Sample\Python (keeping automation\config.json and output\), the operator
-     folders (azure, gcp, deploy) and, when changed, TTB.exe / NLog.config,
+     folders (azure, gcp, deploy, icon) and, when changed, TTB.exe / NLog.config,
   5. installs requirements and runs unit tests + binary/doc checks, rolling back on failure,
   6. re-registers the scheduled tasks and starts TTB Automation if RunAs is logged on.
 A first install (no <Root>\Sample\Python yet) skips the backup and cannot roll back.
@@ -54,8 +54,9 @@ $staging = Join-Path $incoming $Stamp
 Expand-Archive -LiteralPath $Zip -DestinationPath $staging -Force
 robocopy (Join-Path $staging 'Sample\Python') $work /E /XF config.json /XD output /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "copy failed (robocopy $LASTEXITCODE)" }
-# Operator scripts, binary manifest and the README that check_docs_consistency reads.
-foreach ($folder in 'azure', 'gcp', 'deploy') {
+# Operator scripts, binary manifest, the README that check_docs_consistency reads,
+# and icon (TTB.exe crashes at start without icon\TTBlogo.ico).
+foreach ($folder in 'azure', 'gcp', 'deploy', 'icon') {
     $source = Join-Path $staging $folder
     if (-not (Test-Path -LiteralPath $source)) { continue }
     robocopy $source (Join-Path $Root $folder) /E /NFL /NDL /NJH /NJS /NP | Out-Null

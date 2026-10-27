@@ -4,7 +4,7 @@ Deploy a committed snapshot of this repo to the GCP TTB VM over SSH.
 
 .DESCRIPTION
 Default is a dry run that only builds and hashes the package. With -Apply it uploads a
-`git archive` of the commit (Sample/Python, azure, gcp, deploy, TTB.exe, NLog.config)
+`git archive` of the commit (Sample/Python, azure, gcp, deploy, icon, TTB.exe, NLog.config)
 with `gcloud compute scp` and runs deploy/Install-TtbRuntime.ps1 on the VM, which
 verifies the SHA256, stops the bot gracefully, backs up, copies, tests, rolls back on
 failure and restarts TTB Automation. -Bootstrap first runs gcp/Bootstrap-TtbVm.ps1
@@ -31,7 +31,7 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $work = Join-Path $env:TEMP "ttb-deploy-$stamp"
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $zip = Join-Path $work "$stamp.zip"
-& git -C $repo archive --format=zip -o $zip $commit Sample/Python azure gcp deploy TTB.exe NLog.config
+& git -C $repo archive --format=zip -o $zip $commit Sample/Python azure gcp deploy icon TTB.exe NLog.config
 if ($LASTEXITCODE -ne 0) { throw 'git archive failed' }
 $sha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
 
