@@ -35,8 +35,19 @@ $secure = Read-Host -Prompt "Windows password for $Domain\$UserName" -AsSecureSt
 $plain = [Runtime.InteropServices.Marshal]::PtrToStringUni(
     [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($secure))
 try {
-    & $exe /accepteula $UserName $Domain $plain
-    if ($LASTEXITCODE -ne 0) { throw "Autologon exited with $LASTEXITCODE" }
+    # A wrong (e.g. half-pasted) password would leave the VM stuck at the logon
+    # screen after the next reboot, so check it before storing it.
+    Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+    $machine = New-Object System.DirectoryServices.AccountManagement.PrincipalContext('Machine')
+    if (-not $machine.ValidateCredentials($UserName, $plain)) {
+        throw "Password rejected for $Domain\$UserName ($($secure.Length) characters received); nothing was changed."
+    }
+    # Autologon64.exe is a GUI-subsystem binary: `&` would not wait or set $LASTEXITCODE.
+    # Start-Process joins arguments verbatim; quote them so generated passwords
+    # with spaces or quotes reach Autologon intact.
+    $quoted = ($UserName, $Domain, $plain | ForEach-Object { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' }) -join ' '
+    $process = Start-Process -FilePath $exe -ArgumentList "/accepteula $quoted" -Wait -PassThru
+    if ($process.ExitCode -ne 0) { throw "Autologon exited with $($process.ExitCode)" }
 } finally {
     $plain = $null
     [GC]::Collect()
