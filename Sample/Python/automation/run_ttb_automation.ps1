@@ -77,6 +77,11 @@ if ($config.mode -notin @('shadow', 'ttb')) {
 if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $config.confirmFlatAccount)) {
     throw 'ttb mode requires confirmVirtualOrders=true and confirmFlatAccount=true'
 }
+# Invoke-TtbLogin is the only step that confirms TTB 失敗自動重送 (chkAutoPut)
+# is off; with autoLogin=false it is skipped, so live mode refuses to start.
+if ($config.mode -eq 'ttb' -and $config.autoLogin -ne $true) {
+    throw 'ttb mode requires autoLogin=true (it confirms TTB chkAutoPut is off before live orders)'
+}
 # A scheduled/logon restart must never override an unresolved live failure.
 # The existing preflight check is not necessarily run by Task Scheduler.
 # Only the audited, bounded auto-recovery (exclusive bot account) may clear it.

@@ -31,9 +31,11 @@ $checks = [ordered]@{}
 
 if ($Mode -eq 'ttb') {
     $new = $template
-    foreach ($keep in 'symbol', 'ttbCompetition', 'ttbCredentialTarget', 'autoLogin', 'strategy', 'strategyModule') {
+    foreach ($keep in 'symbol', 'ttbCompetition', 'ttbCredentialTarget', 'strategy', 'strategyModule') {
         if ($null -ne $current.$keep) { $new.$keep = $current.$keep }
     }
+    # The supervisor confirms TTB chkAutoPut is off only through auto-login.
+    $new.autoLogin = $true
     $target = if ($new.ttbCredentialTarget) { [string]$new.ttbCredentialTarget } else { 'TaifexTradeBox/TTB' }
     $checks.credentialStored = (((& cmdkey.exe "/list:$target" 2>&1) | Out-String) -match [regex]::Escape($target))
     $checks.competitionSet = -not [string]::IsNullOrWhiteSpace([string]$new.ttbCompetition)
