@@ -8,12 +8,15 @@ Default is a dry run that prints the current state and the planned changes.
   1. grants the Compute Engine service agent roles/compute.instanceAdmin.v1
      (an instance schedule cannot start/stop the VM without it),
   2. creates the instance-schedule resource policy (weekdays, Asia/Taipei),
-  3. attaches it to the VM,
-  4. installs gcp/shutdown-stop-bot.ps1 as the `windows-shutdown-script-ps1`
-     metadata so every stop asks the bot to stop first.
--Remove detaches the policy and the shutdown script; the VM then runs 24/7 again.
-Taiwan public holidays are not excluded: the VM boots, the bot finds no
-session and nothing trades. Night-session trading is incompatible with this.
+  3. attaches it to the VM.
+-Remove detaches the policy; the VM then runs 24/7 again.
+The scheduled stop is a hard stop for the bot: Windows runs shutdown scripts
+only after the autologon session has logged off, so nothing graceful happens.
+The engine exits positions from 10 minutes before the close, and the next
+startup refuses to trade unless the account is flat. GCE may run either
+operation up to 15 minutes late. Taiwan public holidays are not excluded: the
+VM boots, the bot finds no session and nothing trades. Night-session trading
+is incompatible with this.
 #>
 param(
     [string]$Project = 'ttb-competition',
@@ -29,34 +32,39 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $region = $Zone.Substring(0, $Zone.LastIndexOf('-'))
-$shutdownScript = Join-Path $PSScriptRoot 'shutdown-stop-bot.ps1'
 $gc = @('--project', $Project, '--quiet')
 
 # Windows PowerShell 5.1 turns gcloud's stderr into terminating errors under
-# 'Stop'; read exit codes instead.
+# 'Stop'; read exit codes instead, and parse stdout only (stderr carries
+# warnings and update notices).
 function Invoke-Gcloud([string[]]$Arguments, [switch]$AllowFailure) {
     $ErrorActionPreference = 'Continue'
-    $output = (& gcloud @Arguments @gc 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) { throw "gcloud $($Arguments -join ' ') failed: $output" }
-    return [pscustomobject]@{ ok = ($LASTEXITCODE -eq 0); output = $output }
+    $errFile = [IO.Path]::GetTempFileName()
+    try {
+        $output = (& gcloud @Arguments @gc 2>$errFile | Out-String).Trim()
+        $code = $LASTEXITCODE
+        $stderr = (Get-Content -LiteralPath $errFile -Raw | Out-String).Trim()
+    } finally {
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0 -and -not $AllowFailure) { throw "gcloud $($Arguments -join ' ') failed: $stderr" }
+    return [pscustomobject]@{ ok = ($code -eq 0); output = $output }
 }
 
 $projectNumber = (Invoke-Gcloud @('projects', 'describe', $Project, '--format', 'value(projectNumber)')).output
 $agent = "serviceAccount:service-$projectNumber@compute-system.iam.gserviceaccount.com"
 $policy = Invoke-Gcloud @('compute', 'resource-policies', 'describe', $PolicyName, '--region', $region,
     '--format', 'json(instanceSchedulePolicy)') -AllowFailure
+$escapedName = [regex]::Escape($PolicyName)
 $attached = (Invoke-Gcloud @('compute', 'instances', 'describe', $Instance, '--zone', $Zone,
-    '--format', 'value(resourcePolicies)')).output -match "/$PolicyName$|/$PolicyName;"
-$hasShutdownScript = (Invoke-Gcloud @('compute', 'instances', 'describe', $Instance, '--zone', $Zone,
-    '--format', 'value(metadata.items[].key)')).output -match 'windows-shutdown-script-ps1'
+    '--format', 'value(resourcePolicies)')).output -match "/$escapedName($|;)"
 
 [ordered]@{
     instance = "$Project/$Zone/$Instance"
     policy = "$region/$PolicyName"
     policyExists = $policy.ok
     attached = $attached
-    shutdownScriptInstalled = $hasShutdownScript
-    planned = $(if ($Remove) { 'detach policy and shutdown script' } else { "start '$StartCron', stop '$StopCron' ($TimeZone)" })
+    planned = $(if ($Remove) { 'detach policy' } else { "start '$StartCron', stop '$StopCron' ($TimeZone)" })
     apply = [bool]$Apply
 } | ConvertTo-Json
 if (-not $Apply) {
@@ -68,10 +76,6 @@ if ($Remove) {
     if ($attached) {
         Invoke-Gcloud @('compute', 'instances', 'remove-resource-policies', $Instance, '--zone', $Zone,
             '--resource-policies', $PolicyName) | Out-Null
-    }
-    if ($hasShutdownScript) {
-        Invoke-Gcloud @('compute', 'instances', 'remove-metadata', $Instance, '--zone', $Zone,
-            '--keys', 'windows-shutdown-script-ps1') | Out-Null
     }
     Write-Host 'Schedule removed; the VM keeps its current power state.'
     exit 0
@@ -94,6 +98,4 @@ if (-not $attached) {
     Invoke-Gcloud @('compute', 'instances', 'add-resource-policies', $Instance, '--zone', $Zone,
         '--resource-policies', $PolicyName) | Out-Null
 }
-Invoke-Gcloud @('compute', 'instances', 'add-metadata', $Instance, '--zone', $Zone,
-    '--metadata-from-file', "windows-shutdown-script-ps1=$shutdownScript") | Out-Null
 Write-Host "Schedule active: start '$StartCron', stop '$StopCron' ($TimeZone)."
