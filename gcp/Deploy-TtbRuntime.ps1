@@ -74,10 +74,16 @@ foreach ($name in 'deploy/Install-TtbRuntime.ps1', 'gcp/Bootstrap-TtbVm.ps1', 'a
     [IO.File]::WriteAllText($local, ((& git -C $repo show "${commit}:$name") -join "`r`n"))
     if ($LASTEXITCODE -ne 0) { throw "$name is not in the deployed commit" }
 }
-# gcloud.ps1 collapses an array of sources into one argument; copy one file per call.
+# gcloud compute scp (PuTTY pscp) and SFTP-based scp both drop the connection against
+# the GCE Windows sshd; the legacy scp protocol (-O) of Windows' own OpenSSH works.
+# `gcloud compute ssh` above already pushed the key to the instance metadata.
+$ip = (& gcloud compute instances describe $Instance --project $Project --zone $Zone --format 'value(networkInterfaces[0].accessConfigs[0].natIP)').Trim()
+$sshDir = Join-Path $env:USERPROFILE '.ssh'
+$scpArgs = @('-O', '-q', '-i', (Join-Path $sshDir 'google_compute_engine'),
+    '-o', 'StrictHostKeyChecking=accept-new', '-o', "UserKnownHostsFile=$(Join-Path $sshDir 'google_compute_known_hosts')")
 foreach ($file in Get-ChildItem -LiteralPath $work -File) {
-    & gcloud compute scp @gcloudArgs $file.FullName "${target}:$remote/$($file.Name)"
-    if ($LASTEXITCODE -ne 0) { throw "gcloud compute scp failed for $($file.Name)" }
+    & "$env:WINDIR\System32\OpenSSH\scp.exe" @scpArgs $file.FullName "$SshUser@${ip}:$remote/$($file.Name)"
+    if ($LASTEXITCODE -ne 0) { throw "scp failed for $($file.Name)" }
 }
 
 if ($Bootstrap) {
