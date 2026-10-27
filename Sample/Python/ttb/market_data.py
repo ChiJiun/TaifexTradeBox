@@ -163,7 +163,7 @@ class ZmqQuoteSubscriber:
                 continue
             try:
                 topic = frames[0].decode("utf-8")
-                if topic != self.topic:
+                if topic.split(".")[0] != self.topic:
                     continue
                 self.callback(json.loads(frames[1]))
             except Exception:

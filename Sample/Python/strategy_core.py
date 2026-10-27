@@ -60,7 +60,8 @@ class Quote:
     @classmethod
     def from_ttb(cls, data: dict[str, Any]) -> "Quote":
         return cls(
-            symbol=str(_field(data, "Symbol", "symbol", default="")).upper(),
+            # TTB publishes "TMFK6.TW-B"; orders and config use the bare contract code.
+            symbol=str(_field(data, "Symbol", "symbol", default="")).split(".")[0].upper(),
             bid=_number(_field(data, "BidPs", "BidPrice", "bid")),
             ask=_number(_field(data, "AskPs", "AskPrice", "ask")),
             bid_qty=_number(_field(data, "BidPv", "BidQty", "bid_qty")),

@@ -16,7 +16,7 @@ if (-not (Test-Path -LiteralPath $WorkDir)) { Add-Failure "WorkDir missing: $Wor
 if (-not (Test-Path -LiteralPath $ConfigPath)) { Add-Failure "Config missing: $ConfigPath" }
 if (-not (Test-Path -LiteralPath $TtbExe)) { Add-Failure "TTB executable missing: $TtbExe" }
 
-# Fail closed on an unexpected TTB.exe/TTBHelp.pyc pair. A matching hash
+# Fail closed on an unexpected TTB.exe/TTBHelp pair. A matching hash
 # proves only equivalence to the reviewed repository snapshot, NOT official
 # publisher provenance or a safe TTB GUI session.
 if (Test-Path -LiteralPath $WorkDir) {
@@ -56,6 +56,22 @@ if (Test-Path -LiteralPath $ConfigPath) {
         if ($config.mode -notin @('shadow', 'ttb')) { Add-Failure 'config.mode must be shadow or ttb' }
         if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $config.confirmFlatAccount)) {
             Add-Failure 'ttb mode requires both confirmation flags'
+        }
+        if ($config.mode -eq 'ttb' -and $config.autoLogin -ne $true) {
+            Add-Failure 'ttb mode requires autoLogin=true (the login step confirms TTB chkAutoPut is off)'
+        }
+        if ($config.autoLogin) {
+            $target = if ($config.ttbCredentialTarget) { [string]$config.ttbCredentialTarget } else { 'TaifexTradeBox/TTB' }
+            $listing = (& cmdkey.exe "/list:$target" 2>&1 | Out-String)
+            if ($listing -notmatch [regex]::Escape($target)) {
+                Add-Failure "autoLogin requires a Credential Manager entry: cmdkey /generic:$target /user:<email> /pass"
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$config.ttbCompetition)) {
+                Add-Warning 'ttbCompetition is empty; login only succeeds when exactly one competition is listed'
+            }
+        }
+        if ($config.autoRecovery -and $config.autoRecovery.enabled -and -not $config.autoRecovery.exclusiveBotAccount) {
+            Add-Failure 'autoRecovery.enabled requires exclusiveBotAccount=true (nobody trades this account manually)'
         }
         if ($config.mode -eq 'ttb') {
             $extras = @($config.extraArgs | ForEach-Object { [string]$_ })

@@ -7,6 +7,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,13 @@ from ttb.api import TTBApi
 from ttb.engine import BotEngine, CsvRecorder
 from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
 from ttb.runtime import SessionSchedule, TAIPEI_TZ
-from ttb.calendar import TradingCalendar, ContractInfo, CalendarCoverageError
+from ttb.calendar import (
+    AUTO_SYMBOL_PREFIX,
+    TradingCalendar,
+    ContractInfo,
+    CalendarCoverageError,
+    resolve_symbol,
+)
 from datetime import datetime
 from ttb.status_server import StatusServer
 from ttb.risk import PreTradeLimits
@@ -39,7 +46,12 @@ LOG = logging.getLogger("ttb_sim_hft")
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Modular TTB quote monitor and strategy runner")
-    parser.add_argument("--symbol", required=True, help="TTB contract code, e.g. TXFA7")
+    parser.add_argument(
+        "--symbol", required=True,
+        help="TTB contract code, e.g. TXFA7, or auto:TXF/auto:MTX/auto:TMF for the calendar front month",
+    )
+    parser.add_argument("--roll-check-seconds", type=float, default=60.0,
+                        help="with --symbol auto:PRODUCT, how often to check whether the front month changed")
     parser.add_argument("--mode", choices=("shadow", "ttb"), default="shadow")
     parser.add_argument("--strategy", choices=("market-maker", "moving-average"), default="market-maker")
     parser.add_argument(
@@ -86,6 +98,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="TTB QUERYMARGIN field verified from a real virtual-account fixture")
     parser.add_argument("--min-available-margin", type=float, default=0.0,
                         help="mandatory positive margin headroom for TTB live entries")
+    parser.add_argument("--available-margin-currency", default="TWD",
+                        help="QUERYMARGIN row (CURRENCY field) the margin is read from")
     parser.add_argument("--rate-counters-file", type=Path, default=None,
                         help="durable attempt counter file; defaults to output/rate-counters-SYMBOL.json")
     parser.add_argument("--journal-dir", type=Path, default=None,
@@ -230,6 +244,30 @@ def build_strategy(args: argparse.Namespace, config: StrategyConfig, ledger: Pos
     return None
 
 
+def _resolve_front_month(spec: str, calendar_file: Path) -> str:
+    return resolve_symbol(spec, datetime.now(TAIPEI_TZ).date(), TradingCalendar.from_file(calendar_file))
+
+
+def roll_due(spec: str, current: str, calendar_file: Path, ledger: PositionLedger, gateway: Any) -> bool:
+    """True when the front month changed and the bot holds nothing to carry.
+
+    A position or working order is never rolled automatically; the bot keeps
+    managing (and exiting) the old contract until it is flat.
+    """
+    try:
+        wanted = _resolve_front_month(spec, calendar_file)
+    except (CalendarCoverageError, ValueError) as exc:
+        LOG.error("front-month check failed; keeping %s: %s", current, exc)
+        return False
+    if wanted == current.upper():
+        return False
+    busy = bool(ledger.position) or bool(getattr(gateway, "active", {})) or bool(getattr(gateway, "pending", {}))
+    if busy:
+        LOG.warning("front month is %s but %s still has exposure; rollover deferred", wanted, current)
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging(args)
@@ -242,6 +280,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.max_exchange_lag_seconds <= 0:
         raise SystemExit("--max-exchange-lag-seconds must be positive")
+    symbol_spec = args.symbol.strip()
+    auto_roll = symbol_spec.lower().startswith(AUTO_SYMBOL_PREFIX)
+    if auto_roll:
+        try:
+            args.symbol = _resolve_front_month(symbol_spec, args.calendar_file)
+        except (CalendarCoverageError, ValueError) as exc:
+            raise SystemExit(f"cannot resolve {symbol_spec}: {exc}") from exc
+        LOG.info("resolved %s to front month %s", symbol_spec, args.symbol)
     config = build_config(args)
     LOG.info(
         "symbol=%s mode=%s strategy=%s target=%s ticks estimated_min_ticks=%s cycle_net_at_40000=%.2f",
@@ -262,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         max_notional=args.max_notional,
         minimum_available_margin=args.min_available_margin,
         available_margin_field=args.available_margin_field,
+        available_margin_currency=args.available_margin_currency,
     )
     limits.validate()
     gateway = (
@@ -331,10 +378,19 @@ def main(argv: list[str] | None = None) -> int:
         status_server.start()
         monitor.start()
         LOG.info("monitoring %s; press Ctrl+C to stop", config.symbol)
+        next_roll_check = time.monotonic() + max(5.0, args.roll_check_seconds)
         while not engine.stop_event.wait(1.0):
             if args.stop_file is not None and args.stop_file.exists():
                 LOG.warning("operator stop requested by %s", args.stop_file)
                 engine.stop_event.set()
+            if auto_roll and time.monotonic() >= next_roll_check:
+                next_roll_check = time.monotonic() + max(5.0, args.roll_check_seconds)
+                if roll_due(symbol_spec, config.symbol, args.calendar_file, ledger, gateway):
+                    # A clean exit (code 0) lets the supervisor relaunch on
+                    # the new contract; shutdown still verifies a flat account.
+                    LOG.warning("front month moved away from %s; stopping for rollover", config.symbol)
+                    engine.health.update(rollover_from=config.symbol)
+                    engine.stop_event.set()
     finally:
         monitor.close()
         status_server.close()

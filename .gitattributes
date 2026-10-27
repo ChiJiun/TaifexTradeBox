@@ -1,0 +1,3 @@
+# Vendor TTBHelp.py is SHA256-pinned in azure/runtime_binaries.json; keep its bytes (LF + BOM) exact.
+Sample/Python/TTBHelp.py -text
+TTB.exe binary

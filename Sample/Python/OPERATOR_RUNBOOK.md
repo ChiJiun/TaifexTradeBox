@@ -8,7 +8,7 @@
 
 當 `output/supervisor/manual-reconciliation-required.flag` 存在、`TTB Automation` 異常退出或 bot health 為 `manual_reconciliation_required` 時，不要手動刪除旗標，也不要直接重啟 live bot。
 
-`run_ttb_automation.ps1` 與 `preflight_ttb.ps1` 會拒絕在這個旗標存在時啟動 live 模式。
+`run_ttb_automation.ps1` 與 `preflight_ttb.ps1` 會拒絕在這個旗標存在時啟動 live 模式。唯一例外是 [OPERATIONS.md §8](OPERATIONS.md#8-競賽全自動模式opt-in) 的競賽全自動模式：帳戶設定為 bot 專用時，supervisor 先執行有每日次數上限的 `auto_recover_ttb.py`；它拒絕處理（exit 2）或用完當日次數時，旗標保留，仍依本手冊人工處理。
 
 ## 1. 在 TTB GUI 核對實際帳戶
 

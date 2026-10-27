@@ -25,6 +25,9 @@ class PreTradeLimits:
     max_notional: float = 0.0
     minimum_available_margin: float = 0.0
     available_margin_field: str = ""
+    # TTB QUERYMARGIN returns one row per currency (TWD/USD/JPY/CNY, observed
+    # 2026-10-18); the margin field is read from this currency's row only.
+    available_margin_currency: str = "TWD"
 
     def validate(self) -> None:
         if min(self.max_orders_per_minute, self.max_cancels_per_minute, self.max_daily_orders) <= 0:
@@ -37,11 +40,11 @@ class PreTradeLimits:
             raise ValueError("both a verified margin field and a positive minimum margin are required")
 
 
-def parse_available_margin(response: Any, field: str) -> float:
+def parse_available_margin(response: Any, field: str, currency: str = "TWD") -> float:
     """Parse an explicitly configured margin key; never guess broker semantics.
 
-    Until a real TTB fixture is available (#2), no field is assumed to mean
-    available margin. The configured key must occur *exactly once*.
+    The configured key must occur *exactly once* in the rows for ``currency``
+    (rows without a CURRENCY field are kept, for single-row responses).
     """
     if not is_success_response(response) or not isinstance(response, dict):
         raise PreTradeRiskError("TTB margin query failed")
@@ -53,6 +56,13 @@ def parse_available_margin(response: Any, field: str) -> float:
     rows = content if isinstance(content, list) else [content]
     if not rows or any(not isinstance(row, dict) for row in rows):
         raise PreTradeRiskError("TTB margin response shape is unverified")
+    wanted = currency.strip().upper()
+    rows = [
+        row for row in rows
+        if str(_row_value(row, "currency", "")).strip().upper() in ("", wanted)
+    ]
+    if not rows:
+        raise PreTradeRiskError(f"TTB margin response has no {wanted} row")
     matches = [
         value for row in rows
         for name, value in row.items()
@@ -67,6 +77,13 @@ def parse_available_margin(response: Any, field: str) -> float:
     if not math.isfinite(number) or number < 0:
         raise PreTradeRiskError("TTB available margin is invalid")
     return number
+
+
+def _row_value(row: dict[str, Any], key: str, default: Any) -> Any:
+    for name, value in row.items():
+        if str(name).strip().lower() == key:
+            return value
+    return default
 
 
 class DurableOrderRateGuard:
@@ -283,6 +300,8 @@ def assess_pretrade(
         raise PreTradeRiskError(
             "live entries require a verified --available-margin-field and --min-available-margin"
         )
-    margin = parse_available_margin(margin_supplier(), limits.available_margin_field)
+    margin = parse_available_margin(
+        margin_supplier(), limits.available_margin_field, limits.available_margin_currency,
+    )
     if margin < limits.minimum_available_margin:
         raise PreTradeRiskError("available TTB margin below required headroom")

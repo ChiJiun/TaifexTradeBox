@@ -137,7 +137,9 @@ TTB 需要 Windows GUI 與本機 API，因此建議使用單台 Windows Azure VM
 - 先通過 shadow 與 `ttb_order_probe.py`，再把 `automation/config.json` 切換為 `ttb`。
 - 建立 Azure Budget，並在非交易時段停止/釋放 VM 以降低成本。
 
-完整命令與安全設定請閱讀 [azure/README.md](azure/README.md)。
+完整命令與安全設定請閱讀 [gcp/README.md](gcp/README.md)（目前使用）或 [azure/README.md](azure/README.md)。
+
+**競賽全自動模式**（opt-in，見 [OPERATIONS.md §8](Sample/Python/OPERATIONS.md#8-競賽全自動模式opt-in)）：`symbol: "auto:TMF"` 依交易日曆自動換近月；`automation/ttb_login.py` 以 Windows 認證管理員的帳密自動登入 TTB 並選競賽（同時關閉 TTB 預設開啟的「下單失敗自動重送」）；bot 異常時 `auto_recover_ttb.py` 在每日次數上限內撤單、市價平倉並經兩次檢查後才重啟。`azure/Deploy-TtbRuntime.ps1` 可一鍵把已提交的版本部署到 VM 並在測試失敗時還原。
 
 ### 目前 Azure 實例
 
@@ -159,7 +161,7 @@ RDP 連線：
 mstsc /v:20.189.93.22
 ```
 
-截至 2026-09-24 10:30（Asia/Taipei），VM 已部署本專案最新版；`TTB Automation` 正以 `TMFJ6`、`shadow` 模式執行。健康檢查已確認 TTB/Python 程序、8080/51141、本機健康心跳及即時 tick 全部正常，部位為 0、沒有活動委託。策略因 shadow 的模擬時段損失上限進入 `paused`，監測仍持續，但這不是正 alpha 的證據，因此尚未啟用自動虛擬委託。程式端遠價下單／撤單仍須在人工確認空倉且沒有未成交單後，以 `ttb_order_probe.py` 完成端到端驗證。管理員密碼不會儲存在 repo 或 README。
+2026-10-18 唯讀檢查：VM 執行中，但**沒有 Windows 登入工作階段**，TTB 與 bot 都沒有在跑，部署版本仍是 9 月舊版，`config.json` 仍是 shadow／`TMFJ6`（10/21 到期）。以下為歷史紀錄：截至 2026-09-24 10:30（Asia/Taipei），VM 已部署本專案最新版；`TTB Automation` 正以 `TMFJ6`、`shadow` 模式執行。健康檢查已確認 TTB/Python 程序、8080/51141、本機健康心跳及即時 tick 全部正常，部位為 0、沒有活動委託。策略因 shadow 的模擬時段損失上限進入 `paused`，監測仍持續，但這不是正 alpha 的證據，因此尚未啟用自動虛擬委託。程式端遠價下單／撤單仍須在人工確認空倉且沒有未成交單後，以 `ttb_order_probe.py` 完成端到端驗證。管理員密碼不會儲存在 repo 或 README。
 
 ### 「24/7」的實際界線
 
@@ -212,5 +214,6 @@ CI 成功**不能取代** TTB 虛擬帳戶的人工驗證（[#2](https://github.
 - [動態做市與蒙地卡羅計畫](Sample/Python/DYNAMIC_MARKET_MAKING_PLAN.md)
 - [原有策略說明](Sample/Python/STRATEGY.md)
 - [TTB 單一操作手冊](Sample/Python/OPERATIONS.md)：啟動、風控、異常、恢復及操作檢查
-- [Azure 部署說明](azure/README.md)（含 TTB.exe/TTBHelp.pyc 完整性快照與人工升級流程）
+- [GCP 部署說明](gcp/README.md)（目前競賽主機）
+- [Azure 部署說明](azure/README.md)（含 TTB.exe/TTBHelp.py 完整性快照與人工升級流程）
 - [RDP 白名單管理腳本](azure/Set-TtbRdpAllowlist.ps1)：查核或限制 Azure NSG 3389 至管理端目前 IPv4

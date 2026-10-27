@@ -43,6 +43,15 @@ class QuoteIntegrityTests(unittest.TestCase):
         self.assertEqual(integrity.snapshot()["out_of_order"], 1)
         self.assertEqual(integrity.snapshot()["accepted"], 2)
 
+    def test_accepts_ttb_payload_with_exchange_suffix_on_symbol(self):
+        payload = {
+            "Symbol": "TMFK6.TW-B", "BidPs": 20000, "AskPs": 20001, "BidPv": 2, "AskPv": 3,
+            "Price": 20000, "Qty": 1, "Volume": 100, "TickTime": "09:00:00.000",
+        }
+        integrity = MarketDataIntegrity("TMFK6")
+        self.assertTrue(integrity.validate(Quote.from_ttb(payload)))
+        self.assertEqual(integrity.snapshot()["invalid"], 0)
+
     def test_rejects_old_backlog_and_unparseable_timestamp_in_live_mode(self):
         integrity = MarketDataIntegrity(
             "TXFA7", max_exchange_lag_seconds=5,
@@ -118,6 +127,27 @@ class QuoteIntegrityTests(unittest.TestCase):
             self.assertEqual(subscriber.socket.getsockopt(zmq.RCVHWM), 1000)
         finally:
             subscriber.close()
+
+    def test_zmq_subscriber_accepts_suffixed_topic_but_not_other_contracts(self):
+        import json
+        import zmq
+        context = zmq.Context.instance()
+        publisher = context.socket(zmq.PUB)
+        port = publisher.bind_to_random_port("tcp://127.0.0.1")
+        received = []
+        subscriber = ZmqQuoteSubscriber(port, "TMFK6", received.append)
+        subscriber.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not received and time.monotonic() < deadline:
+                publisher.send_multipart([b"TTB$Tick$TMFK60", json.dumps({"Symbol": "TMFK60"}).encode()])
+                publisher.send_multipart([b"TTB$Tick$TMFK6.TW-B", json.dumps({"Symbol": "TMFK6.TW-B"}).encode()])
+                time.sleep(0.05)
+            self.assertTrue(received, "suffixed topic delivered")
+            self.assertEqual({row["Symbol"] for row in received}, {"TMFK6.TW-B"})
+        finally:
+            subscriber.close()
+            publisher.close(linger=0)
 
 
 if __name__ == "__main__":

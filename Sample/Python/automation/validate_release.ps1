@@ -47,6 +47,14 @@ $requiredFiles = @(
     'ttb\runtime.py',
     'ttb\status_server.py',
     'automation\config.example.json',
+    'automation\config.competition.example.json',
+    'automation\ttb_login.py',
+    'automation\resolve_symbol.py',
+    'auto_recover_ttb.py',
+    'ttb\auto_recovery.py',
+    'ttb\session.py',
+    'automation\live_gate.py',
+    'automation\set_mode.ps1',
     'automation\run_ttb_automation.ps1',
     'automation\check_ttb_health.ps1',
     'automation\health_watchdog.ps1',
@@ -96,6 +104,15 @@ try {
 
         & py.exe -3.13 ttb_readonly_capture.py --help *> $null
         Add-Check 'readonly-capture-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 auto_recover_ttb.py --help *> $null
+        Add-Check 'auto-recovery-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 -m automation.live_gate --help *> $null
+        Add-Check 'live-gate-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
+        & py.exe -3.13 -m automation.ttb_login --help *> $null
+        Add-Check 'ttb-login-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
         & py.exe -3.13 ttb_order_probe.py --help *> $null
         Add-Check 'probe-cli-help' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"

@@ -123,24 +123,83 @@ class TTBOrderRequest:
         }
 
 
+def ttbhelp_version() -> str:
+    """Version string the bundled TTBHelp (.py or .pyc) reports to TTB."""
+    from TTBHelp import TTBHelp
+
+    return str(TTBHelp._TTBHelp__ShowVersion(None))  # type: ignore[attr-defined]
+
+
+class HttpTTBModule:
+    """The TTBHelp endpoints over HTTP, with timeouts and real exceptions.
+
+    TTBHelp's constructor calls ``os._exit(0)`` when TTB is unreachable or
+    rejects the version handshake, which a supervisor cannot tell apart from a
+    clean exit, and its requests have no timeout. Method names and payloads
+    are identical to TTBHelp so ``TTBApi`` and existing tests are unchanged.
+    """
+
+    def __init__(self, host: str, timeout: float = 10.0, session: Any = None) -> None:
+        import requests
+
+        self.host = host.rstrip("/")
+        self.timeout = timeout
+        self.session = session or requests.Session()
+
+    def _post(self, endpoint: str, payload: Any = None) -> Any:
+        response = self.session.post(f"{self.host}/api/Trade/{endpoint}", json=payload, timeout=self.timeout)
+        try:
+            return json.loads(response.text)
+        except json.JSONDecodeError as exc:
+            raise TTBApiError(f"TTB {endpoint} returned non-JSON (HTTP {response.status_code})") from exc
+
+    def handshake(self, version: str) -> None:
+        reply = self._post("CONNECT", {"Ver": version})
+        message = str(reply.get("ErrMsg", "")) if isinstance(reply, dict) else "invalid CONNECT reply"
+        if message:
+            raise TTBApiError(f"TTB rejected API handshake for TTBHelp {version}: {message}")
+
+    def QUOTEDATA(self, symbols: str) -> Any:
+        # TTBHelp only opens a local ZMQ SUB here; TTB publishes the symbols
+        # added in its GUI quote settings. QuoteMonitor owns the subscriber.
+        return {"Code": "000", "Message": ""}
+
+    def NEWORDER(self, payload: dict[str, str]) -> Any:
+        return self._post("NEWORDER", payload)
+
+    def CANCELORDER(self, payload: dict[str, str]) -> Any:
+        return self._post("CANCELORDER", payload)
+
+    def REPLACEPRICE(self, payload: dict[str, str]) -> Any:
+        return self._post("REPLACEPRICE", payload)
+
+    def REPLACEQTY(self, payload: dict[str, str]) -> Any:
+        return self._post("REPLACEQTY", payload)
+
+    def QUERYRESTOREREPORT(self) -> Any:
+        return self._post("QUERYRESTOREREPORT")
+
+    def QUERYMARGIN(self) -> Any:
+        return self._post("QUERYMARGIN")
+
+    def QUERYRESTOREFILLREPORT(self) -> Any:
+        return self._post("QUERYRESTOREFILLREPORT")
+
+
 class TTBApi:
-    """Small typed facade over the methods supplied by ``TTBHelp.pyc``."""
+    """Small typed facade over the TTB local API (TTBHelp method names)."""
 
     def __init__(self, module: Any) -> None:
         self.module = module
 
     @classmethod
     def connect(cls, host: str = "http://localhost:8080", zmq_port: int = 51141) -> "TTBApi":
-        # Import lazily so shadow/unit-test code can run without loading the
-        # bundled Windows-only helper.
-        from TTBHelp import TTBModule
-
-        class TTBProcess(TTBModule):
-            def SHOWQUOTEDATA(self, obj: dict[str, Any]) -> None:
-                # Quotes are consumed by the stoppable ZMQ subscriber.
-                pass
-
-        return cls(TTBProcess(host, zmq_port))
+        # zmq_port is kept for call-site compatibility; quotes are consumed by
+        # ttb.market_data's own subscriber. Version comes from TTBHelp so the
+        # handshake matches the TTB.exe it was shipped with.
+        module = HttpTTBModule(host)
+        module.handshake(ttbhelp_version())
+        return cls(module)
 
     def subscribe_quote(self, symbol: str) -> Any:
         if not symbol.strip():
@@ -149,6 +208,20 @@ class TTBApi:
 
     def new_order(self, request: TTBOrderRequest) -> Any:
         return require_success("new order", self.module.NEWORDER(request.payload()))
+
+    def new_market_ioc(self, symbol: str, side: Side, quantity: int) -> Any:
+        """Market (OrderType=1) IOC order; only used by automated flattening.
+
+        TTB ignores Price for market orders per the vendor manual, so "0" is
+        sent. Callers must verify the resulting position from the broker
+        report; acceptance alone proves nothing about the fill.
+        """
+        payload = TTBOrderRequest(
+            symbol=symbol, side=side, price=1, quantity=quantity,
+            time_in_force="2", order_type="1",
+        ).payload()
+        payload["Price"] = "0"
+        return require_success("market IOC order", self.module.NEWORDER(payload))
 
     def cancel_order(self, order_no: str) -> Any:
         if not order_no.strip():

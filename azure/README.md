@@ -113,7 +113,7 @@ py -3.13 -m pip install -r Sample/Python/requirements.txt
 
 ## 4. TTB 二進位版本／來源控管（#15）
 
-Repository 的現存 `TTB.exe` 版本資訊為 **2025.11.27.1900**；Windows `Get-AuthenticodeSignature` 的結果是 **NotSigned**。`TTBHelp.pyc` 與 Python 3.13 的 bytecode magic 一致。但**這些資訊並不證明二進位檔案來自期交所官方，或保證 EXE 與 Python API 相容**。原始下載來源、授權條件及 EXE/pyc 組合的實際 TTB 端到端驗收仍待人工查核。
+Repository 的 `TTB.exe` 自 2026-10-18 起為 **2026.07.08.1000**（產品版本 1.1.0，Windows `Get-AuthenticodeSignature` 為 **NotSigned**），需要 **.NET 10 Desktop Runtime (x64)**；同套件附 `TTBHelp.py`（原始碼，取代舊的 `TTBHelp.pyc`），其版本字串必須與 TTB.exe 相同，因為 `CONNECT` 握手會比對版本。這些資訊**不證明**檔案來自期交所官方；原始下載來源與授權仍待人工查核。
 
 本 repo 以 [runtime_binaries.json](runtime_binaries.json) 紀錄**現有 Git 快照**的 SHA256、長度、版本及已知的簽章狀態。每次部署／preflight／CI 必須用 `automation/check_binary_integrity.py` 驗證：
 
@@ -124,7 +124,7 @@ py -3.13 -m automation.check_binary_integrity
 
 SHA256 不一致、檔案不存在或 TTBHelp bytecode magic 與本機 Python 不符時會拒絕部署。驗證工具固定回報 `official_provenance_verified=false`，不可將 checksum pass 當成官方簽章或安全保障。若版本與 VM 上的不同，不要為了繼續下單而直接修改 JSON 或關閉檢查。
 
-**更新步驟**：先從經操作員確認的 TTB 官方平台下載合法版本並保存來源／授權佐證；在獨立 Windows VM 備份 `TTB.exe`、`TTBHelp.pyc`、Journal、config 後，停止 live bot 並核對全帳戶空倉／零掛單；複製新檔至隔離測試環境、檢查檔案版本與 SHA256、重建相容清單；執行全部 offline 單元測試、48h 加速 soak、preflight，接著在正確虛擬帳戶由人工完成 #2 一口委託/撤單、部分成交及 margin 語義驗收；完成 PR 審查後才允許更新正式 VM。來源與授權未確認前**不得自行轉發或鏡像新執行檔**。
+**更新步驟**：先從經操作員確認的 TTB 官方平台下載合法版本並保存來源／授權佐證；在獨立 Windows VM 備份 `TTB.exe`、`TTBHelp.py`、Journal、config 後，停止 live bot 並核對全帳戶空倉／零掛單；複製新檔至隔離測試環境、檢查檔案版本與 SHA256、重建相容清單；執行全部 offline 單元測試、48h 加速 soak、preflight，接著在正確虛擬帳戶由人工完成 #2 一口委託/撤單、部分成交及 margin 語義驗收；完成 PR 審查後才允許更新正式 VM。來源與授權未確認前**不得自行轉發或鏡像新執行檔**。
 
 原本 repo 內的 **12 MB 教學 PDF** 已從往後的 Git source 快照移除（舊歷史仍保留，沒有強推或改寫歷史）；如需教材請由官方競賽網站取得，本機已存在的副本不會被修改。VBA 範例留在 repo，但不得在未檢查巨集與來源前於正式 VM 執行。
 
@@ -220,6 +220,31 @@ az vm start --resource-group $rg --name $vm
 ```
 
 在 Azure Portal 建立 Cost Management Budget，至少設定 50%、75%、90% 告警。只有在策略已通過 shadow 與人工復核後，才適合把 VM 改成長時間執行；交易期間應優先確保 TTB 與 bot 的進程、磁碟空間和 VM 狀態可觀測。quote/decision CSV 會每日輪替，`cleanup_runtime.ps1` 預設清除 14 天前的 runtime CSV／order-probe 檔，supervisor log 超過 10 MB 會輪替。
+
+## 8. 一鍵部署與無人值守主機（競賽全自動）
+
+**部署已提交的程式到 VM**（本機執行，需 `az login`；不在 VM 存 GitHub token）：
+
+```powershell
+# 乾跑：只打包並顯示 commit / SHA256 / 分段數
+powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1
+# 實際部署
+powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply
+```
+
+`-Apply` 透過 Run Command 分段上傳 `git archive`，在 VM 驗證 SHA256 後：寫入 `stop.requested` 讓 bot 正常停機（120 秒內未停則中止、不改檔）→ 備份到 `C:\TTB\deploy-backups\<時間>` → 覆蓋程式但保留 `automation\config.json` 與 `output\` → `pip install`、二進位雜湊、文件一致性與單元測試 → 任一失敗自動還原 → 重新註冊排程，有登入桌面時啟動 `TTB Automation`。
+
+**主機設定**（一次性）：
+
+0. 執行環境：TTB 2026.07.08 需要 .NET 10 的 `Microsoft.NETCore.App`、`Microsoft.AspNetCore.App`、`Microsoft.WindowsDesktop.App` 三個 runtime（只裝 Desktop 會啟動失敗）；`ttb_login` 用的 pywinauto 需要 Visual C++ 2015-2022 x64 runtime（`mfc140u.dll`），以 SYSTEM 安裝 pywin32 後另需 `pywin32_postinstall -install`。`Set-TtbVmHost.ps1` 會回報 `dotnet10`、`vcRuntime` 是否就緒。
+
+1. `Set-TtbVmHost.ps1 -Apply`（VM 上以系統管理員執行，或經 Run Command）：Windows Update 有使用者登入時不自動重開機、時區 Taipei、登入不開 Server Manager。不帶 `-Apply` 只回報狀態。
+2. 在 VM 以系統管理員執行 [Set-TtbAutologon.ps1](Set-TtbAutologon.ps1)：下載並驗證簽章的 Sysinternals Autologon，提示輸入 Windows 密碼後存成加密 LSA secret。VM 重開後自動登入 → `TTB Automation` 登入觸發 → supervisor 啟動 TTB 並自動登入競賽。
+3. 以 `azureuser` 執行 `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號> /pass` 儲存 TTB 帳密；`automation\config.json` 以 [config.competition.example.json](../Sample/Python/automation/config.competition.example.json) 為範本，填入 `ttbCompetition`。
+4. 結束 RDP 時在 VM 內以系統管理員執行 `azure\Disconnect-RdpToConsole.ps1`，把工作階段交回主控台，不要登出。
+5. 外部告警：在 `azureuser` 環境變數設定 `TTB_ALERT_WEBHOOK_URL`（Discord/Slack incoming webhook 皆可，payload 含 `content`/`text`）。
+
+完整部署步驟表、`set_mode.ps1` 的 live 切換檢查與自動恢復的邊界見 [OPERATIONS.md §8](../Sample/Python/OPERATIONS.md#8-競賽全自動模式opt-in)。
 
 ## 官方參考
 
