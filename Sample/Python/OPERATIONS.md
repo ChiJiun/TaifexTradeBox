@@ -122,7 +122,7 @@ py -3.13 ttb_readonly_capture.py
 
 | # | 在哪裡 | 動作 |
 |---|---|---|
-| 1 | 本機 | `az login` 後 `powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply`：把已提交的程式碼部署到 VM（備份、測試、失敗自動還原、重新註冊排程）。RDP 連不上時先跑 `azure\Set-TtbRdpAllowlist.ps1 -Apply`。 |
+| 1 | 本機 | `az login` 後 `powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply`：把已提交的程式碼部署到 VM（備份、測試、失敗自動還原、重新註冊排程）。RDP 連不上時先跑 `azure\Set-TtbRdpAllowlist.ps1 -Apply`。**GCP**：`gcloud auth login` 後 `gcp\Deploy-TtbRuntime.ps1 -Bootstrap -Apply`（首次會先裝 .NET 10／VC++／Python 並套用第 2 步主機設定），執行帳號為 `ttbuser`，詳見 [gcp/README.md](../../gcp/README.md)；防火牆用 `gcp\Set-TtbRdpAllowlist.ps1 -Apply`。 |
 | 2 | VM（系統管理員 PowerShell） | `powershell -ExecutionPolicy Bypass -File C:\TTB\azure\Set-TtbVmHost.ps1 -Apply`：關閉 Windows Update 自動重開機、時區 Taipei；輸出 `dotnet10`、`vcRuntime` 必須為 true（TTB 2026.07.08 需三個 .NET 10 runtime，pywinauto 需 VC++ 2015-2022 x64）。 |
 | 3 | VM（以 `azureuser`） | `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號 e-mail> /pass`，提示時輸入 TTB 密碼（畫面不顯示）。`cmdkey /list:TaifexTradeBox/TTB` 確認。 |
 | 4 | VM（系統管理員 PowerShell） | `powershell -ExecutionPolicy Bypass -File C:\TTB\azure\Set-TtbAutologon.ps1`：輸入 Windows 密碼，存成 LSA secret。之後 VM 重開機會自動登入 → `TTB Automation` 登入觸發 → 自動開 TTB 並登入競賽。 |
