@@ -284,13 +284,15 @@ py -3.13 ttb_order_probe.py `
 Copy-Item automation\config.example.json automation\config.json
 ```
 
-`config.example.json` 預設為 shadow。完成委託探測、確認帳戶空倉後，才可將 `config.json` 改為：
+`config.example.json` 預設為 shadow。建議用 `automation\set_mode.ps1 -Mode ttb -Apply` 切換（會套用 `config.competition.example.json` 並強制 `autoLogin: true`）。手動編輯時，`config.json` 至少要像這樣；`mode: "ttb"` 必須搭配 `autoLogin: true`，因為登入步驟負責確認 TTB「失敗自動重送」已關閉，否則 supervisor 拒絕啟動：
 
 ```json
 {
-  "symbol": "TMFJ6",
+  "symbol": "auto:TMF",
   "mode": "ttb",
   "strategy": "market-maker",
+  "autoLogin": true,
+  "ttbCompetition": "<競賽名稱>",
   "confirmVirtualOrders": true,
   "confirmFlatAccount": true,
   "flattenOnShutdown": false,

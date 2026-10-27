@@ -532,6 +532,19 @@ class CompetitionConfigTests(unittest.TestCase):
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")
         self.assertNotIn("Register-ScheduledTask -TaskName 'TTB GUI'", installer)
 
+    def test_live_mode_always_confirms_auto_resubmit_off(self):
+        # ttb_login is the only place chkAutoPut is checked: live mode must not
+        # be able to skip it through autoLogin=false.
+        supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
+        self.assertIn("'--require-auto-resubmit-off'", supervisor)
+        self.assertIn("ttb mode requires autoLogin=true", supervisor)
+        self.assertLess(supervisor.index("ttb mode requires autoLogin=true"),
+                        supervisor.index("while (-not (Test-Path -LiteralPath $stopFile))"))
+        set_mode = (HERE / "automation" / "set_mode.ps1").read_text(encoding="utf-8")
+        self.assertIn("$new.autoLogin = $true", set_mode)
+        template = json.loads((HERE / "automation" / "config.competition.example.json").read_text(encoding="utf-8"))
+        self.assertIs(template["autoLogin"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

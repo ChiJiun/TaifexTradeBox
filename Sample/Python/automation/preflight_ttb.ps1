@@ -57,6 +57,9 @@ if (Test-Path -LiteralPath $ConfigPath) {
         if ($config.mode -eq 'ttb' -and (-not $config.confirmVirtualOrders -or -not $config.confirmFlatAccount)) {
             Add-Failure 'ttb mode requires both confirmation flags'
         }
+        if ($config.mode -eq 'ttb' -and $config.autoLogin -ne $true) {
+            Add-Failure 'ttb mode requires autoLogin=true (the login step confirms TTB chkAutoPut is off)'
+        }
         if ($config.autoLogin) {
             $target = if ($config.ttbCredentialTarget) { [string]$config.ttbCredentialTarget } else { 'TaifexTradeBox/TTB' }
             $listing = (& cmdkey.exe "/list:$target" 2>&1 | Out-String)

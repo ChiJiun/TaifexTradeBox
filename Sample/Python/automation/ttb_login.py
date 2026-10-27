@@ -277,7 +277,11 @@ class TtbWindow:
                     raise LoginError(f"{APPLY_SETTINGS_ID} disabled; settings {changes} were not applied")
                 self.press(APPLY_SETTINGS_ID)
                 # TTB confirms with a modal "設定成功" message box; close it.
-                changes.extend(f"dialog:{text}" for text in wait_for(self.dismiss_dialogs, 5.0, 0.5) or [])
+                # Anything else (e.g. 設定失敗) means the change did not stick.
+                replies = wait_for(self.dismiss_dialogs, 5.0, 0.5) or []
+                if any("成功" not in text for text in replies):
+                    raise LoginError(f"TTB rejected settings {changes}: {replies}")
+                changes.extend(f"dialog:{text}" for text in replies)
         finally:
             self._back_to_messages()
         return changes
@@ -456,6 +460,8 @@ def _confirm_auto_resubmit_off(window: Any) -> list[str]:
     if window.auto_resubmit_state() == "off":
         return []
     steps = window.enforce_settings()
+    # A late 設定成功 box would block the tab switch in the re-read below.
+    steps.extend(f"dialog:{text}" for text in window.dismiss_dialogs())
     state = window.auto_resubmit_state()
     if state != "off":
         raise LoginError(f"{AUTO_RESUBMIT_ID} still {state} after enforcing settings; refusing live trading")
