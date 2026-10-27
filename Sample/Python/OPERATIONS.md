@@ -114,7 +114,7 @@ py -3.13 ttb_readonly_capture.py
 | 元件 | 作用 |
 |---|---|
 | `symbol: "auto:TMF"`（也支援 `auto:TXF`、`auto:MTX`） | 依核准日曆選近月；到期日當天（13:30 收盤、無夜盤）起改用次月。bot 持倉或有掛單時**不換月**，空倉後以 exit 0 結束，由 supervisor 以新月份重啟。查詢：`py -3.13 -m automation.resolve_symbol auto:TMF` |
-| `automation/ttb_login.py`（`autoLogin: true`） | 以 UI Automation 填入 Windows 認證管理員 `TaifexTradeBox/TTB` 的帳密、按「登入」、選 `ttbCompetition` 競賽，最後以唯讀 API 確認 `QUERYMARGIN`／委託／部位都回 `0000`。登入前強制**關閉** TTB「下單失敗每 5 秒自動重送」（`chkAutoPut`，TTB 預設為開），否則 TTB 會自行重送 bot 不認得的委託；並保持「斷線自動重連」開啟。密碼不寫入檔案或 log。 |
+| `automation/ttb_login.py`（`autoLogin: true`） | 以 UI Automation 填入 Windows 認證管理員 `TaifexTradeBox/TTB` 的帳密、按「登入」、選 `ttbCompetition` 競賽，最後以唯讀 API 確認 `QUERYMARGIN`／委託／部位都回 `0000`。登入前強制**關閉** TTB「下單失敗每 5 秒自動重送」（`chkAutoPut`，TTB 預設為開），否則 TTB 會自行重送 bot 不認得的委託；並保持「斷線自動重連」開啟。live（`mode: "ttb"`）時 supervisor 加 `--require-auto-resubmit-off`：即使 TTB 已經登入，也會讀取 `chkAutoPut`，必要時關閉並套用；讀不到或關不掉就登入失敗，不啟動 bot。密碼不寫入檔案或 log。 |
 | `auto_recover_ttb.py`（`autoRecovery`） | bot 非正常退出或啟動時帳戶不乾淨：撤銷**全部**工作中委託、以市價 IOC 平掉 TXF/MTX/TMF 期貨部位、兩次唯讀檢查皆乾淨才清除 `manual-reconciliation-required.flag`，每步驟寫入 `output/reconciliation` 稽核。每日最多 `maxAttemptsPerDay` 次（`output/supervisor/auto-recovery.json` 持久化），超過、遇到選擇權／超量部位、或平倉後仍不平，就維持鎖定並由 Watchdog 告警，回到 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md) 人工流程。休市帶倉會延到下一個交易時段再處理。 |
 | `run_ttb_automation.ps1` | 每輪：確保 TTB 執行 → 等 8080/51141 → 自動登入（失敗每 60 秒重試）→ 需要時自動恢復 → 啟動 bot。 |
 

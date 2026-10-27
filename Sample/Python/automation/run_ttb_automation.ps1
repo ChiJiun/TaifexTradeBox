@@ -46,6 +46,8 @@ function Invoke-TtbLogin {
     # (read-only) whether the resolved contract is subscribed.
     $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
+    # Live orders must never run while TTB may resend failed orders on its own.
+    if ($config.mode -eq 'ttb') { $loginArgs += '--require-auto-resubmit-off' }
     return Invoke-PythonTool 'ttb_login' $loginArgs
 }
 
