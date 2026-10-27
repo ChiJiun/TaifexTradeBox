@@ -532,6 +532,16 @@ class CompetitionConfigTests(unittest.TestCase):
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")
         self.assertNotIn("Register-ScheduledTask -TaskName 'TTB GUI'", installer)
 
+    def test_vm_shutdown_script_never_blocks_the_next_live_start(self):
+        # stop.requested survives the reboot and makes the supervisor refuse
+        # live startup; the scheduled shutdown may only stop the bot.
+        script = (HERE.parent.parent / "gcp" / "shutdown-stop-bot.ps1").read_text(encoding="utf-8")
+        self.assertIn("'bot-stop.requested'", script)
+        self.assertNotIn("'stop.requested'", script)
+        supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
+        self.assertIn("$botStopFile = Join-Path $statusDir 'bot-stop.requested'", supervisor)
+        self.assertIn("Remove-Item -LiteralPath $botStopFile", supervisor)
+
     def test_cli_help_survives_a_non_utf8_console(self):
         # validate_release.ps1 runs --help on a Windows runner whose console is cp1252.
         import os

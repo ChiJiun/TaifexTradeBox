@@ -51,6 +51,7 @@ gcloud compute instances create ttb-sim-gcp --project $p --zone asia-east1-b --m
 
 ## 5. 省成本
 
+- **盤中才開機**：`.\gcp\Set-TtbInstanceSchedule.ps1`（乾跑）→ 加 `-Apply`。平日 08:00 開機、14:00 關機（Asia/Taipei），並安裝關機腳本 [shutdown-stop-bot.ps1](shutdown-stop-bot.ps1)：關機前寫入 `bot-stop.requested`，最多等 60 秒讓 bot 結束。開機後由 Autologon → `TTB Automation` 自動接手。收盤前 10 分鐘 engine 會停止進場並出場；若關機時仍有部位，下次開機時的空倉檢查／自動恢復會處理。國定假日仍會開機但不交易；要交易夜盤就不能用這個排程。取消：`-Remove -Apply`。
 - 不用時 `gcloud compute instances stop ttb-sim-gcp --project ttb-competition --zone asia-east1-b`；停機只收磁碟費。
 - 改機型需先停機：`gcloud compute instances set-machine-type ttb-sim-gcp --machine-type e2-standard-2 ...`。
 - 在 GCP Console「帳單 → 預算與快訊」設定預算通知。
