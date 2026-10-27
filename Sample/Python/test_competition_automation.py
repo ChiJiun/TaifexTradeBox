@@ -532,6 +532,21 @@ class CompetitionConfigTests(unittest.TestCase):
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")
         self.assertNotIn("Register-ScheduledTask -TaskName 'TTB GUI'", installer)
 
+    def test_vm_power_schedule_brackets_the_regular_session(self):
+        # GCE may run either operation up to 15 minutes late; the VM must be
+        # up and logged in before 08:45 and must not stop before the 13:45 close.
+        import re
+        script = (HERE.parent.parent / "gcp" / "Set-TtbInstanceSchedule.ps1").read_text(encoding="utf-8")
+        start = re.search(r"\$StartCron = '(\d+) (\d+) \* \* 1-5'", script)
+        stop = re.search(r"\$StopCron = '(\d+) (\d+) \* \* 1-5'", script)
+        assert start is not None and stop is not None
+        start_minute = int(start.group(2)) * 60 + int(start.group(1))
+        stop_minute = int(stop.group(2)) * 60 + int(stop.group(1))
+        self.assertLessEqual(start_minute + 15, 8 * 60 + 15)
+        self.assertGreater(stop_minute, 13 * 60 + 45)
+        self.assertIn("'Asia/Taipei'", script)
+        self.assertNotIn("stop.requested", script)
+
     def test_cli_help_survives_a_non_utf8_console(self):
         # validate_release.ps1 runs --help on a Windows runner whose console is cp1252.
         import os
