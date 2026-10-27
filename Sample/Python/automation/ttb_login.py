@@ -496,13 +496,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="http://localhost:8080")
     parser.add_argument("--zmq-port", type=int, default=51141)
     parser.add_argument("--check-only", action="store_true", help="read-only API probe; never touches the GUI")
-    parser.add_argument("--no-submit", action="store_true", help="fill the login form but do not press 登入")
+    parser.add_argument("--no-submit", action="store_true", help="fill the login form but do not press the logon button (btnLogOn)")
     parser.add_argument("--dump-controls", action="store_true", help="print the TTB UI tree (password hidden)")
     parser.add_argument("--start-timeout", type=float, default=60.0)
     parser.add_argument("--subscribe", action="append", default=[],
-                        help="contract code that must be in TTB 報價設定; checked read-only and reported (repeatable)")
+                        help="contract code that must be in the TTB quote-settings grid (dvQuote); checked read-only and reported (repeatable)")
     parser.add_argument("--require-auto-resubmit-off", action="store_true",
-                        help="fail unless TTB 失敗自動重送 (chkAutoPut) reads off, even when already logged in (live mode)")
+                        help="fail unless TTB auto-resubmit (chkAutoPut) reads off, even when already logged in (live mode)")
     args = parser.parse_args(argv)
 
     competition = args.competition if args.competition is not None else _config_value(args.config, "ttbCompetition")

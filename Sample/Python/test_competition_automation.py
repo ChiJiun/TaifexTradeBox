@@ -532,6 +532,18 @@ class CompetitionConfigTests(unittest.TestCase):
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")
         self.assertNotIn("Register-ScheduledTask -TaskName 'TTB GUI'", installer)
 
+    def test_cli_help_survives_a_non_utf8_console(self):
+        # validate_release.ps1 runs --help on a Windows runner whose console is cp1252.
+        import os
+        import subprocess
+        import sys
+        env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+        env.pop("PYTHONUTF8", None)
+        for module in ("automation.ttb_login", "automation.live_gate"):
+            result = subprocess.run([sys.executable, "-m", module, "--help"], cwd=HERE, env=env,
+                                    capture_output=True)
+            self.assertEqual(result.returncode, 0, f"{module}: {result.stderr[-300:]!r}")
+
     def test_live_mode_always_confirms_auto_resubmit_off(self):
         # ttb_login is the only place chkAutoPut is checked: live mode must not
         # be able to skip it through autoLogin=false.
