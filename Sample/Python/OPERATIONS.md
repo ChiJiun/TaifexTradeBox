@@ -143,7 +143,7 @@ GUI 自動登入已在 TTB 2026.07.08.1000（控制項 `txtAccnt`、`txtPwd`、`
 
 其他注意事項：
 
-- **報價訂閱在 TTB GUI**：TTBHelp 的 `QUOTEDATA` 只開本機 ZMQ 監聽，TTB 只推送「報價設定」頁已加入的商品；此清單在 TTB 重啟後仍保留（2026-10-18 實測）。`ttb_login --subscribe <近月>` 只**唯讀檢查**並在 supervisor log 回報 `subscribed` 或 `NOT_SUBSCRIBED_add_in_TTB_quote_settings`，不會自動按「新增訂閱」。**每次換月前請在 GUI 先加入次月**（例如 11/18 前加 `TMFL6`）。
+- **報價訂閱在 TTB GUI**：TTBHelp 的 `QUOTEDATA` 只開本機 ZMQ 監聽，TTB 只推送「報價設定」頁已加入的商品；TTB 登入時會對已存清單逐一查基本報價，查不到（例如盤前或收盤後）就把該商品從清單**永久刪除**（2026-10-28 在 VM 實測，見反編譯的 `BaseForm.LoadSymbol`）。所以 `ttb_login --subscribe <近月>` 每次登入都會檢查，缺少時自動按「新增訂閱」補回，supervisor log 回報 `subscribed`、`added` 或 `add_failed:[...]`。補訂失敗時 live gate 收不到報價會延後，下一輪登入再補；換月由 `resolve_symbol` 決定近月，不用手動加次月。
 - **API 連線不再經 TTBHelp 建構子**：`TTBApi.connect` 以相同端點直接 HTTP（10 秒 timeout），並用 TTBHelp 的版本字串做 `CONNECT` 握手。原 TTBHelp 在 TTB 未開或版本不符時會 `os._exit(0)`，supervisor 會誤判為正常結束。
 - **TTB 2026.07.08.1000**（2026-10-18 起的 repo 版本）需要 .NET 10 Desktop Runtime；TTB.exe 與 `TTBHelp.py` 必須同版（握手會比對版本，`check_binary_integrity` 也會檢查）。
 

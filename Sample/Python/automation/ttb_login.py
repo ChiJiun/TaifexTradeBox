@@ -40,6 +40,10 @@ GAME_LIST_ID = "cbGameList"
 SETTINGS_TAB_ID = "tabPage2"
 QUOTES_TAB_ID = "tabPage3"
 QUOTE_GRID_ID = "dvQuote"
+# 新增訂閱 opens a WinForms dialog titled "SymbolForm" with one text box and
+# a 確定 button; TTB then queries the server's basic quote for the contract.
+SUBSCRIBE_ID = "btnSubscribe"
+SYMBOL_FORM_TITLE = "SymbolForm"
 MESSAGES_TAB_ID = "tabPage1"
 APPLY_SETTINGS_ID = "btnApply"
 # TTB's own "resubmit failed orders every 5 seconds" option would create
@@ -55,6 +59,7 @@ EQUITY_GRID_ID = "dvEquity"
 # Win32 messages used instead of blocking UI Automation calls.
 BM_CLICK = 0x00F5
 WM_CLOSE = 0x0010
+WM_SETTEXT = 0x000C
 WM_COMMAND = 0x0111
 CB_SETCURSEL = 0x014E
 CBN_SELCHANGE = 1
@@ -368,31 +373,65 @@ class TtbWindow:
         control_id = user32.GetDlgCtrlID(hwnd)
         user32.PostMessageW(user32.GetParent(hwnd), WM_COMMAND, (CBN_SELCHANGE << 16) | (control_id & 0xFFFF), hwnd)
 
-    def subscribe_quote(self, symbol: str) -> str:
-        """Check (read-only) that symbol is in TTB's 報價設定 grid.
+    def _quoted_symbols(self, grid: Any) -> set[str]:
+        return {
+            str(cell.legacy_properties().get("Value", "")).strip().upper()
+            for cell in grid.descendants(control_type="DataItem")
+            if cell.element_info.name.startswith("商品代號")
+        }
 
-        TTB only publishes ticks for subscribed symbols. The list survives a
-        TTB restart, and 新增訂閱 opens a dialog, so this does not add symbols:
-        a missing contract is reported for the operator to add by hand.
+    def _symbol_form(self) -> Any:
+        from pywinauto import Desktop  # type: ignore[import-not-found]
+
+        for window in Desktop(backend="win32").windows(visible_only=True):
+            if window.process_id() == self.process_id and window.window_text() == SYMBOL_FORM_TITLE:
+                return window
+        return None
+
+    def subscribe_quote(self, symbol: str) -> str:
+        """Make sure symbol is in TTB's 報價設定 grid, adding it if missing.
+
+        TTB only publishes ticks for subscribed symbols, and at login it drops
+        every saved symbol whose basic quote the server does not answer (e.g.
+        before the session opens), rewriting its saved list. So a missing
+        contract is re-added through 新增訂閱 on every login; a rejected add
+        (TTB shows 錯誤商品代碼) is reported and retried on the next login.
         """
+        symbol = symbol.upper().strip()
         tab = self.control(QUOTES_TAB_ID, control_type="TabItem")
         if not tab.exists(timeout=2):
             return "quote_tab_missing"
         tab.select()
+        form = None
         try:
             grid = self.control(QUOTE_GRID_ID, control_type="DataGrid")
             if not grid.exists(timeout=3):
                 return "quote_grid_missing"
-            subscribed = {
-                str(cell.legacy_properties().get("Value", "")).strip().upper()
-                for cell in grid.descendants(control_type="DataItem")
-                if cell.element_info.name.startswith("商品代號")
-            }
+            if symbol in self._quoted_symbols(grid):
+                return "subscribed"
+            self.press(SUBSCRIBE_ID)
+            form = wait_for(self._symbol_form, 5.0, 0.2)
+            if not form:
+                return f"add_failed:no_{SYMBOL_FORM_TITLE}:{self.dismiss_dialogs()}"
+            edits = [child for child in form.children() if "EDIT" in child.class_name().upper()]
+            confirm = [child for child in form.children() if child.window_text() == "確定"]
+            if len(edits) != 1 or len(confirm) != 1:
+                return f"add_failed:{SYMBOL_FORM_TITLE}_layout_changed"
+            user32 = ctypes.windll.user32
+            user32.SendMessageW(edits[0].handle, WM_SETTEXT, 0, ctypes.c_wchar_p(symbol))
+            user32.PostMessageW(confirm[0].handle, BM_CLICK, 0, 0)
+            # The basic-quote query runs on TTB's UI thread after the form closes.
+            added = wait_for(lambda: symbol in self._quoted_symbols(grid) or self.dialogs(), 15.0, 0.5)
+            replies = self.dismiss_dialogs()
+            if added is True or symbol in self._quoted_symbols(grid):
+                return "added"
+            # No error box: TTB already held the symbol (it logs 訂閱商品重覆) or
+            # had its quote cached, and only adds the row on the next tick.
+            return f"add_failed:{replies}" if replies else "add_unconfirmed_no_grid_row"
         finally:
-            back = self.control(MESSAGES_TAB_ID, control_type="TabItem")
-            if back.exists(timeout=1):
-                back.select()
-        return "subscribed" if symbol.upper().strip() in subscribed else "NOT_SUBSCRIBED_add_in_TTB_quote_settings"
+            if form is not None and ctypes.windll.user32.IsWindow(form.handle):
+                ctypes.windll.user32.PostMessageW(form.handle, WM_CLOSE, 0, 0)
+            self._back_to_messages()
 
     def dump(self) -> list[str]:
         rows = []
@@ -536,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dump-controls", action="store_true", help="print the TTB UI tree (password hidden)")
     parser.add_argument("--start-timeout", type=float, default=60.0)
     parser.add_argument("--subscribe", action="append", default=[],
-                        help="contract code that must be in the TTB quote-settings grid (dvQuote); checked read-only and reported (repeatable)")
+                        help="contract code that must be in the TTB quote-settings grid (dvQuote); added through the btnSubscribe dialog when missing (repeatable)")
     parser.add_argument("--require-auto-resubmit-off", action="store_true",
                         help="fail unless TTB auto-resubmit (chkAutoPut) reads off, even when already logged in (live mode)")
     parser.add_argument("--require-report-channel", action="store_true",
