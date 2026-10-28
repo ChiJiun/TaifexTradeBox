@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from strategy_core import Fill, IndependentFillSimulator, OrderIntent, PositionLedger, Quote, StrategyConfig
 
-from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response
+from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response, position_effect_for
 from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, assess_pretrade
 from .journal import ExecutionJournal
 
@@ -393,7 +393,11 @@ class TTBOrderGateway:
             self.seen_deal_qty[order_no] = max(previous, deal_total)
             remaining = order_remaining(row)
             if remaining > 0 and not is_terminal_order(row):
-                self.active[side] = {"order_no": order_no, "price": ordered_price, "qty": remaining}
+                known = self.active.get(side, {})
+                self.active[side] = {
+                    "order_no": order_no, "price": ordered_price, "qty": remaining,
+                    "effect": known.get("effect") if known.get("order_no") == order_no else None,
+                }
             elif self.active.get(side, {}).get("order_no") == order_no:
                 self.active.pop(side, None)
                 self.cancel_requested.discard(order_no)
@@ -427,7 +431,7 @@ class TTBOrderGateway:
         # replacement.  This prevents duplicate working orders after latency.
         for side, current in list(self.active.items()):
             wanted = desired.get(side)
-            if wanted is None or wanted.price != current["price"] or wanted.quantity != current["qty"]:
+            if wanted is None or self._stale(current, wanted):
                 self._cancel(side, current)
         if self.cancel_requested or self.pending:
             return
@@ -436,10 +440,19 @@ class TTBOrderGateway:
             wanted = desired.get(side)
             if current and wanted is None:
                 self._cancel(side, current)
-            elif current and wanted and (current["price"] != wanted.price or current["qty"] != wanted.quantity):
+            elif current and wanted and self._stale(current, wanted):
                 self._cancel(side, current)
             elif wanted and not current and side not in self.pending:
                 self._place(wanted)
+
+    def _stale(self, current: dict[str, Any], wanted: OrderIntent) -> bool:
+        # A fill on the other side can turn an opening order into a closing
+        # one (or back); TTB fixes PositionEffect at entry, so replace it.
+        return (
+            current["price"] != wanted.price
+            or current["qty"] != wanted.quantity
+            or current.get("effect") != position_effect_for(wanted.side, wanted.quantity, self.ledger.position)
+        )
 
     def _place(self, intent: OrderIntent) -> None:
         now = time.time()
@@ -467,12 +480,14 @@ class TTBOrderGateway:
             "side": intent.side, "quantity": intent.quantity,
             "price": intent.price, "role": intent.role,
         })
+        effect = position_effect_for(intent.side, intent.quantity, self.ledger.position)
         request = TTBOrderRequest(
             symbol=self.config.symbol,
             side=intent.side,
             price=intent.price,
             quantity=intent.quantity,
             time_in_force="2" if intent.role == "risk_exit" else "1",
+            position_effect=effect,
         )
         response = self.api.new_order(request)
         order_no = extract_order_no(response)
@@ -486,6 +501,7 @@ class TTBOrderGateway:
                 "order_no": order_no,
                 "price": intent.price,
                 "qty": intent.quantity,
+                "effect": effect,
             }
         else:
             self.pending[intent.side] = {"intent": intent, "created_at": time.monotonic()}
@@ -586,6 +602,7 @@ class TTBOrderGateway:
                         price=price,
                         quantity=abs(self.reported_position),
                         time_in_force="2",
+                        position_effect="Y",
                     )
                 )
                 order_no = extract_order_no(response)
