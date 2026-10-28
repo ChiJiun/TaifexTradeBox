@@ -74,6 +74,17 @@ def extract_order_no(response: Any) -> str:
     return ""
 
 
+def position_effect_for(side: Side, quantity: int, position: int) -> str:
+    """TTB's PositionEffect: "Y" closes, "N" opens.
+
+    TTB 2026.07.08 rejects anything else (the manual's 0/1/4 included) with
+    平倉格式錯誤 and refuses "Y" beyond the held quantity, so only an order that
+    fully fits inside the opposite position is sent as a close.
+    """
+    reduces = (position > 0 and side == "sell") or (position < 0 and side == "buy")
+    return "Y" if reduces and quantity <= abs(position) else "N"
+
+
 def _number_text(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else format(value, "f").rstrip("0").rstrip(".")
 
@@ -94,7 +105,7 @@ class TTBOrderRequest:
     time_in_force: str = "1"
     order_type: str = "2"
     day_trade: bool = False
-    position_effect: str = "4"
+    position_effect: str = "N"
     symbol2: str = ""
     side2: str = ""
 
@@ -107,6 +118,8 @@ class TTBOrderRequest:
             raise ValueError("price must be positive")
         if self.quantity <= 0:
             raise ValueError("quantity must be positive")
+        if self.position_effect not in ("Y", "N"):
+            raise ValueError("position_effect must be 'Y' (close) or 'N' (open)")
 
     def payload(self) -> dict[str, str]:
         return {
@@ -210,7 +223,7 @@ class TTBApi:
         return require_success("new order", self.module.NEWORDER(request.payload()))
 
     def new_market_ioc(self, symbol: str, side: Side, quantity: int) -> Any:
-        """Market (OrderType=1) IOC order; only used by automated flattening.
+        """Market (OrderType=1) IOC close order; only used by automated flattening.
 
         TTB ignores Price for market orders per the vendor manual, so "0" is
         sent. Callers must verify the resulting position from the broker
@@ -218,7 +231,7 @@ class TTBApi:
         """
         payload = TTBOrderRequest(
             symbol=symbol, side=side, price=1, quantity=quantity,
-            time_in_force="2", order_type="1",
+            time_in_force="2", order_type="1", position_effect="Y",
         ).payload()
         payload["Price"] = "0"
         return require_success("market IOC order", self.module.NEWORDER(payload))
