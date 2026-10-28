@@ -283,6 +283,23 @@ class LiveOwnershipSafetyTests(unittest.TestCase):
         self.assertEqual(gateway.active["buy"]["order_no"], "BOUND1")
         self.assertIn("BOUND1", gateway.owned_order_nos)
 
+    def test_old_row_already_in_the_report_is_never_bound_to_a_new_order(self):
+        module, gateway = self.setup_gateway()
+        old = self.row(order_no="OLD1", remaining="0")
+        old["STAT"] = "刪單成功"
+        self.poll(module, gateway, [old])
+        module.NEWORDER = lambda payload: {"Code": "0000"}
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.poll(module, gateway, [old])
+        self.assertIn("buy", gateway.pending)
+        self.poll(module, gateway, [old, self.row(order_no="NEW1")])
+        self.assertEqual(gateway.active["buy"]["order_no"], "NEW1")
+
+    def test_row_with_unreadable_side_never_binds(self):
+        from ttb.orders import find_sent_order
+        row = self.row(order_no="X1", side="?")
+        self.assertEqual(find_sent_order([row], set(), "TXFA7", "sell", 20000, 1), "")
+
     def test_two_new_rows_matching_one_sent_order_latch(self):
         module, gateway = self.setup_gateway()
         module.NEWORDER = lambda payload: {"Code": "0000"}

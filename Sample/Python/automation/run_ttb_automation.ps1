@@ -113,6 +113,7 @@ if (Test-Path -LiteralPath $cleanupScript) {
 # so login never reselects and the API answers 500 forever (10/19, 64 hours).
 $maxLoginFailuresBeforeRestart = 3
 $loginFailures = 0
+$channelFailures = 0
 while (-not (Test-Path -LiteralPath $stopFile)) {
     if (-not (Get-Process -Name TTB -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $TtbExe)) {
         Start-Process -FilePath $TtbExe -WorkingDirectory (Split-Path -Parent $TtbExe)
@@ -124,11 +125,13 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     if ($login -eq 5) {
         # A fresh TTB login re-reads the day's orders from the server, so
         # recovery afterwards sees any order the dead socket never reported.
-        Write-SupervisorLog 'TTB report channel dead; restarting TTB'
+        $channelFailures += 1
+        Write-SupervisorLog "TTB report channel dead ($channelFailures in a row); restarting TTB"
         Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds $(if ($channelFailures -ge 3) { 300 } else { 5 })
         continue
     }
+    $channelFailures = 0
     if ($login -ne 0) {
         $loginFailures += 1
         if ($loginFailures -ge $maxLoginFailuresBeforeRestart) {
@@ -172,6 +175,14 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         if ($gate -eq 3) {
             Write-SupervisorLog 'live gate deferred (market closed or no quote yet); retrying in 60s'
             Start-Sleep -Seconds 60
+            continue
+        }
+        if ($gate -eq 4 -and (Test-AutoRecoveryAllowed)) {
+            # The far probe order may be live but missing from TTB's report.
+            Set-Content -LiteralPath $reconcileFlag -Value (Get-Date -Format o) -Encoding ascii
+            Write-SupervisorLog 'live gate lost the report channel; restarting TTB before auto-recovery'
+            Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
             continue
         }
         if ($gate -ne 0) {
@@ -237,7 +248,10 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
             Write-SupervisorLog 'live virtual-order process will not auto-restart; manual order/position reconciliation required'
             break
         }
-        Write-SupervisorLog 'live bot failed; bounded auto-recovery will reconcile before any relaunch'
+        Write-SupervisorLog 'live bot failed; restarting TTB so auto-recovery reads a freshly restored report'
+        # TTB's own reconnect does not replay orders sent while the report
+        # socket was dead; only a fresh login re-reads the day's orders.
+        Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 15
 }

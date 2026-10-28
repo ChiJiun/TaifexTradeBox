@@ -18,6 +18,10 @@ from .journal import ExecutionJournal
 LOG = logging.getLogger("ttb.orders")
 
 
+class ReportChannelLost(RuntimeError):
+    """A sent order never reached TTB's order report; only a fresh TTB login restores it."""
+
+
 def _recursive_json(value: Any) -> Any:
     current = value
     for _ in range(3):
@@ -68,6 +72,13 @@ def _float(value: Any) -> float:
 def _side(value: Any) -> str:
     text = str(value).strip().lower()
     return "buy" if text in {"1", "b", "buy", "買", "買別", "買進"} else "sell"
+
+
+def _explicit_side(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text in {"1", "b", "buy", "買", "買別", "買進"}:
+        return "buy"
+    return "sell" if text in {"2", "s", "sell", "賣", "賣別", "賣出"} else ""
 
 
 def order_number(row: dict[str, Any]) -> str:
@@ -133,7 +144,7 @@ def find_sent_order(
         order_number(row) for row in rows
         if order_number(row) and order_number(row) not in known
         and order_symbol(row) in ("", target)
-        and _side(_value(row, "BS", "Side", "ComdBS1")) == side
+        and _explicit_side(_value(row, "BS", "Side", "ComdBS1")) == side
         and abs(_float(_value(row, "ORDR_PRCE", "Price", default=0)) - price) < 1e-6
         and int(_float(_value(row, "VOLM", "OrderQty", default=0))) == quantity
     }
@@ -451,7 +462,7 @@ class TTBOrderGateway:
         if any(time.monotonic() - pending["created_at"] > 10 for pending in self.pending.values()):
             # TTB's report socket can die silently; a restart re-reads the
             # day's orders from the server before recovery cancels them.
-            raise RuntimeError("Sent order never appeared in the TTB order report; report channel presumed lost")
+            raise ReportChannelLost("Sent order never appeared in the TTB order report; report channel presumed lost")
         desired = {intent.side: intent for intent in intents if intent.quantity > 0}
         # Wait for every obsolete order's terminal report before sending a
         # replacement.  This prevents duplicate working orders after latency.
@@ -515,8 +526,9 @@ class TTBOrderGateway:
             time_in_force="2" if intent.role == "risk_exit" else "1",
             position_effect=effect,
         )
+        known = self._report_snapshot()
         response = self.api.new_order(request)
-        self._track_sent(intent, effect, extract_order_no(response))
+        self._track_sent(intent, effect, extract_order_no(response), known)
         LOG.info(
             "TTB NEW %s qty=%s price=%s role=%s response=%s",
             intent.side,
@@ -526,11 +538,18 @@ class TTBOrderGateway:
             response,
         )
 
-    def _track_sent(self, intent: OrderIntent, effect: str, order_no: str) -> None:
+    def _report_snapshot(self) -> set[str]:
+        # Every OrdNo already in the report before NEWORDER can never be the
+        # new order, even a same-price row that arrived after the last poll.
+        return {order_number(row) for row in _response_rows(self.api.query_orders())}
+
+    def _track_sent(self, intent: OrderIntent, effect: str, order_no: str, known: set[str]) -> None:
         if order_no:
             self._own(intent, effect, order_no, "response")
         else:
-            self.pending[intent.side] = {"intent": intent, "effect": effect, "created_at": time.monotonic()}
+            self.pending[intent.side] = {
+                "intent": intent, "effect": effect, "known": known, "created_at": time.monotonic(),
+            }
 
     def _own(self, intent: OrderIntent, effect: str, order_no: str, source: str) -> None:
         self.record_event("order_ack", {
@@ -543,14 +562,13 @@ class TTBOrderGateway:
         }
 
     def _bind_sent_orders(self, rows: list[dict[str, Any]]) -> None:
-        known = self.owned_order_nos | self.preexisting_order_nos
         for side, sent in list(self.pending.items()):
             intent = sent["intent"]
+            known = sent["known"] | self.owned_order_nos
             order_no = find_sent_order(rows, known, self.config.symbol, side, intent.price, intent.quantity)
             if order_no:
                 del self.pending[side]
                 self._own(intent, sent["effect"], order_no, "report")
-                known.add(order_no)
 
     def _cancel(self, side: str, current: dict[str, Any]) -> None:
         order_no = current["order_no"]
@@ -628,6 +646,7 @@ class TTBOrderGateway:
                     "side": side, "quantity": abs(self.reported_position),
                     "role": "shutdown_flatten", "price": price,
                 })
+                known = self._report_snapshot()
                 response = self.api.new_order(
                     TTBOrderRequest(
                         symbol=self.config.symbol,
@@ -640,7 +659,7 @@ class TTBOrderGateway:
                 )
                 self._track_sent(
                     OrderIntent(side, price, abs(self.reported_position), "risk_exit", "shutdown flatten"),
-                    "Y", extract_order_no(response),
+                    "Y", extract_order_no(response), known,
                 )
                 flatten_sent = True
                 LOG.warning("shutdown flatten sent side=%s qty=%s price=%s", side, abs(self.reported_position), price)
@@ -665,9 +684,11 @@ class TTBOrderGateway:
             if not is_success_response(orders_response) or not is_success_response(position_response):
                 time.sleep(self.poll_seconds)
                 continue
+            rows = _response_rows(orders_response)
+            self._bind_sent_orders(rows)
             working = [
                 order_number(row)
-                for row in _response_rows(orders_response)
+                for row in rows
                 if (not order_symbol(row) or order_symbol(row) == self.config.symbol.upper())
                 and is_working_order(row)
             ]

@@ -517,6 +517,22 @@ class LiveGateTests(unittest.TestCase):
         self.assertEqual((code, report["status"]), (2, "failed"))
 
 
+    def test_lost_report_channel_retries_after_a_ttb_restart_instead_of_failing_the_day(self):
+        from ttb.orders import ReportChannelLost
+
+        def lost(symbol):
+            raise ReportChannelLost("probe order never appeared in the TTB order report")
+        code, report = self.run_gate(lost, (2026, 10, 19, 9, 0))
+        self.assertEqual((code, report["status"]), (4, "channel_lost"))
+        code, _ = self.run_gate(lambda s: 0, (2026, 10, 19, 9, 5))
+        self.assertEqual(code, 0)
+
+    def test_failed_bot_restarts_ttb_before_auto_recovery(self):
+        supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
+        after_bot = supervisor[supervisor.index("bot exited code="):]
+        self.assertLess(after_bot.index("Stop-Process -Name TTB"), after_bot.index("Start-Sleep -Seconds 15"))
+        self.assertIn("$gate -eq 4", supervisor)
+
 class CompetitionConfigTests(unittest.TestCase):
     def test_competition_example_passes_live_gates(self):
         config = json.loads((HERE / "automation" / "config.competition.example.json").read_text(encoding="utf-8"))

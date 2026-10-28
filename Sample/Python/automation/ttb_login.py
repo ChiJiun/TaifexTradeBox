@@ -301,13 +301,13 @@ class TtbWindow:
             raise LoginError(f"TTB equity tab {EQUITY_TAB_ID} not found")
         tab.select()
         try:
-            self.press(EQUITY_REFRESH_ID)
-            time.sleep(1.0)
             grid = self.control(EQUITY_GRID_ID, control_type="DataGrid")
-            return bool(wait_for(
-                lambda: any(row.element_info.name.startswith("Row") for row in grid.descendants()),
-                timeout,
-            ))
+            rows = lambda: sum(row.element_info.name.startswith("Row") for row in grid.descendants())
+            self.press(EQUITY_REFRESH_ID)
+            # Old rows still on screen would read as an answer; wait for the clear first.
+            if not wait_for(lambda: rows() == 0, 5.0, 0.2):
+                return False
+            return bool(wait_for(rows, timeout))
         finally:
             self._back_to_messages()
 

@@ -14,6 +14,7 @@ from .orders import (
     _float,
     _response_rows,
     _value,
+    ReportChannelLost,
     find_sent_order,
     is_terminal_order,
     order_number,
@@ -162,10 +163,7 @@ class OrderProbe:
             if order_no:
                 return order_no
             time.sleep(self.poll_seconds)
-        raise RuntimeError(
-            "probe order never appeared in the TTB order report; report channel presumed lost "
-            "(restart TTB; auto-recovery cancels it once the report is restored)"
-        )
+        raise ReportChannelLost("probe order never appeared in the TTB order report; report channel presumed lost")
 
 
 def write_probe_result(path: Path, result: OrderProbeResult) -> None:
