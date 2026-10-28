@@ -322,6 +322,11 @@ class LiveOwnershipSafetyTests(unittest.TestCase):
         gateway.pending["buy"]["created_at"] -= 11
         with self.assertRaisesRegex(RuntimeError, "report channel presumed lost"):
             gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        sent = []
+        module.NEWORDER = lambda payload: sent.append(payload) or {"Code": "0000"}
+        # The unseen order may still be live: a shutdown flatten must not trade around it.
+        self.assertFalse(gateway.emergency_flatten(quote(), timeout_seconds=0.01))
+        self.assertEqual(sent, [])
 
     def test_known_bot_order_can_be_polled_normally(self):
         module, gateway = self.setup_gateway()

@@ -58,7 +58,7 @@ py -3.13 sim_hft_bot.py --symbol <ACTIVE_SYMBOL> --mode shadow `
 
 異常退出、網路中斷或重啟後，必須先在 TTB 檢查實際掛單與部位，再重啟程式。不可把此程式視為保證斷線平倉的無人值守系統。
 
-**委託所有權防護（#11）**：TTB gateway 會拒絕執行期間新出現、且沒有被 bot 以委託編號識別的 working/filled order（包含手動委託）。即使該委託的方向、價格和數量剛好符合 pending intent，也**不能**據此當成 bot 自己的單。若 `NEWORDER` 成功但沒有回傳可驗證的委託編號，bot 同樣會停機，將 pending 狀態交由人工確認。此限制可能使目前的 TTB API 無法直接無人值守下單；須完成真實回覆格式驗證後再設計安全的 ID correlation，不應直接移除防護。錯誤時健康狀態會包含 `active_orders.unknown_orders` 和 `active_orders.unsafe_reason`。
+**委託所有權防護（#11）**：TTB gateway 會拒絕執行期間新出現、且不屬於 bot 的 working/filled order（包含手動委託）。TTB 2026.07.08 的 `NEWORDER` 回覆一律不含委託編號，所以 bot 在送單前記下回報中已有的單號，送單後只把**快照之外唯一一筆**方向、價格、口數相符的新列認作自己的單（這只在帳戶限 bot 專用時成立）；相符的新列超過一筆、或 10 秒內沒出現，bot 就鎖定並停機，交由 supervisor 重啟 TTB 與 auto-recovery。錯誤時健康狀態會包含 `active_orders.unknown_orders` 和 `active_orders.unsafe_reason`。
 
 ## 重要安全修正與商品參數
 

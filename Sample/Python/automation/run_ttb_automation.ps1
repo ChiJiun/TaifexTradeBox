@@ -114,6 +114,10 @@ if (Test-Path -LiteralPath $cleanupScript) {
 $maxLoginFailuresBeforeRestart = 3
 $loginFailures = 0
 $channelFailures = 0
+# Each restart below may leave one order the dead report never showed; stop
+# after a few so a TTB that never restores its report cannot loop all day.
+$maxRecoveryRestarts = 4
+$recoveryRestarts = 0
 while (-not (Test-Path -LiteralPath $stopFile)) {
     if (-not (Get-Process -Name TTB -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $TtbExe)) {
         Start-Process -FilePath $TtbExe -WorkingDirectory (Split-Path -Parent $TtbExe)
@@ -152,6 +156,10 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         continue
     }
     if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
+        if ($recoveryRestarts -gt $maxRecoveryRestarts) {
+            Write-SupervisorLog "refusing further live launches: $recoveryRestarts TTB restarts after lost reports; manual reconciliation required"
+            break
+        }
         if (-not (Test-AutoRecoveryAllowed)) {
             Write-SupervisorLog 'refusing further live launches: manual reconciliation flag exists'
             break
@@ -181,6 +189,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
             # The far probe order may be live but missing from TTB's report.
             Set-Content -LiteralPath $reconcileFlag -Value (Get-Date -Format o) -Encoding ascii
             Write-SupervisorLog 'live gate lost the report channel; restarting TTB before auto-recovery'
+            $recoveryRestarts += 1
             Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 5
             continue
@@ -251,6 +260,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         Write-SupervisorLog 'live bot failed; restarting TTB so auto-recovery reads a freshly restored report'
         # TTB's own reconnect does not replay orders sent while the report
         # socket was dead; only a fresh login re-reads the day's orders.
+        $recoveryRestarts += 1
         Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 15

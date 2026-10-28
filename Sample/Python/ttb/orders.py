@@ -461,8 +461,11 @@ class TTBOrderGateway:
             return
         if any(time.monotonic() - pending["created_at"] > 10 for pending in self.pending.values()):
             # TTB's report socket can die silently; a restart re-reads the
-            # day's orders from the server before recovery cancels them.
-            raise ReportChannelLost("Sent order never appeared in the TTB order report; report channel presumed lost")
+            # day's orders from the server before recovery cancels them. Latch
+            # so a shutdown flatten never trades around the unknown order.
+            reason = "Sent order never appeared in the TTB order report; report channel presumed lost"
+            self.unsafe_reason = self.unsafe_reason or reason
+            raise ReportChannelLost(reason)
         desired = {intent.side: intent for intent in intents if intent.quantity > 0}
         # Wait for every obsolete order's terminal report before sending a
         # replacement.  This prevents duplicate working orders after latency.
@@ -602,7 +605,7 @@ class TTBOrderGateway:
         are cancelled first; a new opposite-side IOC order is only sent after
         the order report confirms no working order remains for the symbol.
         """
-        if not self.bootstrapped or not quote.is_valid() or self.unsafe_reason:
+        if not self.bootstrapped or not quote.is_valid() or self.unsafe_reason or self.pending:
             return False
         self.cancel_all()
         deadline = time.monotonic() + max(2.0, timeout_seconds)
@@ -686,6 +689,7 @@ class TTBOrderGateway:
                 continue
             rows = _response_rows(orders_response)
             self._bind_sent_orders(rows)
+            self.cancel_all()
             working = [
                 order_number(row)
                 for row in rows

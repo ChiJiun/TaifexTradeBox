@@ -532,6 +532,7 @@ class LiveGateTests(unittest.TestCase):
         after_bot = supervisor[supervisor.index("bot exited code="):]
         self.assertLess(after_bot.index("Stop-Process -Name TTB"), after_bot.index("Start-Sleep -Seconds 15"))
         self.assertIn("$gate -eq 4", supervisor)
+        self.assertIn("$recoveryRestarts -gt $maxRecoveryRestarts", supervisor)
 
 class CompetitionConfigTests(unittest.TestCase):
     def test_competition_example_passes_live_gates(self):
