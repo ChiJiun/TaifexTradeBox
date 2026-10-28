@@ -69,10 +69,32 @@ class SaferProbeTests(unittest.TestCase):
             OrderProbe(TTBApi(fake), "TXFA7", poll_seconds=0.001).run(quote())
         self.assertEqual(fake.new_calls, 0)
 
-    def test_missing_order_no_never_binds_identical_manual_order_or_cancels(self):
+    def test_probe_without_order_no_cancels_its_report_row(self):
         fake = FakeVirtualApi(ack={"Code": "0000"})
-        with self.assertRaisesRegex(RuntimeError, "without a verified OrdNo"):
-            OrderProbe(TTBApi(fake), "TXFA7", poll_seconds=0.001).run(quote())
+
+        def new_order(payload):
+            fake.new_calls += 1
+            fake.orders.append({
+                "ORDNO": "Dm1", "COMD_ID": "TXFA7", "BS": "買別", "ORDR_PRCE": payload["Price"],
+                "VOLM": "1", "LESS_VOLM": "1", "DEAL_TOTL": "0", "STAT": "委託成功",
+            })
+            return {"Code": "0000"}
+
+        def cancel(payload):
+            fake.cancel_calls.append(payload)
+            fake.orders[0].update(LESS_VOLM="0", STAT="刪單成功")
+            return {"Code": "0000"}
+
+        fake.NEWORDER, fake.CANCELORDER = new_order, cancel
+        result = OrderProbe(TTBApi(fake), "TXFA7", poll_seconds=0.001).run(quote())
+        self.assertEqual(result.order_no, "Dm1")
+        self.assertEqual(fake.cancel_calls, [{"OrdNo": "Dm1"}])
+        self.assertTrue(result.cancel_confirmed)
+
+    def test_probe_order_missing_from_report_never_cancels_a_guess(self):
+        fake = FakeVirtualApi(ack={"Code": "0000"})
+        with self.assertRaisesRegex(RuntimeError, "report channel presumed lost"):
+            OrderProbe(TTBApi(fake), "TXFA7", poll_seconds=0.001, ack_timeout=0.05).run(quote())
         self.assertEqual(fake.new_calls, 1)
         self.assertEqual(fake.cancel_calls, [])
 

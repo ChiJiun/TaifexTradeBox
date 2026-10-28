@@ -270,9 +270,11 @@ py -3.13 ttb_order_probe.py `
 
 1. 若 Supervisor 的停機／待對帳旗標存在則拒絕探測。
 2. 對全帳戶**所有商品**連續做兩次持倉及掛單檢查；有部位、掛單、資料不完整或 API 錯誤時，**零送單**。
-3. 遠價送出 1 口 `NEWORDER` 後，**只能使用 API 回覆中可信任的 `OrdNo` 撤單**。缺號不會從方向、價格、口數推斷單號或撤銷不明委託，必須人工對帳。
+3. 遠價送出 1 口 `NEWORDER`。TTB 2026.07.08 的 `NEWORDER` 回覆**不含 `OrdNo`**，單號只會出現在委託回報。因為競賽帳戶限 bot 專用（`autoRecovery.exclusiveBotAccount=true`），探測與 live gateway 都改為：送單前記下回報中已有的單號，送單後找出**唯一一筆**商品、方向、價格、口數相符的新回報列並綁定其單號。相符的新列超過一筆就停止並要求對帳；10 秒內沒出現就視為 TTB 回報通道失效（見下方說明），不撤任何猜測的單。
 4. 取得 `OrdNo` 才嘗試 `CANCELORDER`，等待終態，再重複查詢全帳戶持倉／工作中委託。此持倉 endpoint 是 `QUERYRESTOREFILLREPORT`，**不是歷史逐筆成交明細**。
 5. 僅成功完成探測時輸出 `output/order-probes/order-probe-*.json`；若出現 API 例外或未知委託狀態，請查看 TTB GUI，不能憑程式退出碼假設單已撤銷。
+
+TTB 的委託回報只經由 oms WebSocket 送達，這條通道可能在登入後就靜默失效（2026-10-28 實測：送出的單在交易所有效，TTB 回報明細卻是空的）。live 模式的 `ttb_login.py --require-report-channel` 會在登入後按「權益數 → 刷新」，15 秒內表格沒有回填就以 exit 5 結束，Supervisor 隨即重啟 TTB。TTB 全新登入時會向伺服器重抓當日全部委託，所以重啟後 auto-recovery 看得到通道失效期間送出的單並撤銷。
 
 遠價不保證零成交，也不能排除 API 回報延遲或撤單與成交競態。實際 TTB 回覆資料尚未驗證，**Issue #2 不會因此關閉**。
 

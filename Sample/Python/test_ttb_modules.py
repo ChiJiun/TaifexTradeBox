@@ -270,25 +270,41 @@ class LiveOwnershipSafetyTests(unittest.TestCase):
         self.assertFalse(any(name == "new" for name, _ in module.calls))
         self.assertFalse(any(name == "cancel" for name, _ in module.calls))
 
-    def test_identical_manual_order_cannot_bind_to_pending_intent(self):
-        module, gateway = self.setup_gateway()
-        gateway.pending["buy"] = {
-            "intent": OrderIntent("buy", 20000, 1, "entry", "test"),
-            "created_at": 1.0,
-        }
-        with self.assertRaisesRegex(RuntimeError, "Unowned TTB"):
-            self.poll(module, gateway, [self.row(price="20000")])
-        self.assertNotIn("MANUAL1", gateway.owned_order_nos)
-        self.assertIn("buy", gateway.pending)
-
-    def test_order_accepted_without_id_requires_manual_reconciliation(self):
+    def test_sent_order_binds_to_the_one_new_matching_report_row(self):
+        # TTB 2026.07.08 NEWORDER replies carry no OrdNo; the bot-exclusive
+        # account makes the new report row the order's only possible owner.
         module, gateway = self.setup_gateway()
         module.NEWORDER = lambda payload: {"Code": "0000"}
-        with self.assertRaisesRegex(RuntimeError, "without a verifiable order number"):
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertIn("buy", gateway.pending)
+        self.assertFalse(gateway.snapshot()["unsafe_reason"])
+        self.poll(module, gateway, [self.row(order_no="BOUND1", price="20,000.00")])
+        self.assertEqual(gateway.pending, {})
+        self.assertEqual(gateway.active["buy"]["order_no"], "BOUND1")
+        self.assertIn("BOUND1", gateway.owned_order_nos)
+
+    def test_two_new_rows_matching_one_sent_order_latch(self):
+        module, gateway = self.setup_gateway()
+        module.NEWORDER = lambda payload: {"Code": "0000"}
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        with self.assertRaisesRegex(RuntimeError, "Several new TTB orders"):
+            self.poll(module, gateway, [self.row(order_no="A"), self.row(order_no="B")])
+
+    def test_new_row_that_differs_from_the_sent_order_is_unowned(self):
+        module, gateway = self.setup_gateway()
+        module.NEWORDER = lambda payload: {"Code": "0000"}
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        with self.assertRaisesRegex(RuntimeError, "Unowned TTB"):
+            self.poll(module, gateway, [self.row(price="19999")])
+        self.assertIn("buy", gateway.pending)
+
+    def test_sent_order_missing_from_report_stops_the_bot(self):
+        module, gateway = self.setup_gateway()
+        module.NEWORDER = lambda payload: {"Code": "0000"}
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        gateway.pending["buy"]["created_at"] -= 11
+        with self.assertRaisesRegex(RuntimeError, "report channel presumed lost"):
             gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
-        self.assertTrue(gateway.snapshot()["unsafe_reason"])
-        with self.assertRaises(RuntimeError):
-            gateway.sync((), quote())
 
     def test_known_bot_order_can_be_polled_normally(self):
         module, gateway = self.setup_gateway()

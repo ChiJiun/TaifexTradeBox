@@ -119,6 +119,30 @@ def is_working_order(row: dict[str, Any]) -> bool:
     return bool(order_number(row)) and order_remaining(row) > 0 and not is_terminal_order(row)
 
 
+def find_sent_order(
+    rows: list[dict[str, Any]], known: set[str], symbol: str, side: str, price: float, quantity: int,
+) -> str:
+    """Return the OrdNo of the one new report row matching an order just sent.
+
+    TTB's NEWORDER reply never carries OrdNo; the number only arrives in the
+    order report. Binding by side/price/quantity is sound only because the
+    account is exclusive to this bot, and only while one candidate exists.
+    """
+    target = symbol.split(".")[0].upper()
+    matches = {
+        order_number(row) for row in rows
+        if order_number(row) and order_number(row) not in known
+        and order_symbol(row) in ("", target)
+        and _side(_value(row, "BS", "Side", "ComdBS1")) == side
+        and abs(_float(_value(row, "ORDR_PRCE", "Price", default=0)) - price) < 1e-6
+        and int(_float(_value(row, "VOLM", "OrderQty", default=0))) == quantity
+    }
+    if len(matches) > 1:
+        raise RuntimeError("Several new TTB orders match one sent order; reconcile manually: "
+                           + ", ".join(sorted(matches)))
+    return next(iter(matches), "")
+
+
 def reported_position(response: Any, symbol: str) -> int:
     """Return signed open quantity for symbol from TTB's inventory report."""
     target = symbol.split(".")[0].upper()
@@ -322,9 +346,9 @@ class TTBOrderGateway:
                 len(self.preexisting_order_nos),
             )
             return []
+        self._bind_sent_orders(rows)
         # Check the entire report before applying any fills or permitting a
-        # new strategy decision.  Matching price/side/qty is *not* ownership
-        # proof; an operator can place an otherwise identical manual order.
+        # new strategy decision; rows bound above are owned, the rest are not.
         unknown_orders: set[str] = set()
         working_by_side: dict[str, set[str]] = {"buy": set(), "sell": set()}
         for row in rows:
@@ -425,7 +449,9 @@ class TTBOrderGateway:
         if not self.bootstrapped:
             return
         if any(time.monotonic() - pending["created_at"] > 10 for pending in self.pending.values()):
-            raise RuntimeError("Unresolved order acknowledgement; reconcile manually")
+            # TTB's report socket can die silently; a restart re-reads the
+            # day's orders from the server before recovery cancels them.
+            raise RuntimeError("Sent order never appeared in the TTB order report; report channel presumed lost")
         desired = {intent.side: intent for intent in intents if intent.quantity > 0}
         # Wait for every obsolete order's terminal report before sending a
         # replacement.  This prevents duplicate working orders after latency.
@@ -490,26 +516,7 @@ class TTBOrderGateway:
             position_effect=effect,
         )
         response = self.api.new_order(request)
-        order_no = extract_order_no(response)
-        if order_no:
-            self.record_event("order_ack", {
-                "order_no": order_no, "side": intent.side,
-                "quantity": intent.quantity, "price": intent.price,
-            })
-            self.owned_order_nos.add(order_no)
-            self.active[intent.side] = {
-                "order_no": order_no,
-                "price": intent.price,
-                "qty": intent.quantity,
-                "effect": effect,
-            }
-        else:
-            self.pending[intent.side] = {"intent": intent, "created_at": time.monotonic()}
-            # The order may be live at TTB, but without its ID we cannot
-            # identify it safely or cancel it. Require operator reconciliation.
-            self._latch_unsafe(
-                "TTB accepted an order without a verifiable order number; reconcile manually"
-            )
+        self._track_sent(intent, effect, extract_order_no(response))
         LOG.info(
             "TTB NEW %s qty=%s price=%s role=%s response=%s",
             intent.side,
@@ -518,6 +525,32 @@ class TTBOrderGateway:
             intent.role,
             response,
         )
+
+    def _track_sent(self, intent: OrderIntent, effect: str, order_no: str) -> None:
+        if order_no:
+            self._own(intent, effect, order_no, "response")
+        else:
+            self.pending[intent.side] = {"intent": intent, "effect": effect, "created_at": time.monotonic()}
+
+    def _own(self, intent: OrderIntent, effect: str, order_no: str, source: str) -> None:
+        self.record_event("order_ack", {
+            "order_no": order_no, "side": intent.side, "quantity": intent.quantity,
+            "price": intent.price, "role": intent.role, "source": source,
+        })
+        self.owned_order_nos.add(order_no)
+        self.active[intent.side] = {
+            "order_no": order_no, "price": intent.price, "qty": intent.quantity, "effect": effect,
+        }
+
+    def _bind_sent_orders(self, rows: list[dict[str, Any]]) -> None:
+        known = self.owned_order_nos | self.preexisting_order_nos
+        for side, sent in list(self.pending.items()):
+            intent = sent["intent"]
+            order_no = find_sent_order(rows, known, self.config.symbol, side, intent.price, intent.quantity)
+            if order_no:
+                del self.pending[side]
+                self._own(intent, sent["effect"], order_no, "report")
+                known.add(order_no)
 
     def _cancel(self, side: str, current: dict[str, Any]) -> None:
         order_no = current["order_no"]
@@ -605,24 +638,10 @@ class TTBOrderGateway:
                         position_effect="Y",
                     )
                 )
-                order_no = extract_order_no(response)
-                if order_no:
-                    self.record_event("order_ack", {
-                        "order_no": order_no, "side": side,
-                        "quantity": abs(self.reported_position), "price": price,
-                        "role": "shutdown_flatten",
-                    })
-                    self.owned_order_nos.add(order_no)
-                    self.active[side] = {
-                        "order_no": order_no,
-                        "price": price,
-                        "qty": abs(self.reported_position),
-                    }
-                else:
-                    self.pending[side] = {
-                        "intent": OrderIntent(side, price, abs(self.reported_position), "risk_exit", "shutdown flatten"),
-                        "created_at": time.monotonic(),
-                    }
+                self._track_sent(
+                    OrderIntent(side, price, abs(self.reported_position), "risk_exit", "shutdown flatten"),
+                    "Y", extract_order_no(response),
+                )
                 flatten_sent = True
                 LOG.warning("shutdown flatten sent side=%s qty=%s price=%s", side, abs(self.reported_position), price)
             try:

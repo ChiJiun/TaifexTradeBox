@@ -47,7 +47,7 @@ function Invoke-TtbLogin {
     $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
     # Live orders must never run while TTB may resend failed orders on its own.
-    if ($config.mode -eq 'ttb') { $loginArgs += '--require-auto-resubmit-off' }
+    if ($config.mode -eq 'ttb') { $loginArgs += @('--require-auto-resubmit-off', '--require-report-channel') }
     return Invoke-PythonTool 'ttb_login' $loginArgs
 }
 
@@ -120,7 +120,16 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         Start-Sleep -Seconds 10
     }
     # TTB opens its local API ports only after login, so log in first.
-    if ((Invoke-TtbLogin) -ne 0) {
+    $login = Invoke-TtbLogin
+    if ($login -eq 5) {
+        # A fresh TTB login re-reads the day's orders from the server, so
+        # recovery afterwards sees any order the dead socket never reported.
+        Write-SupervisorLog 'TTB report channel dead; restarting TTB'
+        Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+        continue
+    }
+    if ($login -ne 0) {
         $loginFailures += 1
         if ($loginFailures -ge $maxLoginFailuresBeforeRestart) {
             Write-SupervisorLog "TTB login failed $loginFailures times in a row; restarting TTB"
