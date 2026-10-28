@@ -42,8 +42,8 @@ function Invoke-TtbLogin {
     if (-not $config.autoLogin) { return 0 }
     $ErrorActionPreference = 'Continue'
     $loginArgs = @('-m', 'automation.ttb_login', '--config', $ConfigPath, '--ttb-exe', $TtbExe)
-    # TTB only publishes ticks for symbols in its quote-settings tab; report
-    # (read-only) whether the resolved contract is subscribed.
+    # TTB only publishes ticks for symbols in its quote-settings tab and drops
+    # saved ones it cannot quote at login; re-add the resolved contract.
     $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
     # Live orders must never run while TTB may resend failed orders on its own.
