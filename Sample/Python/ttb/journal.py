@@ -34,11 +34,12 @@ class ExecutionJournal:
         self.directory.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._cache: dict[str, list[dict[str, Any]]] = {}
-        # Validate every retained partition on startup, not just today.
-        for path in [] if not validate_all else sorted(self.directory.glob(f"events-{self.symbol}-*.jsonl")):
-            day = path.stem.rsplit("-", 3)[-3:]
-            date_text = "-".join(day)
-            self._read(date_text)
+        if validate_all:
+            # Validate every retained partition on startup, not just today.
+            for path in sorted(self.directory.glob(f"events-{self.symbol}-*.jsonl")):
+                day = path.stem.rsplit("-", 3)[-3:]
+                date_text = "-".join(day)
+                self._read(date_text)
 
     def _path(self, trading_day: str) -> Path:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", trading_day):

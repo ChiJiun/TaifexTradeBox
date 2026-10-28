@@ -135,7 +135,7 @@ py -3.13 ttb_readonly_capture.py
 
 **啟用 live 的硬性前提**：此競賽帳戶**只給 bot 交易**（`exclusiveBotAccount: true`，自動恢復會撤銷所有委託並平掉所有期貨部位）；`set_mode.ps1` 檢查的認證、競賽名稱、API 登入、TWD 可用保證金 > 0、無對帳旗標缺一不可。`--max-notional`／`--min-available-margin` 預設只允許 1 口 TMF，依競賽資金調整。
 
-**策略**：競賽設定使用 `strategies.combined:CombinedCompetitionMaker`（01＋03＋04）。04 的每日停損／停利以 `extraArgs` 中 `--strategy-params-json` 的 `previous_day_equity` 為基準（預設 2,000,000，取自 2026-10-28 TTB 權益數），權益明顯變動時請手動更新；未設定時 04 會拒絕所有新進場。每日成交另同步到 `output	rades.sqlite3`（見 README）。
+**策略**：競賽設定使用 `strategies.combined:CombinedCompetitionMaker`（01＋03＋04）。04 的每日停損／停利以 `extraArgs` 中 `--strategy-params-json` 的 `previous_day_equity` 為基準（預設 2,000,000，取自 2026-10-28 TTB 權益數），權益明顯變動時請手動更新；未設定時 04 會拒絕所有新進場。每日成交另同步到 `output\trades.sqlite3`（見 README）。
 
 **風險提醒**：自動化只保證「機器會自己跑」，不保證策略獲利；先以 shadow 的決策與模擬損益判斷是否上真單及口數。
 

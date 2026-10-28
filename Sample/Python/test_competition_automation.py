@@ -547,6 +547,29 @@ class CompetitionConfigTests(unittest.TestCase):
         self.assertIn("'Asia/Taipei'", script)
         self.assertNotIn("stop.requested", script)
 
+    def test_supervisor_passes_strategy_json_to_the_bot_intact(self):
+        # PS 5.1 Start-Process drops quotes; run the supervisor's own quoting line.
+        import shutil
+        import subprocess
+        import sys
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            self.skipTest("Windows PowerShell not available")
+        supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
+        line = next(x.strip() for x in supervisor.splitlines() if x.strip().startswith("$pythonArgs = "))
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "argv.py"
+            script.write_text("import sys, json; print(json.dumps(sys.argv[1:]))", encoding="ascii")
+            wanted = [str(script), "--strategy-params-json", '{"previous_day_equity": 2000000}', "--base-qty", "1"]
+            botargs = ", ".join("'" + arg.replace("'", "''") + "'" for arg in wanted)
+            command = (f"$botArgs = @({botargs}); {line}; "
+                       f"$pythonArgs = $pythonArgs -replace '^-3.13 ', ''; "
+                       f"$p = Start-Process -FilePath '{sys.executable}' -ArgumentList $pythonArgs "
+                       f"-RedirectStandardOutput '{tmp}\out.txt' -NoNewWindow -PassThru -Wait")
+            subprocess.run([powershell, "-NoProfile", "-Command", command], check=True, timeout=60)
+            got = json.loads((Path(tmp) / "out.txt").read_text(encoding="utf-8"))
+        self.assertEqual(got, wanted[1:])
+
     def test_cli_help_survives_a_non_utf8_console(self):
         # validate_release.ps1 runs --help on a Windows runner whose console is cp1252.
         import os
