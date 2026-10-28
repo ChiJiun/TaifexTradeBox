@@ -25,6 +25,9 @@ class FakeModule:
     def QUERYMARGIN(self):
         return {"Code": "0000", "Data": [{"Available": "10000000"}]}
 
+    def QUERYRESTOREREPORT(self):
+        return {"Code": "0000", "Data": []}
+
     def NEWORDER(self, payload):
         self.payloads.append(payload)
         return {"Code": "0000", "OrdNo": f"A{len(self.payloads)}"}

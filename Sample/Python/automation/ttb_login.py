@@ -46,6 +46,11 @@ APPLY_SETTINGS_ID = "btnApply"
 # orders the bot never acknowledged; the bot's ownership checks require it off.
 AUTO_RESUBMIT_ID = "chkAutoPut"
 AUTO_RECONNECT_ID = "chkReconnect"
+# Order reports arrive only over TTB's report socket, which can be dead right
+# after login; 權益數 刷新 clears the grid and waits for the server's answer.
+EQUITY_TAB_ID = "tabPage5"
+EQUITY_REFRESH_ID = "btnRefreshEquity"
+EQUITY_GRID_ID = "dvEquity"
 
 # Win32 messages used instead of blocking UI Automation calls.
 BM_CLICK = 0x00F5
@@ -57,6 +62,10 @@ CBN_SELCHANGE = 1
 
 class LoginError(RuntimeError):
     """Login could not be completed or verified."""
+
+
+class ReportChannelDead(LoginError):
+    """TTB is logged in but its order-report socket does not answer; restart TTB."""
 
 
 @dataclass(frozen=True)
@@ -286,6 +295,22 @@ class TtbWindow:
             self._back_to_messages()
         return changes
 
+    def report_channel_alive(self, timeout: float = 15.0) -> bool:
+        tab = self.control(EQUITY_TAB_ID, control_type="TabItem")
+        if not tab.exists(timeout=2):
+            raise LoginError(f"TTB equity tab {EQUITY_TAB_ID} not found")
+        tab.select()
+        try:
+            grid = self.control(EQUITY_GRID_ID, control_type="DataGrid")
+            rows = lambda: sum(row.element_info.name.startswith("Row") for row in grid.descendants())
+            self.press(EQUITY_REFRESH_ID)
+            # Old rows still on screen would read as an answer; wait for the clear first.
+            if not wait_for(lambda: rows() == 0, 5.0, 0.2):
+                return False
+            return bool(wait_for(rows, timeout))
+        finally:
+            self._back_to_messages()
+
     def fill_login(self, credential: Credential) -> None:
         self.control(ACCOUNT_ID).set_edit_text(credential.user)
         password = self.control(PASSWORD_ID)
@@ -391,20 +416,24 @@ def ensure_logged_in(
     submit: bool = True,
     quote_symbols: tuple[str, ...] = (),
     require_auto_resubmit_off: bool = False,
+    require_report_channel: bool = False,
 ) -> dict[str, Any]:
     first = probe()
     if first.logged_in:
         result = {"ok": True, "action": "already_logged_in", "session": first.as_dict()}
-        if require_auto_resubmit_off:
+        if require_auto_resubmit_off or require_report_channel:
             # Live orders: never trust a session someone else logged in (and
             # possibly left 失敗自動重送 on); GUI errors fail closed.
             try:
                 window = window_factory()
             except Exception as exc:
-                raise LoginError(f"cannot open TTB GUI to confirm {AUTO_RESUBMIT_ID} is off: "
+                raise LoginError(f"cannot open TTB GUI to confirm live settings: "
                                  f"{type(exc).__name__}: {exc}") from exc
-            result["steps"] = _confirm_auto_resubmit_off(window)
+            if require_auto_resubmit_off:
+                result["steps"] = _confirm_auto_resubmit_off(window)
             result["quotes"] = _subscribe_all(window, quote_symbols)
+            if require_report_channel:
+                _require_report_channel(window)
             return result
         if quote_symbols:
             try:
@@ -448,6 +477,8 @@ def ensure_logged_in(
     if require_auto_resubmit_off:
         # The pre-login step is skipped when the GUI already showed 登出.
         actions.extend(_confirm_auto_resubmit_off(window))
+    if require_report_channel:
+        _require_report_channel(window)
     return {
         "ok": True, "action": "logged_in", "competition": target,
         "steps": actions, "session": verified.as_dict(),
@@ -466,6 +497,11 @@ def _confirm_auto_resubmit_off(window: Any) -> list[str]:
     if state != "off":
         raise LoginError(f"{AUTO_RESUBMIT_ID} still {state} after enforcing settings; refusing live trading")
     return steps
+
+
+def _require_report_channel(window: Any) -> None:
+    if not window.report_channel_alive():
+        raise ReportChannelDead("TTB report channel did not answer an equity refresh; restart TTB")
 
 
 def _subscribe_all(window: Any, symbols: tuple[str, ...]) -> dict[str, str]:
@@ -503,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="contract code that must be in the TTB quote-settings grid (dvQuote); checked read-only and reported (repeatable)")
     parser.add_argument("--require-auto-resubmit-off", action="store_true",
                         help="fail unless TTB auto-resubmit (chkAutoPut) reads off, even when already logged in (live mode)")
+    parser.add_argument("--require-report-channel", action="store_true",
+                        help="exit 5 unless an equity refresh comes back over TTB's report socket (live mode)")
     args = parser.parse_args(argv)
 
     competition = args.competition if args.competition is not None else _config_value(args.config, "ttbCompetition")
@@ -525,9 +563,13 @@ def main(argv: list[str] | None = None) -> int:
             submit=not args.no_submit,
             quote_symbols=tuple(symbol.upper() for symbol in args.subscribe if symbol.strip()),
             require_auto_resubmit_off=args.require_auto_resubmit_off,
+            require_report_channel=args.require_report_channel,
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result["ok"] else 4
+    except ReportChannelDead as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 5
     except LoginError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

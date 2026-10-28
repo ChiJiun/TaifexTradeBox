@@ -47,7 +47,7 @@ function Invoke-TtbLogin {
     $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
     # Live orders must never run while TTB may resend failed orders on its own.
-    if ($config.mode -eq 'ttb') { $loginArgs += '--require-auto-resubmit-off' }
+    if ($config.mode -eq 'ttb') { $loginArgs += @('--require-auto-resubmit-off', '--require-report-channel') }
     return Invoke-PythonTool 'ttb_login' $loginArgs
 }
 
@@ -115,6 +115,11 @@ $null = Invoke-PythonTool 'trade_db' @('-m', 'ttb.trade_db')
 # so login never reselects and the API answers 500 forever (10/19, 64 hours).
 $maxLoginFailuresBeforeRestart = 3
 $loginFailures = 0
+$channelFailures = 0
+# Each restart below may leave one order the dead report never showed; stop
+# after a few so a TTB that never restores its report cannot loop all day.
+$maxRecoveryRestarts = 4
+$recoveryRestarts = 0
 while (-not (Test-Path -LiteralPath $stopFile)) {
     if (-not (Get-Process -Name TTB -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $TtbExe)) {
         Start-Process -FilePath $TtbExe -WorkingDirectory (Split-Path -Parent $TtbExe)
@@ -122,7 +127,18 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         Start-Sleep -Seconds 10
     }
     # TTB opens its local API ports only after login, so log in first.
-    if ((Invoke-TtbLogin) -ne 0) {
+    $login = Invoke-TtbLogin
+    if ($login -eq 5) {
+        # A fresh TTB login re-reads the day's orders from the server, so
+        # recovery afterwards sees any order the dead socket never reported.
+        $channelFailures += 1
+        Write-SupervisorLog "TTB report channel dead ($channelFailures in a row); restarting TTB"
+        Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds $(if ($channelFailures -ge 3) { 300 } else { 5 })
+        continue
+    }
+    $channelFailures = 0
+    if ($login -ne 0) {
         $loginFailures += 1
         if ($loginFailures -ge $maxLoginFailuresBeforeRestart) {
             Write-SupervisorLog "TTB login failed $loginFailures times in a row; restarting TTB"
@@ -142,6 +158,10 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         continue
     }
     if ($config.mode -eq 'ttb' -and (Test-Path -LiteralPath $reconcileFlag)) {
+        if ($recoveryRestarts -gt $maxRecoveryRestarts) {
+            Write-SupervisorLog "refusing further live launches: $recoveryRestarts TTB restarts after lost reports; manual reconciliation required"
+            break
+        }
         if (-not (Test-AutoRecoveryAllowed)) {
             Write-SupervisorLog 'refusing further live launches: manual reconciliation flag exists'
             break
@@ -165,6 +185,15 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         if ($gate -eq 3) {
             Write-SupervisorLog 'live gate deferred (market closed or no quote yet); retrying in 60s'
             Start-Sleep -Seconds 60
+            continue
+        }
+        if ($gate -eq 4 -and (Test-AutoRecoveryAllowed)) {
+            # The far probe order may be live but missing from TTB's report.
+            Set-Content -LiteralPath $reconcileFlag -Value (Get-Date -Format o) -Encoding ascii
+            Write-SupervisorLog 'live gate lost the report channel; restarting TTB before auto-recovery'
+            $recoveryRestarts += 1
+            Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
             continue
         }
         if ($gate -ne 0) {
@@ -235,7 +264,11 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
             Write-SupervisorLog 'live virtual-order process will not auto-restart; manual order/position reconciliation required'
             break
         }
-        Write-SupervisorLog 'live bot failed; bounded auto-recovery will reconcile before any relaunch'
+        Write-SupervisorLog 'live bot failed; restarting TTB so auto-recovery reads a freshly restored report'
+        # TTB's own reconnect does not replay orders sent while the report
+        # socket was dead; only a fresh login re-reads the day's orders.
+        $recoveryRestarts += 1
+        Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 15
 }

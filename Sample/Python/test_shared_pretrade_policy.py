@@ -92,6 +92,9 @@ class SharedRiskPolicyTests(unittest.TestCase):
                 self.orders = 0
             def QUERYMARGIN(self):
                 return {"Code": "0000", "Data": [{"Available": "10"}]}
+            def QUERYRESTOREREPORT(self):
+                return {"Code": "0000", "Data": []}
+
             def NEWORDER(self, payload):
                 self.orders += 1
                 return {"Code": "0000", "OrdNo": "A1"}

@@ -14,6 +14,8 @@ from .orders import (
     _float,
     _response_rows,
     _value,
+    ReportChannelLost,
+    find_sent_order,
     is_terminal_order,
     order_number,
 )
@@ -81,6 +83,7 @@ class OrderProbe:
             if inspection.open_positions or inspection.working_orders:
                 raise RuntimeError("TTB account not flat or has working orders; probe refused")
             time.sleep(self.poll_seconds)
+        known = {order_number(row) for row in _response_rows(self.api.query_orders())}
         price = far_limit_price(quote, self.side, self.tick_size, self.distance_ticks)
         result = OrderProbeResult(
             symbol=self.symbol,
@@ -94,14 +97,7 @@ class OrderProbe:
                 TTBOrderRequest(self.symbol, self.side, price, quantity=1, time_in_force="1")
             )
             result.order_accepted = True
-            order_no = extract_order_no(response)
-            if not order_no:
-                # A same-price/side/quantity order found by polling may be
-                # manual/unowned. Never bind or cancel it on a guess.
-                raise RuntimeError(
-                    "order accepted without a verified OrdNo; do not guess or cancel; "
-                    "reconcile all TTB orders and positions manually"
-                )
+            order_no = extract_order_no(response) or self._await_report_row(known, price)
             result.order_no = order_no
             self.api.cancel_order(order_no)
             result.cancel_accepted = True
@@ -157,6 +153,17 @@ class OrderProbe:
                 except Exception:
                     pass
             raise
+
+
+    def _await_report_row(self, known: set[str], price: float) -> str:
+        deadline = time.monotonic() + self.ack_timeout
+        while time.monotonic() < deadline:
+            rows = _response_rows(self.api.query_orders())
+            order_no = find_sent_order(rows, known, self.symbol, self.side, price, 1)
+            if order_no:
+                return order_no
+            time.sleep(self.poll_seconds)
+        raise ReportChannelLost("probe order never appeared in the TTB order report; report channel presumed lost")
 
 
 def write_probe_result(path: Path, result: OrderProbeResult) -> None:

@@ -13,6 +13,7 @@ from auto_recover_ttb import main as auto_recover_main
 from automation.ttb_login import (
     Credential,
     LoginError,
+    ReportChannelDead,
     choose_competition,
     decode_secret,
     ensure_logged_in,
@@ -111,7 +112,8 @@ class SessionProbeTests(unittest.TestCase):
 
 class FakeWindow:
     def __init__(self, items=("115 校內期貨競賽",), logged=False, login_works=True,
-                 auto_resubmit="on", settings_work=True):
+                 auto_resubmit="on", settings_work=True, channel_alive=True):
+        self.channel_alive = channel_alive
         self.items = list(items)
         self.logged = logged
         self.login_works = login_works
@@ -136,6 +138,9 @@ class FakeWindow:
 
     def auto_resubmit_state(self):
         return self.auto_resubmit
+
+    def report_channel_alive(self):
+        return self.channel_alive
 
     def fill_login(self, credential):
         self.filled = credential
@@ -287,6 +292,21 @@ class LoginTests(unittest.TestCase):
                 probe=probe_after(window, "115 校內期貨競賽"), window_factory=lambda: window,
                 login_timeout=0.05, verify_timeout=0.05, require_auto_resubmit_off=True,
             )
+
+    def test_live_login_refuses_a_dead_report_channel(self):
+        from ttb.session import SessionProbe
+        ok = SessionProbe(api_reachable=True, codes={"margin": "0000", "orders": "0000", "positions": "0000"})
+        for alive in (True, False):
+            window = FakeWindow(logged=True, auto_resubmit="off", channel_alive=alive)
+            call = lambda: ensure_logged_in(
+                competition="", credential_target="t", ttb_exe=Path("TTB.exe"), probe=lambda: ok,
+                window_factory=lambda: window, require_auto_resubmit_off=True, require_report_channel=True,
+            )
+            if alive:
+                self.assertTrue(call()["ok"])
+            else:
+                with self.assertRaises(ReportChannelDead):
+                    call()
 
     def test_no_submit_stops_before_login(self):
         window = FakeWindow()
@@ -497,6 +517,23 @@ class LiveGateTests(unittest.TestCase):
         self.assertEqual((code, report["status"]), (2, "failed"))
 
 
+    def test_lost_report_channel_retries_after_a_ttb_restart_instead_of_failing_the_day(self):
+        from ttb.orders import ReportChannelLost
+
+        def lost(symbol):
+            raise ReportChannelLost("probe order never appeared in the TTB order report")
+        code, report = self.run_gate(lost, (2026, 10, 19, 9, 0))
+        self.assertEqual((code, report["status"]), (4, "channel_lost"))
+        code, _ = self.run_gate(lambda s: 0, (2026, 10, 19, 9, 5))
+        self.assertEqual(code, 0)
+
+    def test_failed_bot_restarts_ttb_before_auto_recovery(self):
+        supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
+        after_bot = supervisor[supervisor.index("bot exited code="):]
+        self.assertLess(after_bot.index("Stop-Process -Name TTB"), after_bot.index("Start-Sleep -Seconds 15"))
+        self.assertIn("$gate -eq 4", supervisor)
+        self.assertIn("$recoveryRestarts -gt $maxRecoveryRestarts", supervisor)
+
 class CompetitionConfigTests(unittest.TestCase):
     def test_competition_example_passes_live_gates(self):
         config = json.loads((HERE / "automation" / "config.competition.example.json").read_text(encoding="utf-8"))
@@ -519,13 +556,13 @@ class CompetitionConfigTests(unittest.TestCase):
         self.assertIn("exclusiveBotAccount", supervisor)
         self.assertIn("--confirm-exclusive-bot-account", supervisor)
         # TTB opens its API ports only after login: login must come first.
-        self.assertLess(supervisor.index("(Invoke-TtbLogin) -ne 0"), supervisor.index("Test-LocalPort 8080) -or"))
+        self.assertLess(supervisor.index("$login = Invoke-TtbLogin"), supervisor.index("Test-LocalPort 8080) -or"))
         self.assertIn("'--stop-file', $botStopFile", supervisor)
         self.assertIn("TTB process exited", supervisor)
         # A TTB whose GUI shows the competition but whose API answers 500 never
         # recovers by retrying login; the supervisor must restart TTB.
         self.assertIn("$loginFailures -ge $maxLoginFailuresBeforeRestart", supervisor)
-        self.assertLess(supervisor.index("$loginFailures -ge"), supervisor.index("Stop-Process -Name TTB"))
+        supervisor.index("Stop-Process -Name TTB", supervisor.index("$loginFailures -ge"))
         self.assertIn("$loginFailures = 0", supervisor)
         self.assertIn("automation.live_gate", supervisor)
         self.assertLess(supervisor.index("automation.live_gate"), supervisor.index("launching bot mode="))
@@ -565,10 +602,16 @@ class CompetitionConfigTests(unittest.TestCase):
             command = (f"$botArgs = @({botargs}); {line}; "
                        f"$pythonArgs = $pythonArgs -replace '^-3.13 ', ''; "
                        f"$p = Start-Process -FilePath '{sys.executable}' -ArgumentList $pythonArgs "
-                       f"-RedirectStandardOutput '{tmp}\out.txt' -NoNewWindow -PassThru -Wait")
+                       f"-RedirectStandardOutput '{Path(tmp) / 'out.txt'}' -NoNewWindow -PassThru -Wait")
             subprocess.run([powershell, "-NoProfile", "-Command", command], check=True, timeout=60)
             got = json.loads((Path(tmp) / "out.txt").read_text(encoding="utf-8"))
         self.assertEqual(got, wanted[1:])
+
+    def test_live_supervisor_restarts_ttb_when_the_report_channel_is_dead(self):
+        supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
+        self.assertIn("'--require-report-channel'", supervisor)
+        restart = supervisor[supervisor.index("$login -eq 5"):]
+        self.assertLess(restart.index("Stop-Process -Name TTB"), restart.index("continue"))
 
     def test_cli_help_survives_a_non_utf8_console(self):
         # validate_release.ps1 runs --help on a Windows runner whose console is cp1252.
