@@ -7,7 +7,7 @@ from monte_carlo_market_maker import synthetic_quotes
 from replay_market_maker import replay
 from sim_hft_bot import build_config, build_strategy, parse_args
 from strategy_core import PositionLedger, Quote, StrategyConfig
-from strategies import CompetitionPnlShaping, OrderFlowGatedMaker, StickyOneTickMaker
+from strategies import CombinedCompetitionMaker, CompetitionPnlShaping, OrderFlowGatedMaker, StickyOneTickMaker
 from ttb.risk import PreTradeLimits, PreTradeRiskError, validate_exposure
 
 
@@ -38,6 +38,8 @@ class ExecutableStrategyModuleTests(unittest.TestCase):
              {"entry_threshold": 0.25, "short_window": 2, "long_window": 3}),
             ("strategies.competition_pnl:CompetitionPnlShaping", CompetitionPnlShaping,
              {"previous_day_equity": 200000, "daily_profit_fraction": 0.001}),
+            ("strategies.combined:CombinedCompetitionMaker", CombinedCompetitionMaker,
+             {"previous_day_equity": 200000, "entry_threshold": 0.25, "short_window": 2, "long_window": 3}),
         ):
             with self.subTest(spec=spec):
                 args = parse_args(["--symbol", "TXFA7", "--strategy-module", spec,
@@ -119,6 +121,20 @@ class ExecutableStrategyModuleTests(unittest.TestCase):
         self.assertEqual(len(decision.intents), 1)
         self.assertEqual(decision.intents[0].role, "risk_exit")
         self.assertEqual(decision.intents[0].side, "sell")
+
+    def test_combined_applies_flow_gate_and_daily_equity_limits(self):
+        config = cfg()
+        ledger = PositionLedger(config)
+        strat = CombinedCompetitionMaker(config, ledger, previous_day_equity=1000,
+                                         daily_profit_fraction=0.1,
+                                         entry_threshold=0.15, short_window=2, long_window=3)
+        for t in (1, 2):
+            strat.decide(quote(t, bid_qty=9, ask_qty=1, last=101))
+        result = strat.decide(quote(3, bid_qty=9, ask_qty=1, last=101))
+        self.assertEqual({i.side for i in result.intents if i.role == "entry"}, {"buy"})
+        ledger.realized_pnl = 150
+        self.assertEqual(strat.decide(quote(4)).intents, ())
+        self.assertEqual(strat.halt_reason, "daily_profit_target")
 
     def test_deterministic_replay_all_three_executable_modules(self):
         rows = synthetic_quotes(90, "TXFA7", seed=19)

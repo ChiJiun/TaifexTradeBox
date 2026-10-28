@@ -276,6 +276,10 @@ py -3.13 ttb_order_probe.py `
 
 遠價不保證零成交，也不能排除 API 回報延遲或撤單與成交競態。實際 TTB 回覆資料尚未驗證，**Issue #2 不會因此關閉**。
 
+## 本地成交資料庫
+
+`py -3.13 -m ttb.trade_db` 會把 `output/journal/events-*.jsonl`（hash chain 執行日誌，仍是唯一權威紀錄）同步到 `output/trades.sqlite3`，可查 `events` 表與 `fills`、`orders` 兩個 view。重複執行不會重複寫入；Supervisor 在啟動時與每次 bot 結束後各跑一次，失敗只記 log，不影響交易。
+
 ## Azure 常駐執行
 
 先建立不提交到 Git 的實際設定：

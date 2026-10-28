@@ -109,6 +109,8 @@ if (Test-Path -LiteralPath $cleanupScript) {
     }
 }
 
+$null = Invoke-PythonTool 'trade_db' @('-m', 'ttb.trade_db')
+
 # After TTB's server drops the competition selection, the GUI still shows it,
 # so login never reselects and the API answers 500 forever (10/19, 64 hours).
 $maxLoginFailuresBeforeRestart = 3
@@ -222,6 +224,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     }
     $exitCode = $child.ExitCode
     Write-SupervisorLog "bot exited code=$exitCode"
+    $null = Invoke-PythonTool 'trade_db' @('-m', 'ttb.trade_db')
     if ($config.mode -eq 'ttb' -and $exitCode -ne 0) {
         Set-Content -LiteralPath $reconcileFlag -Value (Get-Date -Format o) -Encoding ascii
         if (-not (Test-AutoRecoveryAllowed)) {
