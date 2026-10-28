@@ -2,7 +2,7 @@
   "symbol": "auto:TMF",
   "mode": "ttb",
   "strategy": "market-maker",
-  "strategyModule": "",
+  "strategyModule": "strategies.combined:CombinedCompetitionMaker",
   "confirmVirtualOrders": true,
   "confirmFlatAccount": true,
   "flattenOnShutdown": true,
@@ -36,7 +36,9 @@
     "50000",
     "--available-margin-currency",
     "TWD",
-    "--disable-after-hours"
+    "--disable-after-hours",
+    "--strategy-params-json",
+    "{\"previous_day_equity\": 2000000}"
   ],
   "liveGate": {
     "probeBeforeFirstLive": true

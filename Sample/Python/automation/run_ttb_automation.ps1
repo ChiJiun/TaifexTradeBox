@@ -109,6 +109,8 @@ if (Test-Path -LiteralPath $cleanupScript) {
     }
 }
 
+$null = Invoke-PythonTool 'trade_db' @('-m', 'ttb.trade_db')
+
 # After TTB's server drops the competition selection, the GUI still shows it,
 # so login never reselects and the API answers 500 forever (10/19, 64 hours).
 $maxLoginFailuresBeforeRestart = 3
@@ -227,7 +229,11 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     Write-SupervisorLog "launching bot mode=$($config.mode) strategy=$strategyName"
     $env:PYTHONUTF8 = '1'
     $env:PYTHONIOENCODING = 'utf-8'
-    $pythonArgs = @('-3.13') + $botArgs
+    # Windows PowerShell 5.1 Start-Process joins -ArgumentList with spaces and
+    # drops quotes, which splits JSON such as --strategy-params-json; quote
+    # every argument for the Windows command-line parser ourselves. The py
+    # launcher only recognises its -3.13 flag unquoted.
+    $pythonArgs = '-3.13 ' + (($botArgs | ForEach-Object { '"' + ([string]$_ -replace '(\\*)"', '$1$1\"') + '"' }) -join ' ')
     $botStdout = Join-Path $statusDir 'bot.stdout.log'
     $botStderr = Join-Path $statusDir 'bot.stderr.log'
     Remove-Item -LiteralPath $botStopFile -Force -ErrorAction SilentlyContinue
@@ -251,6 +257,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     }
     $exitCode = $child.ExitCode
     Write-SupervisorLog "bot exited code=$exitCode"
+    $null = Invoke-PythonTool 'trade_db' @('-m', 'ttb.trade_db')
     if ($config.mode -eq 'ttb' -and $exitCode -ne 0) {
         Set-Content -LiteralPath $reconcileFlag -Value (Get-Date -Format o) -Encoding ascii
         if (-not (Test-AutoRecoveryAllowed)) {

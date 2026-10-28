@@ -34,12 +34,14 @@ class OrderFlowGatedMaker(StickyOneTickMaker):
         high_volatility_ratio: float = 2.5,
         short_window: int = 8,
         long_window: int = 40,
+        **kwargs,
     ) -> None:
-        super().__init__(config, ledger, require_positive_one_tick_edge=False)
-        self.settings = FlowGateSettings(
+        kwargs.setdefault("require_positive_one_tick_edge", False)
+        super().__init__(config, ledger, **kwargs)
+        self.flow_settings = FlowGateSettings(
             entry_threshold, high_volatility_ratio, short_window, long_window,
         )
-        self.settings.validate()
+        self.flow_settings.validate()
 
     @staticmethod
     def _std(values: list[float]) -> float:
@@ -53,16 +55,16 @@ class OrderFlowGatedMaker(StickyOneTickMaker):
         # Pre-existing long-window requirement avoids trading on an unstable
         # estimated regime, without inspecting any future tick.
         mids = [price for _, price in self.history]
-        if len(mids) < self.settings.long_window:
+        if len(mids) < self.flow_settings.long_window:
             self._clear_entry_quote()
             return StrategyDecision((), decision.features, False, "flow regime warmup")
-        long_std = self._std(mids[-self.settings.long_window:])
-        short_std = self._std(mids[-self.settings.short_window:])
-        if (long_std > 0 and short_std / long_std >= self.settings.high_volatility_ratio):
+        long_std = self._std(mids[-self.flow_settings.long_window:])
+        short_std = self._std(mids[-self.flow_settings.short_window:])
+        if (long_std > 0 and short_std / long_std >= self.flow_settings.high_volatility_ratio):
             self._clear_entry_quote()
             return StrategyDecision((), decision.features, False, "flow high volatility gate")
         z = decision.features.score
-        theta = self.settings.entry_threshold
+        theta = self.flow_settings.entry_threshold
         allowed = (
             {"buy"} if z >= theta else
             {"sell"} if z <= -theta else
@@ -77,4 +79,4 @@ class OrderFlowGatedMaker(StickyOneTickMaker):
                                 "flow-gated maker: " + decision.reason)
 
     def parameters(self) -> dict:
-        return asdict(self.settings)
+        return {**super().parameters(), **asdict(self.flow_settings)}

@@ -39,13 +39,15 @@ class CompetitionPnlShaping(StickyOneTickMaker):
         daily_profit_fraction: float = 0.002,
         daily_loss_fraction: float = 0.01,
         daily_drawdown_fraction: float = 0.008,
+        **kwargs,
     ) -> None:
-        super().__init__(config, ledger, require_positive_one_tick_edge=False)
-        self.settings = PnlShapingSettings(
+        kwargs.setdefault("require_positive_one_tick_edge", False)
+        super().__init__(config, ledger, **kwargs)
+        self.pnl_settings = PnlShapingSettings(
             previous_day_equity, daily_profit_fraction,
             daily_loss_fraction, daily_drawdown_fraction,
         )
-        self.settings.validate()
+        self.pnl_settings.validate()
         self._pnl_peak = 0.0
 
     def decide(self, quote: Quote) -> StrategyDecision:
@@ -60,19 +62,19 @@ class CompetitionPnlShaping(StickyOneTickMaker):
             + self.config.slippage_ticks * self.config.tick_value
         )
         self._pnl_peak = max(self._pnl_peak, conservative)
-        if self.settings.previous_day_equity is None:
+        if self.pnl_settings.previous_day_equity is None:
             # No unverified account-equity assumptions. Reductions continue.
             if not self.halt_reason:
                 self.halt_reason = "previous_day_equity_unverified"
         elif not self.halt_reason:
             # First triggered reason remains latched for the entire trading
             # day, including across strategy ticks and risk-state restarts.
-            equity = self.settings.previous_day_equity
-            if conservative <= -equity * self.settings.daily_loss_fraction:
+            equity = self.pnl_settings.previous_day_equity
+            if conservative <= -equity * self.pnl_settings.daily_loss_fraction:
                 self.halt_reason = "daily_equity_loss_limit"
-            elif self._pnl_peak - conservative >= equity * self.settings.daily_drawdown_fraction:
+            elif self._pnl_peak - conservative >= equity * self.pnl_settings.daily_drawdown_fraction:
                 self.halt_reason = "daily_equity_drawdown"
-            elif conservative >= equity * self.settings.daily_profit_fraction:
+            elif conservative >= equity * self.pnl_settings.daily_profit_fraction:
                 self.halt_reason = "daily_profit_target"
         result = super().decide(quote)
         if self.halt_reason and not pos:
@@ -81,4 +83,4 @@ class CompetitionPnlShaping(StickyOneTickMaker):
         return result
 
     def parameters(self) -> dict:
-        return asdict(self.settings)
+        return {**super().parameters(), **asdict(self.pnl_settings)}
