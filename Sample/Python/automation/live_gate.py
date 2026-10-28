@@ -22,11 +22,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ttb.calendar import CalendarCoverageError, TradingCalendar, resolve_symbol
+from ttb.orders import ReportChannelLost
 from ttb.runtime import TAIPEI_TZ, SessionSchedule
 
 VERIFIED = 0
 DEFERRED = 3
 FAILED = 2
+# The probe order may still be live; the supervisor restarts TTB so that
+# auto-recovery sees and cancels it, then the gate probes again.
+CHANNEL_LOST = 4
 
 
 def marker_paths(probe_dir: Path, symbol: str, today: str) -> tuple[Path, Path]:
@@ -63,6 +67,8 @@ def gate(
         return DEFERRED, {"status": "deferred", "symbol": symbol, "reason": "market closed"}
     try:
         code = run_probe(symbol)
+    except ReportChannelLost as exc:
+        return CHANNEL_LOST, {"status": "channel_lost", "symbol": symbol, "reason": str(exc)}
     except RuntimeError as exc:
         # ttb_order_probe raises RuntimeError when no quote arrives in time.
         if "no" in str(exc).lower() and "quote" in str(exc).lower():

@@ -133,6 +133,9 @@ class MarketMakerTests(unittest.TestCase):
         class Module:
             def CANCELORDER(self, payload):
                 return {"Code": "0000"}
+            def QUERYRESTOREREPORT(self):
+                return {"Code": "0000", "Data": []}
+
             def NEWORDER(self, payload):
                 raise AssertionError("replacement before terminal report")
         s = self.make()
