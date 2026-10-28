@@ -32,7 +32,9 @@ $checks = [ordered]@{}
 if ($Mode -eq 'ttb') {
     $new = $template
     foreach ($keep in 'symbol', 'ttbCompetition', 'ttbCredentialTarget', 'strategy', 'strategyModule') {
-        if ($null -ne $current.$keep) { $new.$keep = $current.$keep }
+        # An empty value (config.example.json ships strategyModule "") must not
+        # replace the template's choice.
+        if (-not [string]::IsNullOrWhiteSpace([string]$current.$keep)) { $new.$keep = $current.$keep }
     }
     # The supervisor confirms TTB chkAutoPut is off only through auto-login.
     $new.autoLogin = $true

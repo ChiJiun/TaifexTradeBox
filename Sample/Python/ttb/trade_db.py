@@ -45,24 +45,35 @@ FROM events WHERE kind = 'order_ack';
 """
 
 
-def sync_journal(journal_dir: Path, db_path: Path) -> int:
-    """Copy every journal record not yet in the database; return how many were added."""
+def sync_journal(journal_dir: Path, db_path: Path) -> tuple[int, list[str]]:
+    """Copy every journal record not yet in the database.
+
+    Returns how many were added and the partitions that could not be read;
+    one corrupt day must not keep every other day out of the database.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     added = 0
+    errors: list[str] = []
     with closing(sqlite3.connect(db_path)) as db, db:
         db.executescript(SCHEMA)
         journals: dict[str, ExecutionJournal] = {}
         for path in sorted(Path(journal_dir).glob("events-*-*.jsonl")):
             symbol, *date_parts = path.stem[len("events-"):].rsplit("-", 3)
-            journal = journals.setdefault(symbol, ExecutionJournal(path.parent, symbol))
-            for record in journal.events("-".join(date_parts)):
+            try:
+                if symbol not in journals:
+                    journals[symbol] = ExecutionJournal(path.parent, symbol, validate_all=False)
+                records = journals[symbol].events("-".join(date_parts))
+            except Exception as exc:
+                errors.append(f"{path.name}: {type(exc).__name__}: {exc}")
+                continue
+            for record in records:
                 cursor = db.execute(
                     "INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (record["symbol"], record["trading_day"], record["seq"], record["recorded_at"],
                      record["kind"], json.dumps(record["payload"], ensure_ascii=False), record["hash"]),
                 )
                 added += cursor.rowcount
-    return added
+    return added, errors
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,12 +82,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=Path("output/trades.sqlite3"))
     args = parser.parse_args(argv)
     try:
-        added = sync_journal(args.journal_dir, args.db)
+        added, errors = sync_journal(args.journal_dir, args.db)
     except Exception as exc:
         print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), file=sys.stderr)
         return 2
-    print(json.dumps({"ok": True, "added": added, "db": str(args.db)}))
-    return 0
+    print(json.dumps({"ok": not errors, "added": added, "db": str(args.db), "errors": errors},
+                     ensure_ascii=False))
+    return 2 if errors else 0
 
 
 if __name__ == "__main__":

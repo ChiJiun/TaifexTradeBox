@@ -569,6 +569,8 @@ class CompetitionConfigTests(unittest.TestCase):
                         supervisor.index("while (-not (Test-Path -LiteralPath $stopFile))"))
         set_mode = (HERE / "automation" / "set_mode.ps1").read_text(encoding="utf-8")
         self.assertIn("$new.autoLogin = $true", set_mode)
+        # config.example.json ships strategyModule ""; it must not erase the template strategy.
+        self.assertIn("IsNullOrWhiteSpace([string]$current.$keep)", set_mode)
         template = json.loads((HERE / "automation" / "config.competition.example.json").read_text(encoding="utf-8"))
         self.assertIs(template["autoLogin"], True)
 
