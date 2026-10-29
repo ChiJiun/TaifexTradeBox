@@ -135,7 +135,7 @@ py -3.13 ttb_readonly_capture.py
 
 **啟用 live 的硬性前提**：此競賽帳戶**只給 bot 交易**（`exclusiveBotAccount: true`，自動恢復會撤銷所有委託並平掉所有期貨部位）；`set_mode.ps1` 檢查的認證、競賽名稱、API 登入、TWD 可用保證金 > 0、無對帳旗標缺一不可。範本的 `--max-notional 30000000`、`--max-order-qty 2`、`--max-inventory 2` 允許最多 2 口 TX（1 口名目約 930 萬，留到指數約 75,000 點）；TX 每口保證金與手續費尚未在競賽帳戶實測，第一筆成交後請核對 `TRAN_FEE` 與可用保證金。
 
-**策略**：競賽設定使用 `strategies.portfolio:PortfolioStrategy`，在 `auto:TXF` 上組合兩個子策略（見下方「競賽組合策略」）。每日成交另同步到 `output	rades.sqlite3`（見 README）。
+**策略**：競賽設定使用 `strategies.portfolio:PortfolioStrategy`，在 `auto:TXF` 上組合兩個子策略（見下方「競賽組合策略」）。每日成交另同步到 `output/trades.sqlite3`（見 README）。
 
 **風險提醒**：自動化只保證「機器會自己跑」，不保證策略獲利；先以 shadow 的決策與模擬損益判斷是否上真單及口數。
 
@@ -157,13 +157,17 @@ GUI 自動登入已在 TTB 2026.07.08.1000（控制項 `txtAccnt`、`txtPwd`、`
   - **口數（1/2 凱利）**：每天開盤用「回測先驗（打 5 折）＋該子策略的實際理論交易績效」估每口期望值與變異數，口數 = floor(0.5 × 200 萬 × 期望值 / 變異數)，上限每個子策略 2 口、帳戶合計 2 口。
     - 估計期望值 ≤ 0 時，該子策略只用 1 口做理論交易，不計入真實下單，期望值回升後自動恢復。
     - 績效統計存在 `output/strategy-theory/kelly-stats.json`，bot 重啟不會歸零。
+    - 先驗樣本數用回測的實際筆數（burst 127 筆、fade 29 天），避免開局幾筆停損就停用。
+    - 口數只在每天第一筆報價時重算，所以「期望值 ≤ 0 改為理論交易」隔天才生效；當天的止損靠各子策略自己的停損點數。
+    - 為了讓一次全平不超過單筆上限，`--max-inventory` 不能大於 `--max-order-qty`，否則策略拒絕啟動。
   - **沒有的機制**：進場前不做成本估算過濾，也沒有「獲利達到某比例就停止」。
   - **回放**：期交所 2026-09-11～10-28 共 29 個 TX 日盤逐筆資料，`replay_market_maker.replay`，真實單延遲 2.5 秒、手續費每口 50 元、稅 0.002%。
     - 理論帳合計：burst +228,180、fade +216,789。
     - 真實帳若 TTB 以實際成交價成交：+419,949，與理論帳的差距主要來自帳戶 2 口上限。
     - 若以委託限價成交（`replay` 預設的保守假設）：只有 +16,350。
     - 最差單日約 −7 萬到 −10 萬。上線後第一筆成交要核對 TTB 的成交價是哪一種。
-  - **早盤反轉的狀態檔**：開盤價與「今天是否已交易」寫在 `output/supervisor/morning-fade-state.json`，bot 重啟後不會遺失訊號、也不會重複進場；08:47 前沒看到開盤報價的日子不交易。
+  - **bot 重啟**：gateway 要求帳戶空手才啟動，理論帳也從 0 開始；重啟前尚未平倉的理論交易不會寫進績效統計（journal 只有 fill，沒有 trade_closed）。
+  - **早盤反轉的狀態檔**：開盤價與「今天是否已交易」寫在 `output/supervisor/morning-fade-state.json`，bot 重啟後不會遺失訊號、也不會重複進場；08:47 前沒看到開盤報價的日子不交易。這個檔案和舊版單獨跑的早盤反轉共用路徑，部署當天若舊版已經交易，組合策略的 fade 當天就不會再交易。
 - **TMF 成本參數 `--fee-per-fill 50 --tax-rate 0.00002`**：競賽實際收取的 TMF 手續費是每口單邊 50 元。2026-10-29 的 4 筆成交，TTB `QUERYMARGIN` 的 `TRAN_FEE` 是 200、`TRAN_TAX` 是 36；期交所費用表中 TMF 的交易所費用只有 11.2 元，不能拿來推估。CLI 預設 `--fee-per-fill 100` 會高估成本；設 20 又會低估，連帶讓 04 的每日停損算出的損益比實際好、太晚觸發。以 50 元計算，來回成本約 2×(50＋9.3)＝118.6 元，預設 8 點停利（80 元）通不過 `cost filter`，bot 不會進場；要實際交易，`--target-ticks` 至少要 12。
 - **API 連線不再經 TTBHelp 建構子**：`TTBApi.connect` 以相同端點直接 HTTP（10 秒 timeout），並用 TTBHelp 的版本字串做 `CONNECT` 握手。原 TTBHelp 在 TTB 未開或版本不符時會 `os._exit(0)`，supervisor 會誤判為正常結束。
 - **TTB 2026.07.08.1000**（2026-10-18 起的 repo 版本）需要 .NET 10 Desktop Runtime；TTB.exe 與 `TTBHelp.py` 必須同版（握手會比對版本，`check_binary_integrity` 也會檢查）。

@@ -126,6 +126,46 @@ class PortfolioTests(unittest.TestCase):
         (stop,) = strategy.decide(tick("10:00:02", 46440, 3.0, 102)).intents
         self.assertEqual((stop.side, stop.price, stop.role), ("sell", 46439 - 2, "exit"))
 
+    def test_mirror_skips_an_exit_that_leaves_the_capped_target_unchanged(self):
+        strategy, (a, b) = self.make()
+        self.ledger.on_fill(Fill("buy", 46500, 2, "R1", 0.5))
+        a.ledger.on_fill(Fill("buy", 46500, 2, "T1", 0.5))
+        b.ledger.on_fill(Fill("buy", 46500, 2, "T2", 0.5))
+        strategy.decide(tick("10:00:00", 46500, 1.0, 100))
+        a.strategy.want(OrderIntent("sell", 46600, 2, "exit", "target"))
+        self.assertEqual(strategy.decide(tick("10:00:01", 46500, 2.0, 101)).intents, ())
+        # a leaves at the target; b alone still fills the two-lot cap, so the account does nothing.
+        self.assertEqual(strategy.decide(tick("10:00:05", 46600, 6.0, 103)).intents, ())
+        self.assertEqual((a.ledger.position, self.ledger.position), (0, 2))
+
+    def test_mirror_covers_only_the_part_that_lowers_the_capped_target(self):
+        strategy, (a, b) = self.make()
+        self.ledger.on_fill(Fill("buy", 46500, 2, "R1", 0.5))
+        a.ledger.on_fill(Fill("buy", 46500, 2, "T1", 0.5))
+        b.ledger.on_fill(Fill("buy", 46500, 1, "T2", 0.5))
+        strategy.decide(tick("10:00:00", 46500, 1.0, 100))
+        a.strategy.want(OrderIntent("sell", 46600, 2, "exit", "target"))
+        (mirror,) = strategy.decide(tick("10:00:01", 46500, 2.0, 101)).intents
+        self.assertEqual((mirror.side, mirror.price, mirror.quantity), ("sell", 46600, 1))
+
+    def test_member_stop_after_a_touched_mirror_is_sent_at_once(self):
+        strategy, (a, b) = self.make(latency_seconds=2.5)
+        self.ledger.on_fill(Fill("buy", 46500, 1, "R1", 0.5))
+        a.ledger.on_fill(Fill("buy", 46500, 1, "T1", 0.5))
+        strategy.decide(tick("10:00:00", 46500, 1.0, 100))
+        a.strategy.want(OrderIntent("sell", 46600, 1, "exit", "target"))
+        (mirror,) = strategy.decide(tick("10:00:01", 46500, 2.0, 101)).intents
+        # The tape touches the target before the theory order is live, then the member stops out.
+        self.assertEqual(strategy.decide(tick("10:00:02", 46600, 3.0, 102)).intents, (mirror,))
+        a.strategy.want(OrderIntent("sell", 46437, 1, "risk_exit", "stop"))
+        (stop,) = strategy.decide(tick("10:00:03", 46440, 4.0, 103)).intents
+        self.assertEqual((stop.price, stop.reason), (46439 - 2, "portfolio net"))
+
+    def test_account_cap_above_the_order_limit_is_rejected(self):
+        config = StrategyConfig(symbol="TXFK6", point_value=200, max_order_qty=2, max_inventory=4)
+        with self.assertRaises(ValueError):
+            PortfolioStrategy(config, PositionLedger(config), members=[member("a")])
+
     def test_flip_reduces_to_flat_before_reversing(self):
         strategy, (a, b) = self.make()
         self.ledger.on_fill(Fill("buy", 46500, 1, "R1", 0.5))

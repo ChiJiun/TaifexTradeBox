@@ -192,6 +192,10 @@ class PortfolioStrategy:
         settings["members"] = tuple(settings.get("members") or ())
         self.settings = PortfolioSettings(**settings)
         self.settings.validate()
+        if config.max_inventory > config.max_order_qty:
+            # A full flatten goes out as one exit, and the gateway rejects any
+            # order above max_order_qty by stopping the bot.
+            raise ValueError("portfolio needs max_inventory <= max_order_qty")
         self.features = FeatureEngine(config)
         self.journal_dir = Path(self.settings.journal_dir) if self.settings.journal_dir else None
         self.books: list[TheoryBook] = []
@@ -223,10 +227,13 @@ class PortfolioStrategy:
         path = self._stats_path()
         if not path:
             return {}
+        if not path.exists():
+            return {}
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             return {name: (int(v["n"]), float(v["total"]), float(v["total_sq"])) for name, v in raw.items()}
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            LOGGER.warning("portfolio stats %s unreadable, starting from the priors: %s", path, exc)
             return {}
 
     def _save_stats(self) -> None:
@@ -326,22 +333,30 @@ class PortfolioStrategy:
 
         # Marketable member orders count at once, so the real order leaves
         # together with the theoretical one instead of one latency behind it.
-        cap = self.config.max_inventory
-        target = max(-cap, min(cap, sum(book.committed(quote) for book in self.books if book.qty > 0)))
+        live = [book for book in self.books if book.qty > 0]
+        total = sum(book.committed(quote) for book in live)
+        target = self._clamp(total)
         real = self.ledger.position
         reason = f"portfolio target={target} real={real} " + " ".join(
             f"{book.name}={book.ledger.position}" for book in self.books)
-        intent = self._real_intent(target, real, quote)
+        # A member crossing the market (a stop, a timed exit) must not wait
+        # behind a mirrored resting order.
+        crossing = any(book.committed(quote) != book.ledger.position for book in live)
+        intent = self._real_intent(target, total, real, crossing, quote)
         return StrategyDecision((intent,) if intent else (), features, False, reason)
 
-    def _real_intent(self, target: int, real: int, quote: Quote) -> OrderIntent | None:
+    def _clamp(self, position: int) -> int:
+        cap = self.config.max_inventory
+        return max(-cap, min(cap, position))
+
+    def _real_intent(self, target: int, total: int, real: int, crossing: bool, quote: Quote) -> OrderIntent | None:
         s, tick, now = self.settings, self.config.tick_size, quote.received_at
         current = self.real_intent
         if current and current.reason == MIRROR and (
                 quote.last >= current.price if current.side == "sell" else quote.last <= current.price):
             self.mirror_hit_at = now
         if target == real:
-            self.real_intent = self._mirror(real, quote)
+            self.real_intent = self._mirror(total, real, quote)
             self.real_intent_at = now
             return self.real_intent
         if real and (target == 0 or (target > 0) != (real > 0) or abs(target) < abs(real)):
@@ -354,10 +369,12 @@ class PortfolioStrategy:
             qty = min(abs(target - real), self.config.max_order_qty)
             role = "entry"
         if current and (current.side, current.quantity, current.role) == (side, qty, role):
-            # A mirrored exit the tape reached has most likely filled at TTB
-            # too; give the fill report one TTL before chasing with a new order.
-            since = self.mirror_hit_at if current.reason == MIRROR else self.real_intent_at
-            if now - since < s.order_ttl_seconds:
+            if current.reason == MIRROR:
+                # A mirrored exit the tape reached has most likely filled at TTB
+                # too; give the fill report one TTL before chasing it.
+                if not crossing and now - self.mirror_hit_at < s.order_ttl_seconds:
+                    return current
+            elif now - self.real_intent_at < s.order_ttl_seconds:
                 return current
         # Cross the spread and hold the price steady so the order can reach TTB.
         price = quote.ask + s.entry_slip_ticks * tick if side == "buy" else quote.bid - s.entry_slip_ticks * tick
@@ -365,13 +382,25 @@ class PortfolioStrategy:
         self.real_intent_at = now
         return self.real_intent
 
-    def _mirror(self, real: int, quote: Quote) -> OrderIntent | None:
-        """Rest the live members' passive exit at TTB too, so both fill on the same print."""
+    def _mirror(self, total: int, real: int, quote: Quote) -> OrderIntent | None:
+        """Rest a live member's passive exit at TTB too, so both fill on the same print.
+
+        Only the part that would lower the clamped target is mirrored: with the
+        account at its cap, a member leaving may not change the net at all.
+        """
         if not real:
             return None
         side = "sell" if real > 0 else "buy"
-        orders = [order for book in self.books if book.qty > 0 and (order := book.resting(side, quote))]
-        if not orders:
-            return None
-        best = min(orders, key=lambda o: o.price) if side == "sell" else max(orders, key=lambda o: o.price)
-        return OrderIntent(side, best.price, min(best.quantity, abs(real)), "exit", MIRROR)
+        sign = 1 if real > 0 else -1
+        best = None
+        for book in self.books:
+            order = book.resting(side, quote) if book.qty > 0 else None
+            if order is None:
+                continue
+            after = self._clamp(total - sign * order.quantity)
+            qty = min(order.quantity, abs(real) - max(0, sign * after))
+            if qty <= 0:
+                continue
+            if best is None or (order.price < best.price if side == "sell" else order.price > best.price):
+                best = OrderIntent(side, order.price, qty, "exit", MIRROR)
+        return best
