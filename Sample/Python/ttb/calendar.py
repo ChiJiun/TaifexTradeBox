@@ -97,7 +97,7 @@ INDEX_FUTURES = ("TXF", "MTX", "TMF")
 # Stock futures also stop trading on the delivery month's third Wednesday
 # (https://www.taifex.com.tw/cht/2/stockLists). Only the contracts the grid
 # research covered are listed; commodity and FX futures expire differently.
-STOCK_FUTURES = ("CDF", "CCF", "DHF", "FZF", "PLF")
+STOCK_FUTURES = ("CDF", "CCF", "DHF", "FZF")
 SUPPORTED_PRODUCTS = INDEX_FUTURES + STOCK_FUTURES
 CONTRACT_CODE = re.compile(rf"({'|'.join(SUPPORTED_PRODUCTS)})([A-L])(\d)")
 AUTO_SYMBOL_PREFIX = "auto:"

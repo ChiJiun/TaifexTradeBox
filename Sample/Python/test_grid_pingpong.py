@@ -9,6 +9,7 @@ from strategy_core import Fill, PositionLedger, Quote, StrategyConfig
 from strategies.grid_pingpong import GridPingPongStrategy
 from test_calendar import CAL
 from ttb.calendar import CONTRACT_CODE, ContractInfo, TradingCalendar, front_month_contract
+from ttb.contracts import point_value_for
 from ttb.probe import far_limit_price
 
 
@@ -87,6 +88,24 @@ class GridPingPongTests(unittest.TestCase):
         orders = by_side(strategy.decide(tick("09:02:05", 2401, 4.0)))
         self.assertEqual((orders["buy"].price, orders["sell"].price), (2395, 2405))
 
+    def test_a_gap_through_the_stop_line_flattens_without_filling_every_level(self):
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.fill("buy", 2425)
+        # Three levels plus one stop grid under the 2430 anchor: 2410.
+        (stop,) = strategy.decide(tick("09:00:05", 2405, 2.0)).intents
+        self.assertEqual((stop.side, stop.quantity, stop.role), ("sell", 1, "risk_exit"))
+
+    def test_a_fast_drop_never_buys_above_the_market(self):
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.fill("buy", 2425)
+        # The next level 2420 is already above the market: only the exit rests.
+        (exit_order,) = strategy.decide(tick("09:00:05", 2416, 2.0)).intents
+        self.assertEqual((exit_order.side, exit_order.price, exit_order.role), ("sell", 2430, "exit"))
+        orders = by_side(strategy.decide(tick("09:00:10", 2421, 3.0)))
+        self.assertEqual((orders["buy"].price, orders["buy"].role), (2420, "entry"))
+
     def test_stop_holds_its_price_until_the_ttl_expires(self):
         strategy = self.make()
         strategy.decide(tick("09:00:00", 2430, 1.0))
@@ -136,6 +155,8 @@ class GridPingPongTests(unittest.TestCase):
             self.make(grid_points=4)
         with self.assertRaises(ValueError):
             self.make(levels=4)
+        with self.assertRaises(ValueError):
+            self.make(reanchor_grids=2)
 
 
 class GridTemplateTests(unittest.TestCase):
@@ -168,11 +189,16 @@ class StockFuturesContractTests(unittest.TestCase):
         self.assertEqual(front_month_contract("CCF", date(2026, 10, 29), calendar).symbol, "CCFK6")
 
     def test_unlisted_futures_stay_unsupported(self):
-        for code in ("GDFK6", "QFFK6", "CDOK6"):
+        for code in ("GDFK6", "QFFK6", "CDOK6", "PLFK6"):
             with self.subTest(code=code), self.assertRaises(ValueError):
                 ContractInfo.from_symbol(code, 2026)
         self.assertIsNotNone(CONTRACT_CODE.fullmatch("CDFK6"))
         self.assertIsNone(CONTRACT_CODE.fullmatch("GDFK6"))
+
+    def test_stock_futures_point_value_is_two_thousand(self):
+        self.assertEqual(point_value_for("CCFK6"), 2000.0)
+        with self.assertRaises(ValueError):
+            point_value_for("CDFK6", 200.0)
 
 
 if __name__ == "__main__":

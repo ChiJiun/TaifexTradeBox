@@ -48,7 +48,7 @@
     "120",
     "--disable-after-hours",
     "--strategy-params-json",
-    "{\"grid_points\": 5, \"exit_grids\": 1, \"levels\": 3, \"stop_grids\": 1, \"reanchor_grids\": 1}",
+    "{\"grid_points\": 5, \"exit_grids\": 1, \"levels\": 3, \"stop_grids\": 3, \"reanchor_grids\": 1}",
     "--poll-seconds",
     "2",
     "--fee-per-fill",
