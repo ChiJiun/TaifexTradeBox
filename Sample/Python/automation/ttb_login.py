@@ -25,6 +25,7 @@ import sys
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -69,8 +70,22 @@ class LoginError(RuntimeError):
     """Login could not be completed or verified."""
 
 
-class ReportChannelDead(LoginError):
-    """TTB is logged in but its order-report socket does not answer; restart TTB."""
+class TtbRestartRequired(LoginError):
+    """TTB is logged in but stuck in a state only a TTB restart clears."""
+
+
+class ReportChannelDead(TtbRestartRequired):
+    """TTB's order-report socket does not answer."""
+
+
+class QuoteNotSubscribed(TtbRestartRequired):
+    """A contract is not confirmed in TTB's quote grid.
+
+    When the basic-quote request in TTB's LoadSymbol throws, the contract stays
+    in TTB's in-memory list unsubscribed and every re-add is rejected as a
+    duplicate; only 取消訂閱 (which also clears the order report) or a restart
+    clears it.
+    """
 
 
 @dataclass(frozen=True)
@@ -307,12 +322,17 @@ class TtbWindow:
         tab.select()
         try:
             grid = self.control(EQUITY_GRID_ID, control_type="DataGrid")
-            rows = lambda: sum(row.element_info.name.startswith("Row") for row in grid.descendants())
-            self.press(EQUITY_REFRESH_ID)
-            # Old rows still on screen would read as an answer; wait for the clear first.
-            if not wait_for(lambda: rows() == 0, 5.0, 0.2):
+            rows = lambda: {tuple(row.element_info.runtime_id) for row in grid.children()
+                            if row.element_info.name.startswith("Row")}
+            try:
+                before = rows()
+            except Exception:  # UIA timed out on a busy TTB; treat as no answer
                 return False
-            return bool(wait_for(rows, timeout))
+            self.press(EQUITY_REFRESH_ID)
+            # TTB clears the grid before asking the server, and a live answer
+            # often lands before the first sample; rows it rebuilt carry new
+            # UIA runtime ids, while old rows still on screen keep theirs.
+            return bool(wait_for(lambda: (current := rows()) and not current & before, timeout, 0.2))
         finally:
             self._back_to_messages()
 
@@ -456,11 +476,12 @@ def ensure_logged_in(
     quote_symbols: tuple[str, ...] = (),
     require_auto_resubmit_off: bool = False,
     require_report_channel: bool = False,
+    require_quotes: bool = False,
 ) -> dict[str, Any]:
     first = probe()
     if first.logged_in:
         result = {"ok": True, "action": "already_logged_in", "session": first.as_dict()}
-        if require_auto_resubmit_off or require_report_channel:
+        if require_auto_resubmit_off or require_report_channel or require_quotes:
             # Live orders: never trust a session someone else logged in (and
             # possibly left 失敗自動重送 on); GUI errors fail closed.
             try:
@@ -473,6 +494,8 @@ def ensure_logged_in(
             result["quotes"] = _subscribe_all(window, quote_symbols)
             if require_report_channel:
                 _require_report_channel(window)
+            if require_quotes:
+                _require_quotes(result["quotes"])
             return result
         if quote_symbols:
             try:
@@ -518,10 +541,12 @@ def ensure_logged_in(
         actions.extend(_confirm_auto_resubmit_off(window))
     if require_report_channel:
         _require_report_channel(window)
+    quotes = _subscribe_all(window, quote_symbols)
+    if require_quotes:
+        _require_quotes(quotes)
     return {
         "ok": True, "action": "logged_in", "competition": target,
-        "steps": actions, "session": verified.as_dict(),
-        "quotes": _subscribe_all(window, quote_symbols),
+        "steps": actions, "session": verified.as_dict(), "quotes": quotes,
     }
 
 
@@ -543,6 +568,12 @@ def _require_report_channel(window: Any) -> None:
         raise ReportChannelDead("TTB report channel did not answer an equity refresh; restart TTB")
 
 
+def _require_quotes(quotes: dict[str, str]) -> None:
+    missing = {symbol: state for symbol, state in quotes.items() if state not in {"subscribed", "added"}}
+    if missing:
+        raise QuoteNotSubscribed(f"TTB quote subscription not confirmed: {missing}; restart TTB")
+
+
 def _subscribe_all(window: Any, symbols: tuple[str, ...]) -> dict[str, str]:
     results = {}
     for symbol in symbols:
@@ -551,6 +582,21 @@ def _subscribe_all(window: Any, symbols: tuple[str, ...]) -> dict[str, str]:
         except Exception as exc:  # never fail a verified login over quotes
             results[symbol] = f"error:{type(exc).__name__}"
     return results
+
+
+def market_open(calendar_file: Path, now: datetime | None = None) -> bool:
+    """Same session test as the live gate; quotes can only be confirmed while it is open."""
+    from ttb.calendar import TradingCalendar
+    from ttb.runtime import SessionSchedule
+
+    try:
+        calendar = TradingCalendar.from_file(calendar_file)
+    except Exception:
+        calendar = None
+    try:
+        return SessionSchedule(calendar=calendar).status(now).trading
+    except Exception:
+        return True
 
 
 def _config_value(path: Path, key: str) -> str:
@@ -580,6 +626,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="fail unless TTB auto-resubmit (chkAutoPut) reads off, even when already logged in (live mode)")
     parser.add_argument("--require-report-channel", action="store_true",
                         help="exit 5 unless an equity refresh comes back over TTB's report socket (live mode)")
+    parser.add_argument("--require-quotes", action="store_true",
+                        help="exit 5 unless every --subscribe contract is confirmed in dvQuote while the "
+                             "market is open (live mode); outside the session TTB cannot quote, so it is only reported")
+    parser.add_argument("--calendar", type=Path, default=Path("automation/taifex_calendar_2026.json"))
     args = parser.parse_args(argv)
 
     competition = args.competition if args.competition is not None else _config_value(args.config, "ttbCompetition")
@@ -603,10 +653,12 @@ def main(argv: list[str] | None = None) -> int:
             quote_symbols=tuple(symbol.upper() for symbol in args.subscribe if symbol.strip()),
             require_auto_resubmit_off=args.require_auto_resubmit_off,
             require_report_channel=args.require_report_channel,
+            # Before the open TTB rejects every add; the live gate defers then.
+            require_quotes=args.require_quotes and market_open(args.calendar),
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result["ok"] else 4
-    except ReportChannelDead as exc:
+    except TtbRestartRequired as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 5
     except LoginError as exc:

@@ -119,6 +119,38 @@ class QuoteIntegrityTests(unittest.TestCase):
             engine.recorder.close()
             engine.raw_recorder.close()
 
+    def test_engine_catches_up_to_newest_quote_after_a_slow_cycle(self):
+        import dataclasses
+        import threading
+        with tempfile.TemporaryDirectory() as folder:
+            config = StrategyConfig(symbol="TXFA7")
+            engine = BotEngine(config, ShadowGateway(PositionLedger(config)), Path(folder))
+            processed = []
+
+            def record(q, now=None):
+                processed.append(q.total_volume)
+                engine.stop_event.set()
+            engine.process_quote = record
+            stale = time.monotonic() - 5
+            for i in range(5):
+                engine.submit(dataclasses.replace(quote(volume=i), received_at=stale))
+            engine.submit(quote(volume=99))
+            engine._run()
+            self.assertEqual(processed, [99])
+            self.assertEqual(engine.skipped_quotes, 5)
+
+            engine.stop_event.clear()
+            engine.submit(dataclasses.replace(quote(volume=7), received_at=stale))
+            timer = threading.Timer(1.0, engine.stop_event.set)
+            timer.start()
+            engine._run()
+            timer.join()
+            self.assertEqual(processed, [99])
+            self.assertEqual(engine.skipped_quotes, 6)
+            self.assertEqual(engine.fatal_error, "")
+            engine.recorder.close()
+            engine.raw_recorder.close()
+
     def test_zmq_subscriber_uses_finite_hwm_and_exact_topic(self):
         import zmq
         subscriber = ZmqQuoteSubscriber(59989, "TXFA7", lambda _data: None)

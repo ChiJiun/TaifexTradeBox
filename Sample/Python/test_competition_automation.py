@@ -13,6 +13,7 @@ from auto_recover_ttb import main as auto_recover_main
 from automation.ttb_login import (
     Credential,
     LoginError,
+    QuoteNotSubscribed,
     ReportChannelDead,
     choose_competition,
     decode_secret,
@@ -307,6 +308,62 @@ class LoginTests(unittest.TestCase):
             else:
                 with self.assertRaises(ReportChannelDead):
                     call()
+
+    def test_live_login_refuses_an_unconfirmed_quote_subscription(self):
+        from ttb.session import SessionProbe
+        ok = SessionProbe(api_reachable=True, codes={"margin": "0000", "orders": "0000", "positions": "0000"})
+        for symbols, confirmed in ((("TMFK6",), True), (("TMFK6", "BAD"), False)):
+            window = FakeWindow(logged=True, auto_resubmit="off")
+            call = lambda: ensure_logged_in(
+                competition="", credential_target="t", ttb_exe=Path("TTB.exe"), probe=lambda: ok,
+                window_factory=lambda: window, quote_symbols=symbols,
+                require_auto_resubmit_off=True, require_report_channel=True, require_quotes=True,
+            )
+            if confirmed:
+                self.assertEqual(call()["quotes"], {"TMFK6": "subscribed"})
+            else:
+                with self.assertRaises(QuoteNotSubscribed):
+                    call()
+
+    def test_quotes_are_only_required_while_the_market_is_open(self):
+        from datetime import datetime, timedelta, timezone
+        from automation.ttb_login import market_open
+        tz = timezone(timedelta(hours=8))
+        calendar = HERE / "automation" / "taifex_calendar_2026.json"
+        self.assertFalse(market_open(calendar, datetime(2026, 10, 29, 8, 20, tzinfo=tz)))
+        self.assertTrue(market_open(calendar, datetime(2026, 10, 29, 9, 30, tzinfo=tz)))
+        self.assertFalse(market_open(calendar, datetime(2026, 10, 31, 9, 30, tzinfo=tz)))  # Saturday
+
+    def test_report_channel_check_needs_rebuilt_equity_rows(self):
+        from automation.ttb_login import TtbWindow
+
+        class Row:
+            def __init__(self, runtime_id):
+                self.element_info = type("Info", (), {"name": f"Row {runtime_id}", "runtime_id": (42, runtime_id)})()
+
+        class Grid:
+            def __init__(self, before, after):
+                self.before, self.after, self.pressed = before, after, False
+            def children(self):
+                return [Row(i) for i in (self.after if self.pressed else self.before)]
+
+        class Control:
+            def exists(self, timeout=0):
+                return True
+            def select(self):
+                pass
+
+        def window(before, after):
+            win = TtbWindow.__new__(TtbWindow)
+            grid = Grid(before, after)
+            win.control = lambda auto_id, **kw: grid if auto_id == "dvEquity" else Control()
+            win.press = lambda auto_id: setattr(grid, "pressed", True)
+            return win
+
+        self.assertTrue(window([1, 2], [3, 4]).report_channel_alive(timeout=0.3))
+        self.assertTrue(window([], [3]).report_channel_alive(timeout=0.3))
+        self.assertFalse(window([1, 2], [1, 2]).report_channel_alive(timeout=0.3))  # refresh ignored
+        self.assertFalse(window([1, 2], []).report_channel_alive(timeout=0.3))  # cleared, no answer
 
     def test_no_submit_stops_before_login(self):
         window = FakeWindow()
@@ -610,6 +667,7 @@ class CompetitionConfigTests(unittest.TestCase):
     def test_live_supervisor_restarts_ttb_when_the_report_channel_is_dead(self):
         supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
         self.assertIn("'--require-report-channel'", supervisor)
+        self.assertIn("'--require-quotes'", supervisor)
         restart = supervisor[supervisor.index("$login -eq 5"):]
         self.assertLess(restart.index("Stop-Process -Name TTB"), restart.index("continue"))
 

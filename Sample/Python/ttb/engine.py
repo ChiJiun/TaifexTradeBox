@@ -19,6 +19,10 @@ from .runtime import RiskStateStore, SessionSchedule, TAIPEI_TZ
 
 
 LOG = logging.getLogger("ttb.engine")
+# A quote older than this is no longer a price to trade on.
+MAX_QUOTE_AGE_SECONDS = 2.0
+# Lagging the feed by more than this means a slow cycle; jump to the newest tick.
+QUOTE_CATCH_UP_SECONDS = 0.5
 
 
 class Strategy(Protocol):
@@ -178,6 +182,7 @@ class BotEngine:
         self.submitted_quotes = 0
         self.processed_quotes = 0
         self.dropped_quotes = 0
+        self.skipped_quotes = 0
         self.decision_count = 0
         self.first_quote_grace_seconds = max(30.0, self.quote_stale_seconds * 3.0)
         self.closed_cleanup_done = False
@@ -319,10 +324,10 @@ class BotEngine:
                 pass
             self.queue.put_nowait(quote)
 
-    def process_quote(self, quote: Quote) -> StrategyDecision | None:
+    def process_quote(self, quote: Quote, now: float | None = None) -> StrategyDecision | None:
         """Run one cycle synchronously; useful for tests and custom runners."""
-        if time.monotonic() - quote.received_at > 2:
-            raise RuntimeError("Quote backlog exceeds 2 seconds")
+        if (time.monotonic() if now is None else now) - quote.received_at > MAX_QUOTE_AGE_SECONDS:
+            raise RuntimeError(f"Quote backlog exceeds {MAX_QUOTE_AGE_SECONDS:g} seconds")
         self.last_quote = quote
         self.processed_quotes += 1
         self.raw_recorder.write(quote)
@@ -437,6 +442,7 @@ class BotEngine:
             submitted_quotes=self.submitted_quotes,
             processed_quotes=self.processed_quotes,
             dropped_quotes=self.dropped_quotes,
+            skipped_quotes=self.skipped_quotes,
             decision_count=self.decision_count,
             fatal_error="",
         )
@@ -548,8 +554,25 @@ class BotEngine:
                         position=self.ledger.position,
                     )
                 continue
+            # Live broker polls can outlast several ticks. Once behind, act on
+            # the newest tick (orders priced off older ones are already stale)
+            # and skip one too old to trade on instead of failing the session.
+            while time.monotonic() - quote.received_at > QUOTE_CATCH_UP_SECONDS:
+                try:
+                    newer = self.queue.get_nowait()
+                except queue.Empty:
+                    break
+                self.raw_recorder.write(quote)
+                self.skipped_quotes += 1
+                quote = newer
+            now = time.monotonic()
+            if now - quote.received_at > MAX_QUOTE_AGE_SECONDS:
+                self.raw_recorder.write(quote)
+                self.skipped_quotes += 1
+                continue
             try:
-                self.process_quote(quote)
+                # Same clock reading, so a tick cannot pass here and age out inside.
+                self.process_quote(quote, now)
             except Exception as exc:
                 self.fatal_error = str(exc)
                 LOG.exception("strategy cycle failed; stopping for reconciliation")
