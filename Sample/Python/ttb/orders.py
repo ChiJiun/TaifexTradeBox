@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from strategy_core import Fill, IndependentFillSimulator, OrderIntent, PositionLedger, Quote, StrategyConfig
 
-from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response, position_effect_for
+from .api import TTBApi, TTBApiError, TTBOrderRequest, extract_order_no, is_success_response, position_effect_for
 from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, assess_pretrade
 from .journal import ExecutionJournal
 
@@ -584,12 +584,29 @@ class TTBOrderGateway:
             counter_failure = exc
             LOG.critical("unable to persist cancel attempt; still attempting safety cancel: %s", exc)
         self.record_event("cancel_intent", {"side": side, "order_no": order_no})
-        self.api.cancel_order(order_no)
+        try:
+            self.api.cancel_order(order_no)
+        except TTBApiError:
+            # TTB rejects cancelling an order that filled between report
+            # polls; the next poll books that fill. Anything else stays fatal.
+            if not self._reported_terminal(order_no):
+                raise
+            self.record_event("cancel_rejected_terminal", {"side": side, "order_no": order_no})
+            LOG.warning("TTB CANCEL %s %s rejected; order already terminal in the report", side, order_no)
+            self.cancel_requested.add(order_no)
+            return
         self.record_event("cancel_ack", {"side": side, "order_no": order_no})
         LOG.info("TTB CANCEL %s %s", side, order_no)
         self.cancel_requested.add(order_no)
         if counter_failure:
             self._latch_unsafe("rate-counter persistence failed during cancel; manual reconciliation required")
+
+    def _reported_terminal(self, order_no: str) -> bool:
+        response = self.api.query_orders()
+        if not is_success_response(response):
+            return False
+        rows = [row for row in _response_rows(response) if order_number(row) == order_no]
+        return bool(rows) and all(is_terminal_order(row) for row in rows)
 
     def cancel_all(self) -> None:
         for side, current in list(self.active.items()):

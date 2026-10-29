@@ -145,6 +145,7 @@ GUI 自動登入已在 TTB 2026.07.08.1000（控制項 `txtAccnt`、`txtPwd`、`
 
 - **報價訂閱在 TTB GUI**：TTBHelp 的 `QUOTEDATA` 只開本機 ZMQ 監聽，TTB 只推送「報價設定」頁已加入的商品；TTB 登入時會對已存清單逐一查基本報價，查不到（例如盤前或收盤後）就把該商品從清單**永久刪除**（2026-10-28 在 VM 實測，見反編譯的 `BaseForm.LoadSymbol`）。所以 `ttb_login --subscribe <近月>` 每次登入都會檢查，缺少時自動按「新增訂閱」補回，supervisor log 回報 `subscribed`、`added` 或 `add_failed:[...]`。補訂失敗時 live gate 收不到報價會延後，下一輪登入再補；換月由 `resolve_symbol` 決定近月，不用手動加次月。
 - **委託回報輪詢間隔 `--poll-seconds 2`**：TTB 本機 API 的 `QUERYRESTOREREPORT` 與部位查詢各約 0.5 秒（2026-10-29 在 VM 實測 0.52／0.56 秒）。預設 0.5 秒輪詢會讓每一輪決策都卡約 1.1 秒，策略 30 秒內湊不到 `warmup_ticks`（30 筆），永遠停在 warmup。改為 2 秒後，成交最多晚約 2 秒才被偵測到。supervisor 只在啟動時讀 `config.json`，改設定後要重啟 `TTB Automation`。
+- **TMF 成本參數 `--fee-per-fill 20 --tax-rate 0.00002`**：CLI 預設 `--fee-per-fill 100` 是台指期（TXF）的水準。用在 TMF（每點 10 元）時，來回成本約 218.6 元，比預設 8 點停利（80 元）還高，所以 `strategy_core` 的 `cost filter` 會擋掉每一次進場（2026-10-29 盤中 1,284 次決策全部被擋）。依期交所費用表，TMF 的交易所費用為每口單邊 4.8＋3.2＋3.2＝11.2 元，期貨商實際收費由雙方議定，這裡取一般水準每口單邊 20 元；期交稅為十萬分之二。來回成本約 2×(20＋9.3)＝58.6 元，8 點停利的預估淨利約 21 元，能通過成本檢查。第一筆成交後，用 TTB `QUERYMARGIN` 的 `TRAN_FEE` 核對實際手續費。
 - **API 連線不再經 TTBHelp 建構子**：`TTBApi.connect` 以相同端點直接 HTTP（10 秒 timeout），並用 TTBHelp 的版本字串做 `CONNECT` 握手。原 TTBHelp 在 TTB 未開或版本不符時會 `os._exit(0)`，supervisor 會誤判為正常結束。
 - **TTB 2026.07.08.1000**（2026-10-18 起的 repo 版本）需要 .NET 10 Desktop Runtime；TTB.exe 與 `TTBHelp.py` 必須同版（握手會比對版本，`check_binary_integrity` 也會檢查）。
 

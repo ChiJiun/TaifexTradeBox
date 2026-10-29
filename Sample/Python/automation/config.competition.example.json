@@ -40,7 +40,11 @@
     "--strategy-params-json",
     "{\"previous_day_equity\": 2000000}",
     "--poll-seconds",
-    "2"
+    "2",
+    "--fee-per-fill",
+    "20",
+    "--tax-rate",
+    "0.00002"
   ],
   "liveGate": {
     "probeBeforeFirstLive": true

@@ -94,6 +94,26 @@ class GatewayPositionEffectTests(unittest.TestCase):
         self.gateway.sync((OrderIntent("sell", 20010, 1, "exit", "test"),), quote())
         self.assertEqual(self.module.cancels, ["A1"])
 
+    def _reject_cancel_with_report(self, status, remaining):
+        self.gateway.sync((OrderIntent("buy", 19990, 1, "entry", "test"),), quote())
+        self.module.CANCELORDER = lambda payload: {"Code": "9999", "ErrMsg": "cannot cancel"}
+        self.module.QUERYRESTOREREPORT = lambda: {"Code": "0000", "Data": [{
+            "ORDNO": "A1", "COMD_ID": "TXFA7", "BS": "B", "VOLM": "1",
+            "LESS_VOLM": str(remaining), "DEAL_TOTL": str(1 - remaining),
+            "DEAL_PRCE": "19990", "ORDR_PRCE": "19990", "STAT": status,
+        }]}
+
+    def test_cancel_rejected_for_an_order_that_already_filled_waits_for_its_report(self):
+        self._reject_cancel_with_report("完全成交", 0)
+        self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
+        self.assertIn("A1", self.gateway.cancel_requested)
+        self.assertEqual(len(self.module.payloads), 1)
+
+    def test_cancel_rejected_for_a_still_working_order_stays_fatal(self):
+        self._reject_cancel_with_report("委託成功", 1)
+        with self.assertRaises(Exception):
+            self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
+
 
 if __name__ == "__main__":
     unittest.main()
