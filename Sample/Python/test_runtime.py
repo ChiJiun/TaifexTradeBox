@@ -120,6 +120,30 @@ class EngineRuntimeTests(unittest.TestCase):
 
 
 class RiskStateStoreTests(unittest.TestCase):
+    def test_locked_risk_state_is_retried_then_fails_closed(self):
+        import os
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "risk-state.json"
+            store = RiskStateStore(path, "TMFK6")
+            values = dict(trading_day="2026-10-29", realized_pnl=0.0, peak_realized_pnl=0.0,
+                          fees_and_tax=0.0, fill_count=0, peak_equity=0.0, halt_reason="", position=0)
+            real_replace, calls = os.replace, {"n": 0}
+
+            def flaky(src, dst):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError(5, "Access is denied")
+                real_replace(src, dst)
+
+            with mock.patch("ttb.runtime.os.replace", side_effect=flaky), mock.patch("ttb.runtime.time.sleep"):
+                store.checkpoint(**values)
+            self.assertEqual(store.load("2026-10-29")["fill_count"], 0)
+            locked = PermissionError(5, "Access is denied")
+            with mock.patch("ttb.runtime.os.replace", side_effect=locked), mock.patch("ttb.runtime.time.sleep"):
+                with self.assertRaises(PermissionError):
+                    store.checkpoint(**{**values, "fill_count": 1})
+
     def test_round_trip_only_for_matching_symbol_and_trading_day(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "risk-state.json"

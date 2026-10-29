@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 from .calendar import TradingCalendar, ContractInfo, CalendarCoverageError
+from .health import REPLACE_ATTEMPTS
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -250,4 +252,14 @@ class RiskStateStore:
                 json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
-            os.replace(temporary, self.path)
+            # Every decision checkpoints, and a reader that briefly opens the
+            # file without FILE_SHARE_DELETE (antivirus, an operator's editor)
+            # makes the Windows replace fail; retry before failing the session.
+            for attempt in range(REPLACE_ATTEMPTS):
+                try:
+                    os.replace(temporary, self.path)
+                    return
+                except PermissionError:
+                    if attempt + 1 == REPLACE_ATTEMPTS:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))

@@ -38,7 +38,9 @@
     "TWD",
     "--disable-after-hours",
     "--strategy-params-json",
-    "{\"previous_day_equity\": 2000000}"
+    "{\"previous_day_equity\": 2000000}",
+    "--poll-seconds",
+    "2"
   ],
   "liveGate": {
     "probeBeforeFirstLive": true
