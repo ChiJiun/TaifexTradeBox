@@ -13,25 +13,32 @@ TTB Automation supervisor. Switching to ttb requires every check to pass:
   * no manual-reconciliation flag
 The live settings (risk arguments, auto-recovery) come from
 config.competition.example.json; symbol, competition and credential target
-are kept from the current config. The first live launch still runs the
-one-lot order/cancel probe (automation/live_gate.py) before any strategy order.
+are kept from the current config. -Template names another template (for
+example config.grid-ccf.example.json); its symbol and strategy then win too.
+The first live launch still runs the one-lot order/cancel probe (automation/live_gate.py) before any strategy order.
 #>
 param(
     [Parameter(Mandatory = $true)][ValidateSet('shadow', 'ttb')][string]$Mode,
     [string]$WorkDir = 'C:\TTB\Sample\Python',
+    [string]$Template = 'config.competition.example.json',
     [switch]$Apply
 )
 
 $ErrorActionPreference = 'Stop'
 $configPath = Join-Path $WorkDir 'automation\config.json'
-$templatePath = Join-Path $WorkDir 'automation\config.competition.example.json'
+$templatePath = Join-Path $WorkDir (Join-Path 'automation' $Template)
 $current = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
 $template = Get-Content -Raw -LiteralPath $templatePath -Encoding UTF8 | ConvertFrom-Json
 $checks = [ordered]@{}
 
 if ($Mode -eq 'ttb') {
     $new = $template
-    foreach ($keep in 'symbol', 'ttbCompetition', 'ttbCredentialTarget', 'strategy', 'strategyModule') {
+    $keepKeys = if ($Template -eq 'config.competition.example.json') {
+        'symbol', 'ttbCompetition', 'ttbCredentialTarget', 'strategy', 'strategyModule'
+    } else {
+        'ttbCompetition', 'ttbCredentialTarget'
+    }
+    foreach ($keep in $keepKeys) {
         # An empty value (config.example.json ships strategyModule "") must not
         # replace the template's choice.
         if (-not [string]::IsNullOrWhiteSpace([string]$current.$keep)) { $new.$keep = $current.$keep }

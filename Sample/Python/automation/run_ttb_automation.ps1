@@ -181,7 +181,10 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
 
     if ($config.mode -eq 'ttb' -and ($null -eq $config.liveGate -or $config.liveGate.probeBeforeFirstLive -ne $false)) {
         # One far-limit order/cancel probe per contract before strategy orders.
-        $gate = Invoke-PythonTool 'live_gate' @('-m', 'automation.live_gate', '--symbol', [string]$config.symbol)
+        $gateArgs = @('-m', 'automation.live_gate', '--symbol', [string]$config.symbol)
+        if ($config.liveGate -and $config.liveGate.tickSize) { $gateArgs += @('--tick-size', [string]$config.liveGate.tickSize) }
+        if ($config.liveGate -and $config.liveGate.distanceTicks) { $gateArgs += @('--distance-ticks', [string]$config.liveGate.distanceTicks) }
+        $gate = Invoke-PythonTool 'live_gate' $gateArgs
         if ($gate -eq 3) {
             Write-SupervisorLog 'live gate deferred (market closed or no quote yet); retrying in 60s'
             Start-Sleep -Seconds 60
