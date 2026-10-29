@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import threading
 from typing import Any, Literal
 
 
@@ -158,9 +159,13 @@ class HttpTTBModule:
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.session = session or requests.Session()
+        # A multi-leg bot shares one module across engine and quote threads;
+        # requests.Session is not documented as thread-safe.
+        self._lock = threading.Lock()
 
     def _post(self, endpoint: str, payload: Any = None) -> Any:
-        response = self.session.post(f"{self.host}/api/Trade/{endpoint}", json=payload, timeout=self.timeout)
+        with self._lock:
+            response = self.session.post(f"{self.host}/api/Trade/{endpoint}", json=payload, timeout=self.timeout)
         try:
             return json.loads(response.text)
         except json.JSONDecodeError as exc:

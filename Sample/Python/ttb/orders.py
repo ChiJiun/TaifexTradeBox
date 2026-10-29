@@ -16,6 +16,7 @@ from .journal import ExecutionJournal
 
 
 LOG = logging.getLogger("ttb.orders")
+ENTRY_BLOCK_RETRY_SECONDS = 5.0
 
 
 class ReportChannelLost(RuntimeError):
@@ -274,6 +275,7 @@ class TTBOrderGateway:
         self.unknown_order_nos: set[str] = set()
         self.unsafe_reason = ""
         self.risk_block_reason = ""
+        self.entry_blocked_until = 0.0
 
     def set_trading_day(self, trading_day: str) -> None:
         if self.current_trading_day != trading_day:
@@ -295,6 +297,58 @@ class TTBOrderGateway:
             self.unsafe_reason = reason
         LOG.critical("TTB order safety latch: %s", self.unsafe_reason)
         raise RuntimeError(self.unsafe_reason)
+
+    def bootstrap(self) -> None:
+        """Load the account baseline before any leg of a multi-leg bot trades.
+
+        The baseline demands a flat account with no working order, so every
+        leg sharing the account must take it before the first one sends.
+        """
+        self._assert_safe()
+        if self.bootstrapped:
+            return
+        response = self.api.query_orders()
+        position_response = self.api.query_positions()
+        if not is_success_response(response) or not is_success_response(position_response):
+            raise RuntimeError("TTB baseline reconciliation failed")
+        self.reported_position = reported_position(position_response, self.config.symbol)
+        self._load_baseline(_response_rows(response), position_response)
+
+    def _load_baseline(self, rows: list[dict[str, Any]], position_response: Any) -> None:
+        self.preexisting_order_nos = {
+            order_number(row)
+            for row in rows
+            if order_number(row)
+        }
+        # A one-symbol bot must not start when another contract has
+        # unowned account exposure (including the old expiry month).
+        # Otherwise a manual symbol edit could effectively cross-roll an
+        # unresolved position without reconciliation.
+        working = [
+            order_number(row) or "UNKNOWN"
+            for row in rows if is_working_order(row)
+        ]
+        if working:
+            raise RuntimeError(
+                "Working orders already exist in TTB account; reconcile manually before startup: "
+                + ", ".join(working)
+            )
+        open_positions = [
+            row for row in _response_rows(position_response)
+            if _strict_quantity(
+                _value(row, "Hold", "HOLD", "PositionQty", "Qty", default=None),
+                "position quantity",
+            ) > 0
+        ]
+        if open_positions:
+            raise RuntimeError(
+                "Non-flat TTB account position exists; reconcile ALL symbols before startup"
+            )
+        self.bootstrapped = True
+        LOG.info(
+            "TTB baseline loaded: %s existing order ids ignored; position confirmed flat",
+            len(self.preexisting_order_nos),
+        )
 
     def before_decision(self, quote: Quote) -> list[Fill]:
         self._assert_safe()
@@ -322,40 +376,7 @@ class TTBOrderGateway:
             self.record_event("broker_report", report_summary)
             self._last_broker_report = report_summary
         if not self.bootstrapped:
-            self.preexisting_order_nos = {
-                order_number(row)
-                for row in rows
-                if order_number(row)
-            }
-            # A one-symbol bot must not start when another contract has
-            # unowned account exposure (including the old expiry month).
-            # Otherwise a manual symbol edit could effectively cross-roll an
-            # unresolved position without reconciliation.
-            working = [
-                order_number(row) or "UNKNOWN"
-                for row in rows if is_working_order(row)
-            ]
-            if working:
-                raise RuntimeError(
-                    "Working orders already exist in TTB account; reconcile manually before startup: "
-                    + ", ".join(working)
-                )
-            open_positions = [
-                row for row in _response_rows(position_response)
-                if _strict_quantity(
-                    _value(row, "Hold", "HOLD", "PositionQty", "Qty", default=None),
-                    "position quantity",
-                ) > 0
-            ]
-            if open_positions:
-                raise RuntimeError(
-                    "Non-flat TTB account position exists; reconcile ALL symbols before startup"
-                )
-            self.bootstrapped = True
-            LOG.info(
-                "TTB baseline loaded: %s existing order ids ignored; position confirmed flat",
-                len(self.preexisting_order_nos),
-            )
+            self._load_baseline(rows, position_response)
             return []
         self._bind_sent_orders(rows)
         # Check the entire report before applying any fills or permitting a
@@ -483,7 +504,16 @@ class TTBOrderGateway:
             elif current and wanted and self._stale(current, wanted):
                 self._cancel(side, current)
             elif wanted and not current and side not in self.pending:
-                self._place(wanted)
+                if wanted.role == "entry" and time.monotonic() < self.entry_blocked_until:
+                    continue
+                try:
+                    self._place(wanted)
+                except PreTradeRiskError:
+                    if wanted.role != "entry":
+                        raise
+                    # Full margin or order budget only skips the entry; the
+                    # bot keeps managing its exits instead of stopping.
+                    self.entry_blocked_until = time.monotonic() + ENTRY_BLOCK_RETRY_SECONDS
 
     def _stale(self, current: dict[str, Any], wanted: OrderIntent) -> bool:
         # A fill on the other side can turn an opening order into a closing
@@ -503,14 +533,17 @@ class TTBOrderGateway:
                 margin_supplier=self.api.query_margin,
             )
         except PreTradeRiskError as exc:
-            self.risk_block_reason = str(exc)
-            # A crash in audit persistence itself also blocks the order.
-            self.record_event("risk_block", {
-                "reason": self.risk_block_reason,
-                "role": intent.role,
-                "side": intent.side,
-                "quantity": intent.quantity,
-            })
+            reason = str(exc)
+            # A blocked entry is retried every few seconds; journal each
+            # reason once. A crash in audit persistence also blocks the order.
+            if reason != self.risk_block_reason:
+                self.record_event("risk_block", {
+                    "reason": reason,
+                    "role": intent.role,
+                    "side": intent.side,
+                    "quantity": intent.quantity,
+                })
+            self.risk_block_reason = reason
             raise
         self.risk_block_reason = ""
         # Persist the attempt before the network side effect; do not allow a
