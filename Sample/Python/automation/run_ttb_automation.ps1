@@ -47,7 +47,7 @@ function Invoke-TtbLogin {
     $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
     # Live orders must never run while TTB may resend failed orders on its own.
-    if ($config.mode -eq 'ttb') { $loginArgs += @('--require-auto-resubmit-off', '--require-report-channel') }
+    if ($config.mode -eq 'ttb') { $loginArgs += @('--require-auto-resubmit-off', '--require-report-channel', '--require-quotes') }
     return Invoke-PythonTool 'ttb_login' $loginArgs
 }
 
@@ -132,7 +132,7 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         # A fresh TTB login re-reads the day's orders from the server, so
         # recovery afterwards sees any order the dead socket never reported.
         $channelFailures += 1
-        Write-SupervisorLog "TTB report channel dead ($channelFailures in a row); restarting TTB"
+        Write-SupervisorLog "TTB report channel or quote subscription not confirmed ($channelFailures in a row); restarting TTB"
         Stop-Process -Name TTB -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds $(if ($channelFailures -ge 3) { 300 } else { 5 })
         continue

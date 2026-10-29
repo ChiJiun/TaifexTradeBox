@@ -13,6 +13,7 @@ from auto_recover_ttb import main as auto_recover_main
 from automation.ttb_login import (
     Credential,
     LoginError,
+    QuoteNotSubscribed,
     ReportChannelDead,
     choose_competition,
     decode_secret,
@@ -306,6 +307,22 @@ class LoginTests(unittest.TestCase):
                 self.assertTrue(call()["ok"])
             else:
                 with self.assertRaises(ReportChannelDead):
+                    call()
+
+    def test_live_login_refuses_an_unconfirmed_quote_subscription(self):
+        from ttb.session import SessionProbe
+        ok = SessionProbe(api_reachable=True, codes={"margin": "0000", "orders": "0000", "positions": "0000"})
+        for symbols, confirmed in ((("TMFK6",), True), (("TMFK6", "BAD"), False)):
+            window = FakeWindow(logged=True, auto_resubmit="off")
+            call = lambda: ensure_logged_in(
+                competition="", credential_target="t", ttb_exe=Path("TTB.exe"), probe=lambda: ok,
+                window_factory=lambda: window, quote_symbols=symbols,
+                require_auto_resubmit_off=True, require_report_channel=True, require_quotes=True,
+            )
+            if confirmed:
+                self.assertEqual(call()["quotes"], {"TMFK6": "subscribed"})
+            else:
+                with self.assertRaises(QuoteNotSubscribed):
                     call()
 
     def test_no_submit_stops_before_login(self):
@@ -610,6 +627,7 @@ class CompetitionConfigTests(unittest.TestCase):
     def test_live_supervisor_restarts_ttb_when_the_report_channel_is_dead(self):
         supervisor = (HERE / "automation" / "run_ttb_automation.ps1").read_text(encoding="utf-8")
         self.assertIn("'--require-report-channel'", supervisor)
+        self.assertIn("'--require-quotes'", supervisor)
         restart = supervisor[supervisor.index("$login -eq 5"):]
         self.assertLess(restart.index("Stop-Process -Name TTB"), restart.index("continue"))
 
