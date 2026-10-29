@@ -13,8 +13,9 @@ TTB Automation supervisor. Switching to ttb requires every check to pass:
   * no manual-reconciliation flag
 The live settings (risk arguments, auto-recovery) come from
 config.competition.example.json; symbol, competition and credential target
-are kept from the current config. -Template names another template (for
-example config.grid-ccf.example.json); its symbol and strategy then win too.
+are kept from the current config. An explicit -Template (for example
+config.grid-ccf.example.json, or config.competition.example.json to switch
+back from a grid) makes the template's symbol and strategy win too.
 The first live launch still runs the one-lot order/cancel probe (automation/live_gate.py) before any strategy order.
 #>
 param(
@@ -33,7 +34,7 @@ $checks = [ordered]@{}
 
 if ($Mode -eq 'ttb') {
     $new = $template
-    $keepKeys = if ($Template -eq 'config.competition.example.json') {
+    $keepKeys = if (-not $PSBoundParameters.ContainsKey('Template')) {
         'symbol', 'ttbCompetition', 'ttbCredentialTarget', 'strategy', 'strategyModule'
     } else {
         'ttbCompetition', 'ttbCredentialTarget'
@@ -47,7 +48,8 @@ if ($Mode -eq 'ttb') {
     $new.autoLogin = $true
     $target = if ($new.ttbCredentialTarget) { [string]$new.ttbCredentialTarget } else { 'TaifexTradeBox/TTB' }
     $checks.credentialStored = (((& cmdkey.exe "/list:$target" 2>&1) | Out-String) -match [regex]::Escape($target))
-    $checks.competitionSet = -not [string]::IsNullOrWhiteSpace([string]$new.ttbCompetition)
+    # Templates ship a <placeholder> competition name.
+    $checks.competitionSet = -not ([string]::IsNullOrWhiteSpace([string]$new.ttbCompetition) -or ([string]$new.ttbCompetition).StartsWith('<'))
     $checks.noReconcileFlag = -not (Test-Path (Join-Path $WorkDir 'output\supervisor\manual-reconciliation-required.flag'))
     Push-Location $WorkDir
     try {

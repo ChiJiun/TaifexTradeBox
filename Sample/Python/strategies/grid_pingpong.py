@@ -24,8 +24,8 @@ class GridSettings:
     grid_points: float = 4.0
     exit_grids: int = 1
     levels: int = 3
-    # Flatten once every level on a side is held and price runs this many
-    # grids past the outermost one; negative disables the stop.
+    # Flatten once price runs this many grids past the outermost level, held
+    # or not; negative disables the stop.
     stop_grids: float = 3.0
     reanchor_grids: float = 1.0
     first_entry_minute: int = 8 * 60 + 46
@@ -35,13 +35,15 @@ class GridSettings:
     stop_ttl_seconds: float = 6.0
 
     def validate(self, config: StrategyConfig) -> None:
-        if self.grid_points <= 0 or self.exit_grids < 1 or self.levels < 1 or self.reanchor_grids <= 0:
+        if self.grid_points <= 0 or self.exit_grids < 1 or self.levels < 1:
             raise ValueError("invalid grid geometry")
+        if not 0 < self.reanchor_grids <= 1:
+            # Farther re-anchoring leaves a flat grid's first level on the
+            # wrong side of the market.
+            raise ValueError("reanchor_grids must be in (0, 1]")
         ticks = self.grid_points / config.tick_size
         if abs(ticks - round(ticks)) > 1e-9:
             raise ValueError("grid_points must be a multiple of tick_size")
-        if self.stop_grids >= 0 and self.levels + self.stop_grids < self.reanchor_grids:
-            raise ValueError("a stop must leave price past the re-anchor distance")
         if self.levels * config.base_qty > config.max_inventory:
             raise ValueError("levels * base_qty exceeds max_inventory")
         if not (self.first_entry_minute < self.last_entry_minute < self.flatten_minute):
@@ -68,6 +70,7 @@ class GridPingPongStrategy:
         self.settings.validate(config)
         self.features = FeatureEngine(config)
         self.anchor: float | None = None
+        self.last_position = 0
         self.stopping = False
         self.risk_exit: OrderIntent | None = None
         self.risk_exit_at = 0.0
@@ -100,6 +103,12 @@ class GridPingPongStrategy:
         if self.anchor is None:
             self.anchor = self._snap(quote.last) if pos == 0 else self._infer_anchor(pos)
             LOGGER.info("grid anchor %.2f (position %s)", self.anchor, pos)
+        if pos * self.last_position <= 0 and pos != 0:
+            # Fills reach the ledger a poll late, and a flat re-anchor in the
+            # meantime may have moved the anchor onto the fill price. Rebuild
+            # it from the fills so the exit stays one grid away.
+            self.anchor = self._infer_anchor(pos)
+        self.last_position = pos
         held = math.ceil(abs(pos) / q)
         sign = 1 if pos > 0 else -1
 
@@ -108,7 +117,9 @@ class GridPingPongStrategy:
             self.risk_exit = None
         else:
             outer = self.anchor - sign * (s.levels + s.stop_grids) * g
-            if s.stop_grids >= 0 and held >= s.levels and sign * (quote.last - outer) <= 0:
+            # A gap can cross the stop line before every level fills; stop on
+            # the line itself so the grid never buys its way down to it.
+            if s.stop_grids >= 0 and sign * (quote.last - outer) <= 0:
                 # Stay in the stop until flat: after a partial fill the
                 # remaining levels must not re-arm entries above the market.
                 self.stopping = True
@@ -139,4 +150,8 @@ class GridPingPongStrategy:
             if entries_open and held < s.levels:
                 intents.append(OrderIntent("buy" if pos > 0 else "sell", deepest - sign * g, q,
                                            "entry", f"grid level {held + 1}"))
+        # An entry already through the market would fill at once above (below)
+        # its level; skip it until price comes back to the level.
+        intents = [i for i in intents if i.role != "entry" or (
+            i.price <= quote.last and i.price < quote.ask if i.side == "buy" else i.price >= quote.last and i.price > quote.bid)]
         return StrategyDecision(tuple(intents), features, False, f"grid anchor {self.anchor:g} held {held}")
