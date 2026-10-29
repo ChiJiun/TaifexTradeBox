@@ -80,4 +80,6 @@ powershell -File automation\set_mode.ps1 -Mode ttb -Template config.grid-ccf.exa
 powershell -File automation\set_mode.ps1 -Mode ttb -Template config.competition.example.json
 ```
 
+股票期貨的成交比台指期稀疏很多。研究期間 CCF 每天約有 7 次、CDF 約 16 次超過 120 秒沒有成交。如果 TTB 只在成交時推送報價，預設的 `--quote-stale-seconds 5` 會讓 bot 一天撤掉全部掛單幾百次，`--stale-fatal-seconds 120` 也會讓它停機。所以範本放寬為 CCF 300／900 秒、CDF 600／1800 秒，依據是研究期間超過這些門檻的空窗每天不到 1 次。
+
 範本的 `liveGate.tickSize` 和 `liveGate.distanceTicks` 會讓探針單掛在市價下方約 5～6%，落在漲跌停範圍內。目前架構一個帳戶只能跑一隻 bot，啟動時要求整個帳戶沒有持倉和掛單，所以 CCF 和 CDF 不能同時跑。

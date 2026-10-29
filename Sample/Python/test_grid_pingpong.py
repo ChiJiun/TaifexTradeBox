@@ -191,6 +191,12 @@ class GridTemplateTests(unittest.TestCase):
                 # A stop flattens every level in one order.
                 self.assertEqual(strategy_config.max_order_qty, strategy.settings.levels)
                 self.assertEqual(config["autoRecovery"]["maxFlattenQty"], strategy.settings.levels)
+                # Stock futures print far less often than TXF: in the study days
+                # CCF went >120 s without a trade about 7 times a day, CDF 16.
+                # A 5 s stale window would cancel every order hundreds of times
+                # a day and the 120 s fatal one would stop the bot.
+                self.assertGreaterEqual(args.quote_stale_seconds, 300)
+                self.assertGreaterEqual(args.stale_fatal_seconds, 900)
                 gate = config["liveGate"]
                 quote = Quote(symbol=symbol, bid=last, ask=last + gate["tickSize"], bid_qty=5, ask_qty=5, last=last,
                               last_qty=1, total_volume=1, exchange_time="09:00:00", received_at=1.0)
