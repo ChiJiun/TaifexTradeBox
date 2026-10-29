@@ -385,6 +385,113 @@ class LiveOwnershipSafetyTests(unittest.TestCase):
             ])
 
 
+class PlaceQueryReuseTests(unittest.TestCase):
+    """_place reuses fresh reads instead of 0.5 s+ TTB queries per order."""
+
+    def setup_gateway(self, margin_cache_seconds=5.0):
+        module = FakeModule()
+        module.rows = []
+
+        def orders():
+            module.calls.append(("orders", None))
+            return {"Code": "0000", "Data": module.rows}
+
+        module.QUERYRESTOREREPORT = orders
+        module.NEWORDER = lambda payload: module.calls.append(("new", payload)) or {"Code": "0000"}
+        config = StrategyConfig(symbol="TXFA7", max_order_qty=1, max_inventory=3)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gateway = TTBOrderGateway(
+            module, config, PositionLedger(config), 0.25,
+            risk_limits=PreTradeLimits(
+                max_notional=100000000,
+                available_margin_field="Available",
+                minimum_available_margin=1000,
+            ),
+            risk_counters_path=Path(tmp.name) / "rates.json",
+            margin_cache_seconds=margin_cache_seconds,
+        )
+        gateway.before_decision(quote())
+        return module, gateway
+
+    @staticmethod
+    def count(module, name):
+        return sum(1 for call, _ in module.calls if call == name)
+
+    def place(self, gateway, *intents):
+        gateway.pending.clear()
+        gateway.active.clear()
+        gateway.sync(tuple(intents), quote())
+
+    def test_poll_reads_positions_before_the_order_report(self):
+        module, gateway = self.setup_gateway()
+        polled = [name for name, _ in module.calls if name in ("fills", "orders")]
+        self.assertEqual(polled, ["fills", "orders"])
+
+    def test_order_right_after_a_poll_binds_against_that_poll(self):
+        module, gateway = self.setup_gateway()
+        before = self.count(module, "orders")
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "orders"), before)
+        self.assertEqual(self.count(module, "new"), 1)
+
+    def test_stale_poll_takes_a_fresh_snapshot_that_excludes_late_rows(self):
+        module, gateway = self.setup_gateway()
+        gateway._report_read_at -= 1.0
+        # A same-price row that reached the report after the last poll, e.g. a
+        # slow fresh-login backfill, must never be bound to the next order.
+        late = LiveOwnershipSafetyTests.row(order_no="LATE", remaining="0")
+        late["STAT"] = "刪單成功"
+        module.rows = [late]
+        before = self.count(module, "orders")
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "orders"), before + 1)
+        self.assertIn("LATE", gateway.pending["buy"]["known"])
+
+    def test_entries_reuse_margin_while_position_does_not_grow(self):
+        module, gateway = self.setup_gateway()
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"),
+                   OrderIntent("sell", 20010, 1, "entry", "test"))
+        self.place(gateway, OrderIntent("buy", 19990, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "new"), 3)
+        self.assertEqual(self.count(module, "margin"), 1)
+
+    def test_position_growth_forces_a_fresh_margin_read(self):
+        module, gateway = self.setup_gateway()
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        gateway.ledger.position = 1
+        self.place(gateway, OrderIntent("buy", 19990, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "margin"), 2)
+        gateway.ledger.position = 0
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "margin"), 2)
+
+    def test_expired_or_disabled_margin_cache_reads_again(self):
+        module, gateway = self.setup_gateway()
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        read_at, exposure, response = gateway._margin_cache
+        gateway._margin_cache = (read_at - 5.0, exposure, response)
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "margin"), 2)
+
+        module, gateway = self.setup_gateway(margin_cache_seconds=0)
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "margin"), 2)
+
+    def test_failed_margin_read_is_not_cached(self):
+        from ttb.risk import PreTradeRiskError
+        module, gateway = self.setup_gateway()
+        good = module.QUERYMARGIN
+        module.QUERYMARGIN = lambda: module.calls.append(("margin", None)) or {"Code": "9999"}
+        with self.assertRaises(PreTradeRiskError):
+            self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        module.QUERYMARGIN = good
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "margin"), 2)
+        self.assertEqual(self.count(module, "new"), 1)
+
+
 class OrderProbeTests(unittest.TestCase):
     def test_far_buy_price_is_below_bid(self):
         self.assertEqual(far_limit_price(quote(), "buy", 1, 2000), 18000)
