@@ -21,6 +21,7 @@ LOG = logging.getLogger("ttb.orders")
 # order report read no longer ago than this leaves a binding window no wider
 # than a fresh snapshot taken right before NEWORDER did.
 REPORT_REUSE_SECONDS = 0.5
+MAX_MARGIN_CACHE_SECONDS = 30.0
 
 
 class ReportChannelLost(RuntimeError):
@@ -281,7 +282,9 @@ class TTBOrderGateway:
         self.unsafe_reason = ""
         self.risk_block_reason = ""
         # Each TTB call costs 0.5 s or more; reuse recent reads in _place.
-        self.margin_cache_seconds = max(0.0, margin_cache_seconds)
+        if not 0.0 <= margin_cache_seconds <= MAX_MARGIN_CACHE_SECONDS:
+            raise ValueError(f"margin_cache_seconds must be within 0..{MAX_MARGIN_CACHE_SECONDS:g}")
+        self.margin_cache_seconds = margin_cache_seconds
         self._margin_cache: tuple[float, int, Any] | None = None
         self._report_order_nos: set[str] = set()
         self._report_read_at = float("-inf")
@@ -557,14 +560,21 @@ class TTBOrderGateway:
         )
 
     def _margin_response(self) -> Any:
-        """QUERYMARGIN, reused for a few seconds while the position has not grown.
+        """QUERYMARGIN, reused for a few seconds while exposure has not grown.
 
-        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). Margin is
-        only consumed by new position, so a read taken at an equal or larger
-        position still bounds the headroom; any growth forces a fresh read.
+        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). Exposure is
+        the worst one-sided position including working and unbound orders, as
+        in validate_exposure: a read taken at an equal or larger exposure still
+        bounds the headroom even if TTB reserves margin for working orders, and
+        any growth forces a fresh read.
         """
         now = time.monotonic()
-        exposure = abs(self.ledger.position)
+        working = [(side, int(order.get("qty", 0))) for side, order in self.active.items()]
+        working += [(side, int(sent["intent"].quantity)) for side, sent in self.pending.items()]
+        buys = sum(qty for side, qty in working if side == "buy")
+        sells = sum(qty for side, qty in working if side == "sell")
+        position = self.ledger.position
+        exposure = max(abs(position + buys), abs(position - sells))
         if self._margin_cache is not None:
             read_at, read_exposure, response = self._margin_cache
             if now - read_at < self.margin_cache_seconds and exposure <= read_exposure:
@@ -574,14 +584,14 @@ class TTBOrderGateway:
         return response
 
     def _remember_report(self, rows: list[dict[str, Any]], read_at: float) -> None:
-        self._report_order_nos = {order_number(row) for row in rows}
+        self._report_order_nos = {order_number(row) for row in rows if order_number(row)}
         self._report_read_at = read_at
 
-    def _report_snapshot(self) -> set[str]:
+    def _report_snapshot(self, fresh: bool = False) -> set[str]:
         # Every OrdNo already in the report before NEWORDER can never be the
         # new order, even a same-price row that arrived after the last poll.
         # A poll read within REPORT_REUSE_SECONDS stands in for a fresh read.
-        if time.monotonic() - self._report_read_at <= REPORT_REUSE_SECONDS:
+        if not fresh and time.monotonic() - self._report_read_at <= REPORT_REUSE_SECONDS:
             return set(self._report_order_nos)
         rows = _response_rows(self.api.query_orders())
         self._remember_report(rows, time.monotonic())
@@ -706,7 +716,8 @@ class TTBOrderGateway:
                     "side": side, "quantity": abs(self.reported_position),
                     "role": "shutdown_flatten", "price": price,
                 })
-                known = self._report_snapshot()
+                # A shutdown flatten is rare; never bind it against a reused read.
+                known = self._report_snapshot(fresh=True)
                 response = self.api.new_order(
                     TTBOrderRequest(
                         symbol=self.config.symbol,

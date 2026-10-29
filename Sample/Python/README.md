@@ -193,7 +193,7 @@ TTB gateway 在送新入口單之前會檢查：
 - `--max-inventory`：計入當前部位與雙向工作中委託的最壞淨持倉。
 - `--max-notional`：依商品乘數與委託價估算的名目曝險上限，live 進場**必須明確設定正數**。
 - `--available-margin-field` 與 `--min-available-margin`：從 `QUERYMARGIN()` 的指定欄位確認可用保證金下限；**欄位必須先由真實 TTB 虛擬帳戶的回報驗證，不得猜測**。未提供欄位或回覆格式不確定則拒絕新入口。
-- `--margin-cache-seconds`（預設 5）：TTB 的 `QUERYMARGIN` 每次約 0.7 秒。在這段時間內、而且部位口數沒有增加時，進場單沿用上一次成功的查詢結果；部位一增加、超過時效或上次查詢失敗，就重新查詢。設 0 表示每張進場單都查。
+- `--margin-cache-seconds`（預設 5）：TTB 的 `QUERYMARGIN` 每次約 0.7 秒。在這段時間內、而且曝險口數（含工作中與尚未綁定單號的委託，算法同 `--max-inventory`）沒有增加時，進場單沿用上一次成功的查詢結果；曝險一增加、超過時效或上次查詢失敗，就重新查詢。設 0 表示每張進場單都查，上限 30。
 
 次數統計先寫入 `output/rate-counters-SYMBOL.json` 再送 API，正常重啟不會歸零。該檔案**不可人工重設**，也不會被 14 天的 CSV cleanup 移除。持倉風險退出採 reduce-only 驗證，仍允許在超過一般進場速率限制時執行風險退出。
 
