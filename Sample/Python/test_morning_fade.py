@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from strategy_core import Fill, PositionLedger, Quote, StrategyConfig
 from strategies.morning_fade import MorningFadeStrategy
@@ -71,6 +72,52 @@ class MorningFadeTests(unittest.TestCase):
             again = self.make(state_path=state)
             (intent,) = again.decide(tick("10:00:00", 46400, 2.0)).intents
             self.assertEqual(intent.side, "buy")
+
+    def test_a_new_day_in_the_same_process_starts_over(self):
+        strategy = self.make()
+        days = iter(["2026-10-29", "2026-10-30"])
+        today = next(days)
+        strategy._today = lambda: today
+        strategy.decide(tick("08:45:00", 46800, 1.0))
+        strategy.decide(tick("10:00:00", 47100, 2.0))
+        today = next(days)
+        strategy.decide(tick("08:45:00", 47000, 3.0))
+        # Day two falls from its own open, so the fade buys.
+        (intent,) = strategy.decide(tick("10:00:00", 46900, 4.0)).intents
+        self.assertEqual(intent.side, "buy")
+
+    def test_a_late_first_quote_is_not_taken_as_the_open(self):
+        strategy = self.make()
+        strategy.decide(tick("08:48:00", 46500, 1.0))
+        self.assertEqual(strategy.decide(tick("10:00:00", 46600, 2.0)).intents, ())
+
+    def test_requote_keeps_the_first_side(self):
+        strategy = self.make()
+        strategy.decide(tick("08:45:00", 46500, 1.0))
+        (first,) = strategy.decide(tick("10:00:00", 46501, 2.0)).intents
+        (second,) = strategy.decide(tick("10:00:07", 46490, 9.0)).intents
+        self.assertEqual((first.side, second.side, second.price), ("sell", "sell", 46489 - 2))
+
+    def test_restart_after_the_entry_was_sent_does_not_enter_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = str(Path(folder) / "fade.json")
+            strategy = self.make(state_path=state)
+            strategy.decide(tick("08:45:00", 46500, 1.0))
+            self.assertEqual(len(strategy.decide(tick("10:00:00", 46600, 2.0)).intents), 1)
+            again = self.make(state_path=state)
+            self.assertEqual(again.decide(tick("10:01:00", 46600, 3.0)).intents, ())
+
+    def test_a_locked_state_file_does_not_stop_trading(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "fade.json"
+            strategy = self.make(state_path=str(state))
+            locked = mock.patch("strategies.morning_fade.os.replace", side_effect=PermissionError(5, "denied"))
+            with locked, mock.patch("strategies.morning_fade.time.sleep"), self.assertLogs("strategies.morning_fade"):
+                strategy.decide(tick("08:45:00", 46500, 1.0))
+                self.assertEqual(len(strategy.decide(tick("10:00:00", 46600, 2.0)).intents), 1)
+            self.assertFalse(state.exists())
+            strategy.decide(tick("10:00:01", 46600, 3.0))
+            self.assertTrue(json.loads(state.read_text(encoding="utf-8"))["traded"])
 
     def test_competition_template_parameters_build_the_strategy(self):
         template = Path(__file__).resolve().parent / "automation" / "config.competition.example.json"
