@@ -60,7 +60,7 @@ class ContractInfo:
     @classmethod
     def from_symbol(cls, symbol: str, reference_year: int) -> "ContractInfo":
         code = symbol.upper().strip()
-        match = re.fullmatch(r"(TXF|MTX|TMF)([A-L])(\d)", code)
+        match = CONTRACT_CODE.fullmatch(code)
         if not match:
             raise ValueError(f"unsupported/ambiguous TAIFEX contract code: {symbol}")
         candidates = [year for year in range(reference_year - 5, reference_year + 6)
@@ -93,7 +93,13 @@ class ContractInfo:
         return cls(f"{code}{chr(ord('A') + month - 1)}{year % 10}", code, month, year)
 
 
-SUPPORTED_PRODUCTS = ("TXF", "MTX", "TMF")
+INDEX_FUTURES = ("TXF", "MTX", "TMF")
+# Stock futures also stop trading on the delivery month's third Wednesday
+# (https://www.taifex.com.tw/cht/2/stockLists). Only the contracts the grid
+# research covered are listed; commodity and FX futures expire differently.
+STOCK_FUTURES = ("CDF", "CCF", "DHF", "FZF")
+SUPPORTED_PRODUCTS = INDEX_FUTURES + STOCK_FUTURES
+CONTRACT_CODE = re.compile(rf"({'|'.join(SUPPORTED_PRODUCTS)})([A-L])(\d)")
 AUTO_SYMBOL_PREFIX = "auto:"
 
 

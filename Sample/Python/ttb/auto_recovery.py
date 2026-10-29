@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .calendar import CONTRACT_CODE, SUPPORTED_PRODUCTS
 from .orders import _response_rows, is_working_order, order_number, order_symbol, reported_position, _value
 from .reconciliation import AccountInspectionError, AccountSnapshot, append_audit, inspect_account
 from .runtime import TAIPEI_TZ
 
 
 FLAG_NAME = "manual-reconciliation-required.flag"
-FUTURES_CODE = re.compile(r"(TXF|MTX|TMF)[A-L]\d")
 
 
 class RecoveryRefused(RuntimeError):
@@ -152,9 +151,9 @@ def auto_recover(
         return {"ok": True, "action": "already_clean", "flag_cleared": cleared}
 
     positions = _signed_positions(api)
-    unsupported = sorted(symbol for symbol in positions if not FUTURES_CODE.fullmatch(symbol))
+    unsupported = sorted(symbol for symbol in positions if not CONTRACT_CODE.fullmatch(symbol))
     if unsupported:
-        raise RecoveryRefused(f"positions outside TXF/MTX/TMF futures need manual handling: {unsupported}")
+        raise RecoveryRefused(f"positions outside {'/'.join(SUPPORTED_PRODUCTS)} futures need manual handling: {unsupported}")
     if any(abs(qty) > policy.max_flatten_qty for qty in positions.values()):
         raise RecoveryRefused(f"position larger than max_flatten_qty={policy.max_flatten_qty}: {positions}")
     if positions and not market_open:

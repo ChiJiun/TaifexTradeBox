@@ -92,7 +92,7 @@ def _real_probe(args: argparse.Namespace) -> Callable[[str], int]:
 
         return probe_main([
             "--symbol", symbol, "--side", args.side,
-            "--distance-ticks", str(args.distance_ticks),
+            "--tick-size", str(args.tick_size), "--distance-ticks", str(args.distance_ticks),
             "--host", args.host, "--zmq-port", str(args.zmq_port),
             "--output", str(args.probe_dir),
             "--confirm-virtual-order-probe", "--confirm-flat-account", "--confirm-bot-stopped",
@@ -106,6 +106,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--calendar-file", type=Path, default=Path("automation/taifex_calendar_2026.json"))
     parser.add_argument("--probe-dir", type=Path, default=Path("output/order-probes"))
     parser.add_argument("--side", choices=("buy", "sell"), default="buy")
+    # The probe price must stay inside the daily price limit: 2000 ticks of 1
+    # suits TMF, while stock futures need their own tick and distance.
+    parser.add_argument("--tick-size", type=float, default=1.0)
     parser.add_argument("--distance-ticks", type=int, default=2000)
     parser.add_argument("--host", default="http://localhost:8080")
     parser.add_argument("--zmq-port", type=int, default=51141)

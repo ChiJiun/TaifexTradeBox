@@ -17,6 +17,7 @@
 | [04_COMPETITION_PNL_SHAPING.md](04_COMPETITION_PNL_SHAPING.md) | 依已核實的前日權益，做保守 MTM 盈利封頂、損失及回撤停機 | **部分實作** `strategies.competition_pnl:CompetitionPnlShaping`（未實作資格統計／權益加碼） |
 | `combined.py` | 01＋03＋04 依 MRO 疊加：04 每日權益停損／停利先判斷，03 過濾進場方向，01 產生黏著一跳報價 | **已實作** `strategies.combined:CombinedCompetitionMaker`（競賽設定預設；參數未用真實成交校準） |
 | [05_TSMC_VIRTUAL_MAX_COMBINED.md](05_TSMC_VIRTUAL_MAX_COMBINED.md) | 跨策略的台積電期貨組合狀態機 | **研究中，未實作** |
+| [06_GRID_PINGPONG.md](06_GRID_PINGPONG.md) | 得獎帳戶式逐層乒乓網格：每層 1 口、高一格出場、停損全平、收盤前平倉 | **已實作** `strategies.grid_pingpong:GridPingPongStrategy`（離線回放；觸價成交未在 TTB 驗證） |
 
 ## 建議研究順序
 
