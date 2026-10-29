@@ -89,17 +89,22 @@ class TheoryBook:
     trade_qty: int = 0
     sequence: int = 0
 
-    def committed(self, quote: Quote) -> int:
-        """Position plus orders that cross the market and will fill on the next print."""
+    def committed(self) -> int:
+        """Position plus the orders that crossed the market when the member sent them.
+
+        Such an order stays counted until it fills or the member withdraws it,
+        even if the market runs away: dropping it would cancel the real order
+        just as TTB may be filling it.
+        """
         position = self.ledger.position
         for side, order in self.working.items():
-            if _marketable(order["intent"], quote):
+            if order["crossing"]:
                 position += order["remaining"] if side == "buy" else -order["remaining"]
         return position
 
-    def resting(self, side: str, quote: Quote) -> OrderIntent | None:
+    def resting(self, side: str) -> OrderIntent | None:
         order = self.working.get(side)
-        if order and not _marketable(order["intent"], quote):
+        if order and not order["crossing"]:
             return replace(order["intent"], quantity=order["remaining"])
         return None
 
@@ -126,7 +131,7 @@ class TheoryBook:
             fills.append(Fill(side, price, qty, order["id"], quote.received_at))
         return fills
 
-    def place(self, intents: tuple[OrderIntent, ...], now: float, latency: float) -> list[tuple[str, OrderIntent]]:
+    def place(self, intents: tuple[OrderIntent, ...], quote: Quote, latency: float) -> list[tuple[str, OrderIntent]]:
         """Mirror the member's intents as working orders; return what changed."""
         changes = []
         wanted = {intent.side: intent for intent in intents if intent.quantity > 0}
@@ -139,8 +144,8 @@ class TheoryBook:
                 continue
             self.sequence += 1
             self.working[side] = {
-                "intent": intent, "live_at": now + latency, "remaining": intent.quantity,
-                "id": f"{self.name}-{self.sequence}",
+                "intent": intent, "live_at": quote.received_at + latency, "remaining": intent.quantity,
+                "id": f"{self.name}-{self.sequence}", "crossing": _marketable(intent, quote),
             }
             changes.append(("order", intent))
         return changes
@@ -171,6 +176,8 @@ class PortfolioSettings:
             raise ValueError("equity must be positive and kelly_fraction in (0, 1]")
         if self.latency_seconds < 0 or self.entry_slip_ticks < 0 or self.order_ttl_seconds <= 0:
             raise ValueError("invalid order settings")
+        if self.entry_slip_ticks != int(self.entry_slip_ticks):
+            raise ValueError("entry_slip_ticks must be whole ticks so real prices stay on the tick grid")
 
 
 class PortfolioStrategy:
@@ -327,21 +334,21 @@ class PortfolioStrategy:
             intents = decision.intents
             if no_entry and not book.ledger.position:
                 intents = tuple(intent for intent in intents if intent.role != "entry")
-            for kind, intent in book.place(intents, now, s.latency_seconds):
+            for kind, intent in book.place(intents, quote, s.latency_seconds):
                 self._journal(quote, book.name, kind, side=intent.side, price=intent.price, qty=intent.quantity,
                               role=intent.role, reason=intent.reason)
 
         # Marketable member orders count at once, so the real order leaves
         # together with the theoretical one instead of one latency behind it.
         live = [book for book in self.books if book.qty > 0]
-        total = sum(book.committed(quote) for book in live)
+        total = sum(book.committed() for book in live)
         target = self._clamp(total)
         real = self.ledger.position
         reason = f"portfolio target={target} real={real} " + " ".join(
             f"{book.name}={book.ledger.position}" for book in self.books)
         # A member crossing the market (a stop, a timed exit) must not wait
         # behind a mirrored resting order.
-        crossing = any(book.committed(quote) != book.ledger.position for book in live)
+        crossing = any(book.committed() != book.ledger.position for book in live)
         intent = self._real_intent(target, total, real, crossing, quote)
         return StrategyDecision((intent,) if intent else (), features, False, reason)
 
@@ -394,7 +401,7 @@ class PortfolioStrategy:
         sign = 1 if real > 0 else -1
         best = None
         for book in self.books:
-            order = book.resting(side, quote) if book.qty > 0 else None
+            order = book.resting(side) if book.qty > 0 else None
             if order is None:
                 continue
             after = self._clamp(total - sign * order.quantity)

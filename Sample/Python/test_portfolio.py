@@ -175,6 +175,26 @@ class PortfolioTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PortfolioStrategy(config, PositionLedger(config), members=[member("a")])
 
+    def test_crossing_order_stays_counted_when_the_market_runs_away(self):
+        strategy, (a, b) = self.make(latency_seconds=2.5)
+        strategy.decide(tick("10:00:00", 46500, 1.0, 100))
+        a.strategy.want(OrderIntent("buy", 46503, 2, "entry", "burst"))
+        (intent,) = strategy.decide(tick("10:00:00", 46500, 1.5, 100)).intents
+        # The next print is above the member's price; the real order must not be withdrawn.
+        self.assertEqual(strategy.decide(tick("10:00:01", 46506, 2.0, 101)).intents, (intent,))
+
+    def test_member_withdrawing_its_crossing_order_lowers_the_target(self):
+        strategy, (a, b) = self.make(latency_seconds=2.5)
+        strategy.decide(tick("10:00:00", 46500, 1.0, 100))
+        a.strategy.want(OrderIntent("buy", 46503, 1, "entry", "burst"))
+        strategy.decide(tick("10:00:00", 46500, 1.5, 100))
+        a.strategy.want()
+        self.assertEqual(strategy.decide(tick("10:00:01", 46506, 2.0, 101)).intents, ())
+
+    def test_fractional_entry_slip_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.make(entry_slip_ticks=1.5)
+
     def test_flip_reduces_to_flat_before_reversing(self):
         strategy, (a, b) = self.make()
         self.ledger.on_fill(Fill("buy", 46500, 1, "R1", 0.5))
