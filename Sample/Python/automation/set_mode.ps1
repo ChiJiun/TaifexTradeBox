@@ -48,7 +48,8 @@ if ($Mode -eq 'ttb') {
     $new.autoLogin = $true
     $target = if ($new.ttbCredentialTarget) { [string]$new.ttbCredentialTarget } else { 'TaifexTradeBox/TTB' }
     $checks.credentialStored = (((& cmdkey.exe "/list:$target" 2>&1) | Out-String) -match [regex]::Escape($target))
-    $checks.competitionSet = -not [string]::IsNullOrWhiteSpace([string]$new.ttbCompetition)
+    # Templates ship a <placeholder> competition name.
+    $checks.competitionSet = -not ([string]::IsNullOrWhiteSpace([string]$new.ttbCompetition) -or ([string]$new.ttbCompetition).StartsWith('<'))
     $checks.noReconcileFlag = -not (Test-Path (Join-Path $WorkDir 'output\supervisor\manual-reconciliation-required.flag'))
     Push-Location $WorkDir
     try {

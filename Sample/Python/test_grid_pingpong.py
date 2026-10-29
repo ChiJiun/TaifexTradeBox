@@ -56,6 +56,24 @@ class GridPingPongTests(unittest.TestCase):
         orders = by_side(strategy.decide(tick("09:00:10", 2420, 3.0)))
         self.assertEqual((orders["sell"].price, orders["buy"].price), (2425, 2415))
 
+    def test_a_fill_reported_after_a_reanchor_still_exits_one_grid_higher(self):
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        # The 2425 buy filled, but the ledger has not seen it yet: flat re-anchor.
+        strategy.decide(tick("09:00:01", 2425, 2.0))
+        self.fill("buy", 2425)
+        orders = by_side(strategy.decide(tick("09:00:03", 2425, 3.0)))
+        self.assertEqual((orders["sell"].price, orders["sell"].role), (2430, "exit"))
+        self.assertEqual((orders["buy"].price, orders["buy"].role), (2420, "entry"))
+
+    def test_a_gap_fill_reported_late_does_not_exit_below_the_entry(self):
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        strategy.decide(tick("09:00:01", 2420, 2.0))
+        self.fill("buy", 2425)
+        orders = by_side(strategy.decide(tick("09:00:03", 2420, 3.0)))
+        self.assertEqual(orders["sell"].price, 2430)
+
     def test_short_side_mirrors_the_long_side(self):
         strategy = self.make()
         strategy.decide(tick("09:00:00", 2430, 1.0))

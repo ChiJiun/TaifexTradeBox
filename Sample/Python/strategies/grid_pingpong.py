@@ -70,6 +70,7 @@ class GridPingPongStrategy:
         self.settings.validate(config)
         self.features = FeatureEngine(config)
         self.anchor: float | None = None
+        self.last_position = 0
         self.stopping = False
         self.risk_exit: OrderIntent | None = None
         self.risk_exit_at = 0.0
@@ -102,6 +103,12 @@ class GridPingPongStrategy:
         if self.anchor is None:
             self.anchor = self._snap(quote.last) if pos == 0 else self._infer_anchor(pos)
             LOGGER.info("grid anchor %.2f (position %s)", self.anchor, pos)
+        if pos * self.last_position <= 0 and pos != 0:
+            # Fills reach the ledger a poll late, and a flat re-anchor in the
+            # meantime may have moved the anchor onto the fill price. Rebuild
+            # it from the fills so the exit stays one grid away.
+            self.anchor = self._infer_anchor(pos)
+        self.last_position = pos
         held = math.ceil(abs(pos) / q)
         sign = 1 if pos > 0 else -1
 
