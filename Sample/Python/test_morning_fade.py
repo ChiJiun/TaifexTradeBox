@@ -123,9 +123,9 @@ class MorningFadeTests(unittest.TestCase):
         template = Path(__file__).resolve().parent / "automation" / "config.competition.example.json"
         config = json.loads(template.read_text(encoding="utf-8"))
         args = config["extraArgs"]
-        params = json.loads(args[args.index("--strategy-params-json") + 1])
-        self.assertEqual(config["strategyModule"], "strategies.morning_fade:MorningFadeStrategy")
-        self.assertEqual(self.make(**params).settings.stop_ticks, 150)
+        portfolio = json.loads(args[args.index("--strategy-params-json") + 1])
+        (fade,) = [m for m in portfolio["members"] if m["module"] == "strategies.morning_fade:MorningFadeStrategy"]
+        self.assertEqual(self.make(**fade["params"]).settings.stop_ticks, 150)
 
 
 if __name__ == "__main__":
