@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from strategy_core import Fill, OrderIntent, PositionLedger, Quote, StrategyConfig
-from ttb.api import TTBApi, TTBOrderRequest, position_effect_for
+from ttb.api import TTBApi, TTBApiError, TTBOrderRequest, position_effect_for
 from ttb.orders import TTBOrderGateway
 from ttb.risk import PreTradeLimits
 
@@ -94,6 +94,53 @@ class GatewayPositionEffectTests(unittest.TestCase):
         self.gateway.sync((OrderIntent("sell", 20010, 1, "exit", "test"),), quote())
         self.assertEqual(self.module.cancels, ["A1"])
 
+    def _reject_cancel_with_report(self, status, ordered=1, filled=1, remaining=0):
+        self.gateway.sync((OrderIntent("buy", 19990, 1, "entry", "test"),), quote())
+        self.module.CANCELORDER = lambda payload: {"Code": "9999", "ErrMsg": "cannot cancel"}
+        self.module.QUERYRESTOREREPORT = lambda: {"Code": "0000", "Data": [{
+            "ORDNO": "A1", "COMD_ID": "TXFA7", "BS": "B", "VOLM": str(ordered),
+            "LESS_VOLM": str(remaining), "DEAL_TOTL": str(filled),
+            "DEAL_PRCE": "19990", "ORDR_PRCE": "19990", "STAT": status,
+        }]}
+
+    def _poll_then_replace(self, position):
+        self.module.QUERYRESTOREFILLREPORT = lambda: {"Code": "0000", "Data": [
+            {"COMD_ID": "TXFA7", "BS": "B", "Hold": str(position)}] if position else []}
+        self.gateway.last_poll = 0.0
+        self.gateway.before_decision(quote())
+        self.assertEqual(self.gateway.cancel_requested, set())
+        self.assertEqual(self.ledger.position, position)
+
+    def test_cancel_rejected_for_a_filled_order_books_the_fill_on_the_next_poll(self):
+        self._reject_cancel_with_report("完全成交")
+        self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
+        self.assertIn("A1", self.gateway.cancel_requested)
+        self.assertEqual(len(self.module.payloads), 1)
+        self._poll_then_replace(1)
+
+    def test_cancel_rejected_after_a_partial_fill_and_delete_books_the_partial_fill(self):
+        self._reject_cancel_with_report("部分成交後刪單", ordered=2, filled=1, remaining=0)
+        self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
+        self._poll_then_replace(1)
+
+    def test_cancel_rejected_for_a_still_working_order_stays_fatal(self):
+        self._reject_cancel_with_report("委託成功", filled=0, remaining=1)
+        with self.assertRaises(TTBApiError):
+            self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
+
+    def test_cancel_rejected_with_a_delete_status_but_remaining_quantity_stays_fatal(self):
+        self._reject_cancel_with_report("刪單失敗", filled=0, remaining=1)
+        with self.assertRaises(TTBApiError):
+            self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
+
+    def test_rejected_cancel_still_latches_when_the_rate_counter_cannot_persist(self):
+        self._reject_cancel_with_report("完全成交")
+        def broken(*_args, **_kwargs):
+            raise OSError("locked")
+        self.gateway.order_rate.record = broken
+        with self.assertRaises(RuntimeError):
+            self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
+        self.assertIn("rate-counter", self.gateway.unsafe_reason)
 
 if __name__ == "__main__":
     unittest.main()
