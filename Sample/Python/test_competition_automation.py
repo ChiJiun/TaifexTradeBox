@@ -325,6 +325,46 @@ class LoginTests(unittest.TestCase):
                 with self.assertRaises(QuoteNotSubscribed):
                     call()
 
+    def test_quotes_are_only_required_while_the_market_is_open(self):
+        from datetime import datetime, timedelta, timezone
+        from automation.ttb_login import market_open
+        tz = timezone(timedelta(hours=8))
+        calendar = HERE / "automation" / "taifex_calendar_2026.json"
+        self.assertFalse(market_open(calendar, datetime(2026, 10, 29, 8, 20, tzinfo=tz)))
+        self.assertTrue(market_open(calendar, datetime(2026, 10, 29, 9, 30, tzinfo=tz)))
+        self.assertFalse(market_open(calendar, datetime(2026, 10, 31, 9, 30, tzinfo=tz)))  # Saturday
+
+    def test_report_channel_check_needs_rebuilt_equity_rows(self):
+        from automation.ttb_login import TtbWindow
+
+        class Row:
+            def __init__(self, runtime_id):
+                self.element_info = type("Info", (), {"name": f"Row {runtime_id}", "runtime_id": (42, runtime_id)})()
+
+        class Grid:
+            def __init__(self, before, after):
+                self.before, self.after, self.pressed = before, after, False
+            def children(self):
+                return [Row(i) for i in (self.after if self.pressed else self.before)]
+
+        class Control:
+            def exists(self, timeout=0):
+                return True
+            def select(self):
+                pass
+
+        def window(before, after):
+            win = TtbWindow.__new__(TtbWindow)
+            grid = Grid(before, after)
+            win.control = lambda auto_id, **kw: grid if auto_id == "dvEquity" else Control()
+            win.press = lambda auto_id: setattr(grid, "pressed", True)
+            return win
+
+        self.assertTrue(window([1, 2], [3, 4]).report_channel_alive(timeout=0.3))
+        self.assertTrue(window([], [3]).report_channel_alive(timeout=0.3))
+        self.assertFalse(window([1, 2], [1, 2]).report_channel_alive(timeout=0.3))  # refresh ignored
+        self.assertFalse(window([1, 2], []).report_channel_alive(timeout=0.3))  # cleared, no answer
+
     def test_no_submit_stops_before_login(self):
         window = FakeWindow()
         result = ensure_logged_in(

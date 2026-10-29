@@ -25,6 +25,7 @@ import sys
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -323,7 +324,10 @@ class TtbWindow:
             grid = self.control(EQUITY_GRID_ID, control_type="DataGrid")
             rows = lambda: {tuple(row.element_info.runtime_id) for row in grid.children()
                             if row.element_info.name.startswith("Row")}
-            before = rows()
+            try:
+                before = rows()
+            except Exception:  # UIA timed out on a busy TTB; treat as no answer
+                return False
             self.press(EQUITY_REFRESH_ID)
             # TTB clears the grid before asking the server, and a live answer
             # often lands before the first sample; rows it rebuilt carry new
@@ -477,7 +481,7 @@ def ensure_logged_in(
     first = probe()
     if first.logged_in:
         result = {"ok": True, "action": "already_logged_in", "session": first.as_dict()}
-        if require_auto_resubmit_off or require_report_channel:
+        if require_auto_resubmit_off or require_report_channel or require_quotes:
             # Live orders: never trust a session someone else logged in (and
             # possibly left 失敗自動重送 on); GUI errors fail closed.
             try:
@@ -580,6 +584,21 @@ def _subscribe_all(window: Any, symbols: tuple[str, ...]) -> dict[str, str]:
     return results
 
 
+def market_open(calendar_file: Path, now: datetime | None = None) -> bool:
+    """Same session test as the live gate; quotes can only be confirmed while it is open."""
+    from ttb.calendar import TradingCalendar
+    from ttb.runtime import SessionSchedule
+
+    try:
+        calendar = TradingCalendar.from_file(calendar_file)
+    except Exception:
+        calendar = None
+    try:
+        return SessionSchedule(calendar=calendar).status(now).trading
+    except Exception:
+        return True
+
+
 def _config_value(path: Path, key: str) -> str:
     try:
         value = json.loads(path.read_text(encoding="utf-8")).get(key, "")
@@ -608,7 +627,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--require-report-channel", action="store_true",
                         help="exit 5 unless an equity refresh comes back over TTB's report socket (live mode)")
     parser.add_argument("--require-quotes", action="store_true",
-                        help="exit 5 unless every --subscribe contract is confirmed in dvQuote (live mode)")
+                        help="exit 5 unless every --subscribe contract is confirmed in dvQuote while the "
+                             "market is open (live mode); outside the session TTB cannot quote, so it is only reported")
+    parser.add_argument("--calendar", type=Path, default=Path("automation/taifex_calendar_2026.json"))
     args = parser.parse_args(argv)
 
     competition = args.competition if args.competition is not None else _config_value(args.config, "ttbCompetition")
@@ -632,7 +653,8 @@ def main(argv: list[str] | None = None) -> int:
             quote_symbols=tuple(symbol.upper() for symbol in args.subscribe if symbol.strip()),
             require_auto_resubmit_off=args.require_auto_resubmit_off,
             require_report_channel=args.require_report_channel,
-            require_quotes=args.require_quotes,
+            # Before the open TTB rejects every add; the live gate defers then.
+            require_quotes=args.require_quotes and market_open(args.calendar),
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result["ok"] else 4

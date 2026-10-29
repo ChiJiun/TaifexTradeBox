@@ -324,9 +324,9 @@ class BotEngine:
                 pass
             self.queue.put_nowait(quote)
 
-    def process_quote(self, quote: Quote) -> StrategyDecision | None:
+    def process_quote(self, quote: Quote, now: float | None = None) -> StrategyDecision | None:
         """Run one cycle synchronously; useful for tests and custom runners."""
-        if time.monotonic() - quote.received_at > MAX_QUOTE_AGE_SECONDS:
+        if (time.monotonic() if now is None else now) - quote.received_at > MAX_QUOTE_AGE_SECONDS:
             raise RuntimeError(f"Quote backlog exceeds {MAX_QUOTE_AGE_SECONDS:g} seconds")
         self.last_quote = quote
         self.processed_quotes += 1
@@ -565,12 +565,14 @@ class BotEngine:
                 self.raw_recorder.write(quote)
                 self.skipped_quotes += 1
                 quote = newer
-            if time.monotonic() - quote.received_at > MAX_QUOTE_AGE_SECONDS:
+            now = time.monotonic()
+            if now - quote.received_at > MAX_QUOTE_AGE_SECONDS:
                 self.raw_recorder.write(quote)
                 self.skipped_quotes += 1
                 continue
             try:
-                self.process_quote(quote)
+                # Same clock reading, so a tick cannot pass here and age out inside.
+                self.process_quote(quote, now)
             except Exception as exc:
                 self.fatal_error = str(exc)
                 LOG.exception("strategy cycle failed; stopping for reconciliation")

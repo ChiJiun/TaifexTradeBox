@@ -127,7 +127,7 @@ class QuoteIntegrityTests(unittest.TestCase):
             engine = BotEngine(config, ShadowGateway(PositionLedger(config)), Path(folder))
             processed = []
 
-            def record(q):
+            def record(q, now=None):
                 processed.append(q.total_volume)
                 engine.stop_event.set()
             engine.process_quote = record
