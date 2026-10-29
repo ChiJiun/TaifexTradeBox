@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import asdict, dataclass
 
@@ -137,6 +138,8 @@ class FlowMomentumStrategy:
                 self.risk_exit_at = now
                 return StrategyDecision((self.risk_exit,), features, bool(halt), "flow exit: " + reason)
             target = self.ledger.average_price + sign * s.target_ticks * tick
+            # Split fills leave a fractional average; round away from the entry onto a tick.
+            target = (math.ceil(target / tick) if pos > 0 else math.floor(target / tick)) * tick
             return StrategyDecision((OrderIntent(side, target, abs(pos), "exit", "flow target"),),
                                     features, False, "flow manage")
 

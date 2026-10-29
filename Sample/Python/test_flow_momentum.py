@@ -63,6 +63,13 @@ class FlowMomentumTests(unittest.TestCase):
         held = strategy.decide(tick(1003.0, 46470, 12)).intents
         self.assertEqual(held, (stop,))
 
+    def test_target_from_a_split_fill_average_lands_on_a_tick(self):
+        strategy = self.make()
+        self.ledger.on_fill(Fill("sell", 46500, 1, "A1", 1000.0))
+        self.ledger.on_fill(Fill("sell", 46501, 1, "A2", 1000.0))
+        (target,) = strategy.decide(tick(1001.0, 46495, 10)).intents
+        self.assertEqual((target.side, target.price), ("buy", 46470))
+
     def test_max_hold_forces_an_exit(self):
         strategy = self.make(max_hold_seconds=60)
         self.ledger.on_fill(Fill("buy", 46500, 1, "A1", 1000.0))

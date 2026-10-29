@@ -401,6 +401,9 @@ class PortfolioStrategy:
             qty = min(order.quantity, abs(real) - max(0, sign * after))
             if qty <= 0:
                 continue
-            if best is None or (order.price < best.price if side == "sell" else order.price > best.price):
-                best = OrderIntent(side, order.price, qty, "exit", MIRROR)
+            # Whatever a member computes, TTB only takes prices on the tick grid.
+            tick = self.config.tick_size
+            price = (math.ceil(order.price / tick) if side == "sell" else math.floor(order.price / tick)) * tick
+            if best is None or (price < best.price if side == "sell" else price > best.price):
+                best = OrderIntent(side, price, qty, "exit", MIRROR)
         return best

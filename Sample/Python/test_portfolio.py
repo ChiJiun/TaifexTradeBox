@@ -148,6 +148,15 @@ class PortfolioTests(unittest.TestCase):
         (mirror,) = strategy.decide(tick("10:00:01", 46500, 2.0, 101)).intents
         self.assertEqual((mirror.side, mirror.price, mirror.quantity), ("sell", 46600, 1))
 
+    def test_mirror_price_is_on_the_tick_grid(self):
+        strategy, (a, b) = self.make()
+        self.ledger.on_fill(Fill("buy", 46500, 1, "R1", 0.5))
+        a.ledger.on_fill(Fill("buy", 46500, 1, "T1", 0.5))
+        strategy.decide(tick("10:00:00", 46500, 1.0, 100))
+        a.strategy.want(OrderIntent("sell", 46600.5, 1, "exit", "target"))
+        (mirror,) = strategy.decide(tick("10:00:01", 46500, 2.0, 101)).intents
+        self.assertEqual(mirror.price, 46601)
+
     def test_member_stop_after_a_touched_mirror_is_sent_at_once(self):
         strategy, (a, b) = self.make(latency_seconds=2.5)
         self.ledger.on_fill(Fill("buy", 46500, 1, "R1", 0.5))
