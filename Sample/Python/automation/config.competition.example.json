@@ -42,7 +42,7 @@
     "--poll-seconds",
     "2",
     "--fee-per-fill",
-    "20",
+    "50",
     "--tax-rate",
     "0.00002"
   ],

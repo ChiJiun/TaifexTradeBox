@@ -118,6 +118,32 @@ class EngineRuntimeTests(unittest.TestCase):
             finally:
                 engine.close()
 
+    def test_trading_session_without_any_first_quote_stops_engine(self):
+        class AlwaysTradingSchedule:
+            def status(self, _local=None):
+                return SimpleNamespace(
+                    phase="regular", trading_day="2026-09-30", trading=True,
+                    minutes_since_open=60.0, minutes_until_close=60.0,
+                )
+
+        config = StrategyConfig(symbol="TMFJ6", max_order_qty=1, max_inventory=1, warmup_ticks=2)
+        gateway = ShadowGateway(PositionLedger(config))
+        with tempfile.TemporaryDirectory() as directory:
+            engine = BotEngine(
+                config, gateway, Path(directory) / "runs",
+                session_schedule=AlwaysTradingSchedule(), stale_fatal_seconds=0.05,
+            )
+            engine.first_quote_grace_seconds = 0.02
+            engine.start()
+            deadline = time.monotonic() + 3.0
+            while not engine.stop_event.is_set() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            try:
+                self.assertTrue(engine.stop_event.is_set())
+                self.assertIn("market data stale", engine.fatal_error)
+            finally:
+                engine.close()
+
 
 class RiskStateStoreTests(unittest.TestCase):
     def test_locked_risk_state_is_retried_then_fails_closed(self):

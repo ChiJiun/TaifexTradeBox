@@ -517,11 +517,9 @@ class BotEngine:
                         dropped_quotes=self.dropped_quotes,
                         stale_duration_seconds=round(stale_duration, 1),
                     )
-                    if (
-                        has_seen_quote
-                        and self.stale_fatal_seconds > 0
-                        and stale_duration >= self.stale_fatal_seconds
-                    ):
+                    # A feed that never delivers a first tick is as dead as one
+                    # that stopped; only a restart of TTB resubscribes it.
+                    if self.stale_fatal_seconds > 0 and stale_duration >= self.stale_fatal_seconds:
                         self.fatal_error = (
                             f"market data stale for {stale_duration:.1f}s "
                             f"(fatal threshold {self.stale_fatal_seconds:.1f}s)"
