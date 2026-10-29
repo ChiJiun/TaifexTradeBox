@@ -327,7 +327,10 @@ Invoke-RestMethod http://127.0.0.1:8765/status
 powershell -ExecutionPolicy Bypass -File automation\install_azure_tasks.ps1 -RunAsUser azureuser
 ```
 
-排程會在 `azureuser` 登入與每日 08:35 啟動，且忽略重複實例；另外建立 `TTB Health Watchdog` 每 5 分鐘健康檢查。supervisor 記錄於 `output/supervisor/supervisor.log`；bot 詳細 log 寫入會自動輪替的 `output/supervisor/bot.log`（10 MB × 最多 6 份），stdout/stderr 只保留少量主控台輸出。shadow 異常可由 supervisor 重啟；`ttb` 模式若非正常結束，會建立 `output/supervisor/manual-reconciliation-required.flag` 並停止，避免在未知持倉下自動重送委託。若 VM 使用者環境設定 `TTB_ALERT_WEBHOOK_URL`，watchdog 可在故障與恢復時送 webhook。
+排程會在 `azureuser` 登入與每日 08:35 啟動，且忽略重複實例；另外建立 `TTB Health Watchdog` 每 5 分鐘健康檢查。supervisor 記錄於 `output/supervisor/supervisor.log`；bot 詳細 log 寫入會自動輪替的 `output/supervisor/bot.log`（10 MB × 最多 6 份），stdout/stderr 只保留少量主控台輸出。shadow 異常可由 supervisor 重啟；`ttb` 模式若非正常結束，會建立 `output/supervisor/manual-reconciliation-required.flag` 並停止，避免在未知持倉下自動重送委託。若 VM 使用者環境設定 `TTB_ALERT_WEBHOOK_URL`（Discord 或 Slack incoming webhook）：
+
+- watchdog 只在盤中（交易日 08:55–13:40，台北時間）發故障警報，持續故障每小時提醒一次，發過警報後恢復時再通知；開機後、收盤後的預期異常不發。
+- `TTB Notifier` 排程（`pyw -3.13 -m automation.notify`，每分鐘）從 `output/trades.sqlite3` 送出新成交，並在交易日 13:46 後送一次收盤摘要（成交筆數、權益數、前日餘額、當日損益、手續費與交易稅、收盤部位）。首次執行只記下目前位置，不補發歷史成交；送出失敗下一分鐘重試，錯誤寫入 `output/supervisor/notify-error.log`。
 
 quote/decision CSV 依台北日期每日輪替；`cleanup_runtime.ps1` 預設保留 14 天 runtime CSV／order-probe 檔，supervisor log 超過 10 MB 也會輪替。`flattenOnShutdown=true` 只會在 `ttb` 模式、交易時段、且 bot 有有效行情時，於正常停止流程嘗試 IOC flatten；預設為 `false`，避免未經確認自動平倉。
 
