@@ -35,6 +35,7 @@ $tasks = [ordered]@{
     gui = Task-Summary 'TTB GUI'
     automation = Task-Summary 'TTB Automation'
     watchdog = Task-Summary 'TTB Health Watchdog'
+    notifier = Task-Summary 'TTB Notifier'
 }
 $health = [ordered]@{
     exists = Test-Path -LiteralPath $healthFile

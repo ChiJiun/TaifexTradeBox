@@ -33,6 +33,15 @@ $watchdogAction = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watchdog`"" `
     -WorkingDirectory $WorkDir
+$notifierAction = New-ScheduledTaskAction `
+    -Execute 'pyw.exe' `
+    -Argument '-3.13 -m automation.notify' `
+    -WorkingDirectory $WorkDir
+$notifierTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
 $watchdogTrigger = New-ScheduledTaskTrigger `
     -Once `
     -At (Get-Date).AddMinutes(1) `
@@ -46,6 +55,7 @@ if (Get-ScheduledTask -TaskName 'TTB GUI' -ErrorAction SilentlyContinue) {
 }
 Register-ScheduledTask -TaskName 'TTB Automation' -Action $botAction -Trigger @($logonTrigger, $dailyTrigger) -Principal $principal -Settings $settings -Force | Out-Null
 Register-ScheduledTask -TaskName 'TTB Health Watchdog' -Action $watchdogAction -Trigger $watchdogTrigger -Principal $principal -Settings $settings -Force | Out-Null
+Register-ScheduledTask -TaskName 'TTB Notifier' -Action $notifierAction -Trigger $notifierTrigger -Principal $principal -Settings $settings -Force | Out-Null
 
-Get-ScheduledTask -TaskName 'TTB Automation', 'TTB Health Watchdog' |
+Get-ScheduledTask -TaskName 'TTB Automation', 'TTB Health Watchdog', 'TTB Notifier' |
     Select-Object TaskName, State, @{Name='RunAs';Expression={$_.Principal.UserId}}
