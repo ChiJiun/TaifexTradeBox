@@ -6,7 +6,12 @@ param(
     # 08:45 open to log in and pass the live gate) to 13:40 (it flattens and
     # exits before the 13:45 close).
     [int]$AlertFromMinutes = 535,
-    [int]$AlertUntilMinutes = 820
+    [int]$AlertUntilMinutes = 820,
+    # The bot replaces health.json several times a second, so one check can
+    # catch it mid-replace or hit a slow /readyz. Only a failure that persists
+    # across every attempt is worth paging about.
+    [int]$CheckAttempts = 3,
+    [int]$RetryDelaySeconds = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,8 +20,12 @@ $stateDir = Join-Path $WorkDir 'output\supervisor'
 $statePath = Join-Path $stateDir 'health-watchdog-state.json'
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 
-$output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $healthScript -WorkDir $WorkDir 2>&1 | Out-String
-$exitCode = $LASTEXITCODE
+for ($attempt = 1; $attempt -le $CheckAttempts; $attempt++) {
+    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $healthScript -WorkDir $WorkDir 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0 -or $attempt -eq $CheckAttempts) { break }
+    Start-Sleep -Seconds $RetryDelaySeconds
+}
 $now = Get-Date
 $previous = $null
 if (Test-Path -LiteralPath $statePath) {

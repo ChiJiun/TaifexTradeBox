@@ -104,5 +104,32 @@ class WatchdogMarketHoursTests(unittest.TestCase):
         self.assertEqual(result.stdout.split(), [str(v) for v in cases.values()])
 
 
+
+class WatchdogRetryTests(unittest.TestCase):
+    def run_watchdog(self, failures):
+        with tempfile.TemporaryDirectory() as work:
+            check = Path(work) / "automation" / "check_ttb_health.ps1"
+            check.parent.mkdir()
+            # Fails the first `failures` calls, then reports healthy.
+            check.write_text(
+                "$n = Join-Path $PSScriptRoot 'calls.txt'\n"
+                "$c = 1 + [int](Get-Content $n -ErrorAction SilentlyContinue)\n"
+                f"Set-Content $n $c\nif ($c -le {failures}) {{ exit 2 }}\nexit 0\n",
+                encoding="utf-8")
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                 str(HERE / "automation" / "health_watchdog.ps1"), "-WorkDir", work,
+                 "-AlertWebhookUrl", "", "-RetryDelaySeconds", "0"],
+                capture_output=True, text=True, timeout=120)
+            calls = int((check.parent / "calls.txt").read_text().strip())
+            return result.returncode, calls
+
+    def test_a_transient_failure_is_retried_before_it_counts(self):
+        self.assertEqual(self.run_watchdog(failures=1), (0, 2))
+
+    def test_a_persistent_failure_still_fails_after_every_attempt(self):
+        self.assertEqual(self.run_watchdog(failures=99), (2, 3))
+
+
 if __name__ == "__main__":
     unittest.main()
