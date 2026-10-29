@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from strategy_core import Fill, IndependentFillSimulator, OrderIntent, PositionLedger, Quote, StrategyConfig
 
 from .api import TTBApi, TTBApiError, TTBOrderRequest, extract_order_no, is_success_response, position_effect_for
-from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, assess_pretrade
+from .risk import DurableOrderRateGuard, EntryBlocked, PreTradeLimits, PreTradeRiskError, assess_pretrade
 from .journal import ExecutionJournal
 
 
@@ -508,9 +508,7 @@ class TTBOrderGateway:
                     continue
                 try:
                     self._place(wanted)
-                except PreTradeRiskError:
-                    if wanted.role != "entry":
-                        raise
+                except EntryBlocked:
                     # Full margin or order budget only skips the entry; the
                     # bot keeps managing its exits instead of stopping.
                     self.entry_blocked_until = time.monotonic() + ENTRY_BLOCK_RETRY_SECONDS

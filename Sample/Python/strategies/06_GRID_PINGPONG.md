@@ -67,6 +67,7 @@
 
 - `automation/config.grid-ccf.example.json`
 - `automation/config.grid-cdf.example.json`
+- `automation/config.grid-portfolio.example.json`（三檔同時跑，見下方「多標的組合」）
 
 切換方式：
 
@@ -82,4 +83,39 @@ powershell -File automation\set_mode.ps1 -Mode ttb -Template config.competition.
 
 股票期貨的成交比台指期稀疏很多。研究期間 CCF 每天約有 7 次、CDF 約 16 次超過 120 秒沒有成交。如果 TTB 只在成交時推送報價，預設的 `--quote-stale-seconds 5` 會讓 bot 一天撤掉全部掛單幾百次，`--stale-fatal-seconds 120` 也會讓它停機。所以範本放寬為 CCF 300／900 秒、CDF 600／1800 秒，依據是研究期間超過這些門檻的空窗每天不到 1 次。
 
-範本的 `liveGate.tickSize` 和 `liveGate.distanceTicks` 會讓探針單掛在市價下方約 5～6%，落在漲跌停範圍內。目前架構一個帳戶只能跑一隻 bot，啟動時要求整個帳戶沒有持倉和掛單，所以 CCF 和 CDF 不能同時跑。
+範本的 `liveGate.tickSize` 和 `liveGate.distanceTicks` 會讓探針單掛在市價下方約 5～6%，落在漲跌停範圍內。
+
+## 多標的組合
+
+`automation/config.grid-portfolio.example.json` 在同一個帳戶、同一個 bot 程序裡同時跑 CCF、CDF、DHF 三個網格：
+
+| 標的 | 層數 | 停損 | 可用保證金門檻 |
+|---|---:|---:|---:|
+| CCF | 8 | 3 格 | 6 萬 |
+| CDF | 3 | 3 格 | 40 萬 |
+| DHF | 10 | 3 格 | 70 萬 |
+
+設定方式：
+
+- 主標的沿用 `symbol` 和 `extraArgs`。
+- 其他標的寫在 `legs`，每一項有 `symbol`、`extraArgs`、`liveGate`。
+- `extraArgs` 只要列出和主標的不同的參數，其餘沿用主標的的命令列。
+- supervisor 會替每個 leg 訂閱報價、各跑一次 live gate 探針，再用 `--leg-json` 把 leg 傳給 bot。
+
+執行方式：
+
+- 每個 leg 有自己的 engine、帳本、風控狀態檔（`output/risk-state-<SYMBOL>.json`）、輸出目錄（`output/runs/<SYMBOL>`）和 health 檔（`output/health-<SYMBOL>.json`）。
+- `output/health.json` 和狀態 HTTP 端點顯示合併後的狀態：
+  - 任一 leg 錯誤，整體就是錯誤。
+  - 任一 leg 正常交易，整體就是 healthy。冷門標的因報價過時而暫停，不算停機。
+- 所有 leg 共用一個 TTB API 連線。委託和庫存回報每秒最多查一次，結果給所有 leg 共用，所以增加 leg 不會讓 API 呼叫倍增。
+- 啟動時，所有 leg 都先確認整個帳戶沒有持倉和掛單，才開始下單。
+- 任一 leg 停止（錯誤、換月、操作員停止），全部 leg 一起停止，由 supervisor 重啟。
+
+保證金優先順序靠各 leg 的 `--min-available-margin`：可用保證金低於門檻時，那個 leg 只停止新進場，出場照常。門檻越高的 leg 越早讓出保證金，所以資金不足時依 CCF → CDF → DHF 的順序使用。這個順序與研究報告中「日均 ÷ 保證金」的排序一致。
+
+切換到組合範本：
+
+```powershell
+powershell -File automation\set_mode.ps1 -Mode ttb -Template config.grid-portfolio.example.json
+```

@@ -17,6 +17,10 @@ class PreTradeRiskError(RuntimeError):
     """A pre-trade safety limit blocks new exposure."""
 
 
+class EntryBlocked(PreTradeRiskError):
+    """A budget or margin limit pauses entries; exits are never subject to it."""
+
+
 @dataclass(frozen=True)
 class PreTradeLimits:
     max_orders_per_minute: int = 20
@@ -180,11 +184,11 @@ class DurableOrderRateGuard:
         with self._lock:
             order_rate, cancel_rate, order_day = self._counts(now)
             if order_rate >= self.limits.max_orders_per_minute:
-                raise PreTradeRiskError("max orders per minute reached")
+                raise EntryBlocked("max orders per minute reached")
             if cancel_rate >= self.limits.max_cancels_per_minute:
-                raise PreTradeRiskError("max cancels per minute reached; further entries blocked")
+                raise EntryBlocked("max cancels per minute reached; further entries blocked")
             if order_day >= self.limits.max_daily_orders:
-                raise PreTradeRiskError("max daily order attempts reached")
+                raise EntryBlocked("max daily order attempts reached")
 
     def record(self, kind: str, now: float) -> None:
         if kind not in {"order", "cancel"}:
@@ -304,4 +308,4 @@ def assess_pretrade(
         margin_supplier(), limits.available_margin_field, limits.available_margin_currency,
     )
     if margin < limits.minimum_available_margin:
-        raise PreTradeRiskError("available TTB margin below required headroom")
+        raise EntryBlocked("available TTB margin below required headroom")

@@ -205,6 +205,31 @@ class GridTemplateTests(unittest.TestCase):
                 self.assertTrue(last * 0.9 < price < last * 0.96, price)
 
 
+    def test_portfolio_template_runs_every_leg_as_a_grid_with_ccf_first_for_margin(self):
+        folder = Path(__file__).resolve().parent / "automation"
+        config = json.loads((folder / "config.grid-portfolio.example.json").read_text(encoding="utf-8"))
+        argv = ["--symbol", "CCFK6", "--strategy-module", config["strategyModule"]] + config["extraArgs"]
+        months = {"auto:CDF": "CDFK6", "auto:DHF": "DHFK6"}
+        for leg in config["legs"]:
+            argv += ["--leg-json", json.dumps(["--symbol", months[leg["symbol"]]] + leg["extraArgs"])]
+        legs = sim_hft_bot.leg_namespaces(argv)
+        self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "CDFK6", "DHFK6"])
+        levels = []
+        for args in legs:
+            strategy_config = sim_hft_bot.build_config(args)
+            strategy = sim_hft_bot.build_strategy(args, strategy_config, PositionLedger(strategy_config))
+            self.assertIsInstance(strategy, GridPingPongStrategy)
+            self.assertEqual(strategy_config.max_order_qty, strategy.settings.levels)
+            self.assertEqual(strategy.settings.grid_points, args.tick_size)
+            self.assertGreaterEqual(args.quote_stale_seconds, 300)
+            self.assertGreaterEqual(args.stale_fatal_seconds, 900)
+            levels.append(strategy.settings.levels)
+        self.assertEqual(config["autoRecovery"]["maxFlattenQty"], max(levels))
+        # A leg stops adding entries once available margin falls below its
+        # headroom, so the higher the headroom the later the leg in priority.
+        self.assertEqual(sorted(legs, key=lambda a: a.min_available_margin), legs)
+
+
 class StockFuturesContractTests(unittest.TestCase):
     def test_stock_futures_resolve_like_index_futures(self):
         contract = ContractInfo.from_symbol("CDFK6", 2026)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import threading
+import time
 from typing import Any, Literal
 
 
@@ -277,3 +278,34 @@ class TTBApi:
 
     def query_orders(self) -> Any:
         return self.module.QUERYRESTOREREPORT()
+
+
+class SharedReportsApi(TTBApi):
+    """TTBApi whose order and position reports are shared by several legs.
+
+    Every leg of a multi-leg bot polls the same account-wide reports; one
+    fetch per ``max_age`` serves them all, so adding a leg does not add HTTP
+    round trips that would delay every leg's orders behind the API lock.
+    """
+
+    def __init__(self, module: Any, max_age: float = 1.0, clock: Any = time.monotonic) -> None:
+        super().__init__(module)
+        self.max_age = max_age
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._cache: dict[str, tuple[float, Any]] = {}
+
+    def _shared(self, name: str, fetch: Any) -> Any:
+        with self._lock:
+            cached = self._cache.get(name)
+            if cached is not None and self.clock() - cached[0] < self.max_age:
+                return cached[1]
+            response = fetch()
+            self._cache[name] = (self.clock(), response)
+            return response
+
+    def query_positions(self) -> Any:
+        return self._shared("positions", super().query_positions)
+
+    def query_orders(self) -> Any:
+        return self._shared("orders", super().query_orders)

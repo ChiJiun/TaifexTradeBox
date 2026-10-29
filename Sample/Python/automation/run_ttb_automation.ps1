@@ -38,14 +38,28 @@ function Invoke-PythonTool([string]$Name, [string[]]$Arguments) {
     return $code
 }
 
+function Get-BotLegs {
+    # The primary contract plus every config.legs entry share one account
+    # and one bot process.
+    $legs = @([pscustomobject]@{ symbol = [string]$config.symbol; extraArgs = $null; liveGate = $config.liveGate })
+    foreach ($leg in @($config.legs)) {
+        if ($null -eq $leg) { continue }
+        if ([string]::IsNullOrWhiteSpace([string]$leg.symbol)) { throw 'every config.legs entry needs a symbol' }
+        $legs += [pscustomobject]@{ symbol = [string]$leg.symbol; extraArgs = $leg.extraArgs; liveGate = $leg.liveGate }
+    }
+    return $legs
+}
+
 function Invoke-TtbLogin {
     if (-not $config.autoLogin) { return 0 }
     $ErrorActionPreference = 'Continue'
     $loginArgs = @('-m', 'automation.ttb_login', '--config', $ConfigPath, '--ttb-exe', $TtbExe)
     # TTB only publishes ticks for symbols in its quote-settings tab and drops
-    # saved ones it cannot quote at login; re-add the resolved contract.
-    $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
+    # saved ones it cannot quote at login; re-add the resolved contracts.
+    foreach ($leg in Get-BotLegs) {
+        $resolved = (& py.exe -3.13 -m automation.resolve_symbol $leg.symbol 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
+    }
     # Live orders must never run while TTB may resend failed orders on its own.
     if ($config.mode -eq 'ttb') { $loginArgs += @('--require-auto-resubmit-off', '--require-report-channel', '--require-quotes') }
     return Invoke-PythonTool 'ttb_login' $loginArgs
@@ -179,12 +193,17 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         Write-SupervisorLog 'auto-recovery verified a clean account and cleared the flag'
     }
 
-    if ($config.mode -eq 'ttb' -and ($null -eq $config.liveGate -or $config.liveGate.probeBeforeFirstLive -ne $false)) {
+    $gate = 0
+    foreach ($leg in Get-BotLegs) {
+        if ($config.mode -ne 'ttb' -or ($null -ne $leg.liveGate -and $leg.liveGate.probeBeforeFirstLive -eq $false)) { continue }
         # One far-limit order/cancel probe per contract before strategy orders.
-        $gateArgs = @('-m', 'automation.live_gate', '--symbol', [string]$config.symbol)
-        if ($config.liveGate -and $config.liveGate.tickSize) { $gateArgs += @('--tick-size', [string]$config.liveGate.tickSize) }
-        if ($config.liveGate -and $config.liveGate.distanceTicks) { $gateArgs += @('--distance-ticks', [string]$config.liveGate.distanceTicks) }
+        $gateArgs = @('-m', 'automation.live_gate', '--symbol', $leg.symbol)
+        if ($leg.liveGate -and $leg.liveGate.tickSize) { $gateArgs += @('--tick-size', [string]$leg.liveGate.tickSize) }
+        if ($leg.liveGate -and $leg.liveGate.distanceTicks) { $gateArgs += @('--distance-ticks', [string]$leg.liveGate.distanceTicks) }
         $gate = Invoke-PythonTool 'live_gate' $gateArgs
+        if ($gate -ne 0) { break }
+    }
+    if ($gate -ne 0) {
         if ($gate -eq 3) {
             Write-SupervisorLog 'live gate deferred (market closed or no quote yet); retrying in 60s'
             Start-Sleep -Seconds 60
@@ -226,6 +245,10 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     }
     if ($config.extraArgs) {
         $botArgs += @($config.extraArgs | ForEach-Object { [string]$_ })
+    }
+    foreach ($leg in @(Get-BotLegs | Select-Object -Skip 1)) {
+        $legArgs = @('--symbol', $leg.symbol) + @($leg.extraArgs | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+        $botArgs += @('--leg-json', (ConvertTo-Json -Compress -InputObject $legArgs))
     }
 
     $strategyName = if ($config.strategyModule) { $config.strategyModule } else { $config.strategy }
