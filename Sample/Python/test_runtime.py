@@ -196,6 +196,25 @@ class RiskStateStoreTests(unittest.TestCase):
             self.assertEqual(raw["version"], 1)
             self.assertEqual(raw["symbol"], "TMFJ6")
 
+    def test_previous_day_state_for_another_symbol_is_ignored(self):
+        # 2026-10-30: the VM switched from TMF to CCF before the open and the
+        # bot stopped on yesterday's TMFK6 file.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "risk-state.json"
+            RiskStateStore(path, "TMFK6").checkpoint(
+                trading_day="2026-10-29", realized_pnl=-595.8, peak_realized_pnl=0.0,
+                fees_and_tax=355.8, fill_count=6, peak_equity=0.0, halt_reason="", position=0,
+            )
+            store = RiskStateStore(path, "CCFK6")
+            self.assertEqual(store.load("2026-10-30"), {})
+            store.checkpoint(
+                trading_day="2026-10-30", realized_pnl=0.0, peak_realized_pnl=0.0,
+                fees_and_tax=0.0, fill_count=0, peak_equity=0.0, halt_reason="", position=0,
+            )
+            self.assertEqual(store.load("2026-10-30")["symbol"], "CCFK6")
+            with self.assertRaisesRegex(RuntimeError, "symbol mismatched"):
+                RiskStateStore(path, "TMFK6").load("2026-10-30")
+
 
 if __name__ == "__main__":
     unittest.main()

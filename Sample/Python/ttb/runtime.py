@@ -211,12 +211,14 @@ class RiskStateStore:
                 raise RuntimeError("persisted risk state unreadable; manual reconciliation required") from exc
         if not isinstance(value, dict) or value.get("version") != self.VERSION:
             raise RuntimeError("persisted risk state format invalid; manual reconciliation required")
-        if str(value.get("symbol", "")).upper() != self.symbol:
-            raise RuntimeError("persisted risk state symbol mismatched; manual reconciliation required")
         if not isinstance(value.get("trading_day"), str):
             raise RuntimeError("persisted risk state trading day missing; manual reconciliation required")
+        # A previous day's file carries no risk budget for today, so a strategy
+        # or symbol switch between sessions must not trip the symbol guard.
         if value["trading_day"] != trading_day:
             return {}
+        if str(value.get("symbol", "")).upper() != self.symbol:
+            raise RuntimeError("persisted risk state symbol mismatched; manual reconciliation required")
         return value
 
     def checkpoint(
