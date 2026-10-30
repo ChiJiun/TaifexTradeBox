@@ -280,6 +280,43 @@ class JournalReconciliationTests(RecoveryCase):
         self.assertFalse(self.flag.exists())
         self.assertEqual(self.recovery_fills(), [])
 
+    def grid_order_filled_after_stop(self, side):
+        """Today the bot stopped flat; its resting grid order G1 filled while TTB restarted."""
+        ExecutionJournal(self.journal_dir, SYMBOL).append(
+            "order_ack", {"order_no": "G1", "side": side, "quantity": 1, "price": 109.0,
+                          "role": "entry", "source": "report"}, DAY)
+        row = {"ORDNO": "G1", "COMD_ID": SYMBOL, "BS": "B" if side == "buy" else "S", "ORDR_PRCE": "109",
+               "VOLM": "1", "LESS_VOLM": "0", "DEAL_TOTL": "1", "DEAL_PRCE": "109", "STAT": "完全成交"}
+        position = {"ComdID1": SYMBOL, "ComdBS1": "B" if side == "buy" else "S", "Hold": "1"}
+        return FakeBroker([row], [position])
+
+    def assert_booked_today_and_yesterday_untouched(self, before_yesterday):
+        self.assertEqual((self.journal_dir / f"events-{SYMBOL}-{PREVIOUS_DAY}.jsonl").read_bytes(), before_yesterday)
+        self.assertEqual([f["order_id"] for f in self.recovery_fills()], ["G1", "Dm00001"])
+        self.assertEqual(self.restart_engine().ledger.position, 0)
+        self.assertFalse(self.flag.exists())
+
+    def test_todays_late_grid_fill_is_booked_today_despite_a_stale_yesterday(self):
+        self.bot_journal(day=PREVIOUS_DAY)  # yesterday left at -3, never reconciled
+        before = (self.journal_dir / f"events-{SYMBOL}-{PREVIOUS_DAY}.jsonl").read_bytes()
+        broker = self.grid_order_filled_after_stop("buy")  # account +1; recovery sells 1
+        self.assertEqual(self.recover(broker, journal_dir=self.journal_dir, journal_days=(DAY,))["action"],
+                         "recovered")
+        self.assert_booked_today_and_yesterday_untouched(before)
+
+    def test_recovery_fill_never_closes_a_stale_yesterday_that_it_happens_to_balance(self):
+        # Yesterday -1 would balance with today's recovery buy; it must still go to today.
+        self.bot_journal(quantity=1, day=PREVIOUS_DAY)
+        before = (self.journal_dir / f"events-{SYMBOL}-{PREVIOUS_DAY}.jsonl").read_bytes()
+        broker = self.grid_order_filled_after_stop("sell")  # account -1; recovery buys 1
+        self.assertEqual(self.recover(broker, journal_dir=self.journal_dir, journal_days=(DAY,))["action"],
+                         "recovered")
+        self.assert_booked_today_and_yesterday_untouched(before)
+        # A later same-day run finds nothing left to book.
+        self.flag.write_text("x", encoding="ascii")
+        self.recover(FakeBroker(broker.orders), journal_dir=self.journal_dir, journal_days=(DAY,))
+        self.assertFalse(self.flag.exists())
+
     def test_journal_that_disagrees_with_the_report_fails_closed_unwritten(self):
         self.bot_journal(quantity=2)  # journal -2, but TTB is short 3
         path = self.journal_dir / f"events-{SYMBOL}-{DAY}.jsonl"

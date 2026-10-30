@@ -224,72 +224,92 @@ def _plan_journal_fills(
     """Fill events that bring each journal in line with the flat account.
 
     Runs only after two clean inspections, so every TTB order is final and
-    every position is 0. Fills the journal lacks (auto-recovery's own market
-    IOCs, or fills of bot orders after the bot stopped) are taken from the
-    order report and booked into the partition that holds the open position:
-    one of `days` (what a restarted bot replays) or, for a position carried
-    over by a deferred recovery, the last partition before them. An order
-    journaled in any other partition is left alone. The plan is accepted only
-    if replaying it with the journal's own cursor rules leaves that partition
-    and every partition of `days` flat; anything else refuses before writing.
+    every position is 0. Fills the journal lacks are taken from the order
+    report: an order the journal already knows (order_ack or fill) in one of
+    `days` (what a restarted bot replays) or in the last partition before them
+    is caught up in that partition; an order no partition knows (auto-
+    recovery's own market IOCs) is booked into the one partition that this
+    makes flat, which is the last partition before `days` only for a position
+    carried over by a deferred recovery (no bot order acknowledged since).
+    Older partitions are not replayed by the bot and are left alone. The plan
+    is accepted only if replaying every touched partition and every partition
+    of `days` with the journal's own cursor rules ends flat, and exactly one
+    partition can take the unknown fills; anything else refuses before writing.
     """
     fills = _report_fills(api)
     plan: list[tuple[ExecutionJournal, str, dict[str, Any]]] = []
     for symbol in sorted({fill["symbol"] for fill in fills.values()} | _journal_symbols(journal_dir, days)):
         journal = ExecutionJournal(journal_dir, symbol)  # validates every retained partition
-        config = StrategyConfig(symbol=symbol)
-        partitions = journal.trading_days()
-        current = [day for day in partitions if day in days]
-        open_days = [day for day in current if journal.replay_ledger(day, config)[0].position]
-        if len(open_days) > 1:
-            raise RecoveryRefused(f"{symbol} journals of {open_days} all hold open positions; reconcile manually")
-        target = open_days[0] if open_days else (current[-1] if current else "")
-        earlier = [day for day in partitions if day < min(days)]
-        journaled = {
-            str(event["payload"].get("order_no") or event["payload"].get("order_id") or "")
-            for day in partitions for event in journal.events(day)
-        }
-        if (not open_days and earlier and journal.replay_ledger(earlier[-1], config)[0].position
-                and any(fill["symbol"] == symbol and order_no not in journaled for order_no, fill in fills.items())):
-            # A deferred recovery closing yesterday's position today.
-            target = earlier[-1]
-        elsewhere = {
-            str(event["payload"].get("order_no") or event["payload"].get("order_id") or "")
-            for day in partitions if day != target for event in journal.events(day)
-        }
-        events = journal.events(target) if target else []
-        booked = [event["payload"] for event in events if event["kind"] == "fill"]
-        cursors = replay_fills(booked, config)[1]
-        acked = {str(event["payload"].get("order_no")): str(event["payload"].get("side"))
-                 for event in events if event["kind"] == "order_ack"}
-        additions: list[dict[str, Any]] = []
-        for order_no, fill in fills.items():
-            if fill["symbol"] != symbol or (order_no in elsewhere and order_no not in cursors and order_no not in acked):
-                continue
-            previous = cursors.get(order_no, 0)
-            if fill["total"] < previous:
-                raise RecoveryRefused(f"journal holds more fills than TTB for {symbol} order {order_no}")
-            if fill["total"] == previous:
-                continue
-            if acked.get(order_no, fill["side"]) != fill["side"]:
-                raise RecoveryRefused(f"TTB side of {symbol} order {order_no} differs from the journaled order")
-            additions.append({
-                "order_id": order_no, "side": fill["side"], "price": fill["price"],
-                "quantity": fill["total"] - previous, "deal_total": fill["total"], "source": "auto_recovery",
-            })
-        if additions and not target:
-            raise RecoveryRefused(f"{symbol} has unjournaled fills but no journal for trading days {list(days)}")
-        try:
-            position = replay_fills(booked + additions, config)[0].position
-        except JournalError as exc:
-            raise RecoveryRefused(f"{symbol} report fills would not replay: {exc}") from exc
-        if position != 0:
-            label = target or "no partition"
-            raise RecoveryRefused(
-                f"{symbol} journal ({label}) does not reconcile with the TTB report "
-                f"(position {position} after {len(additions)} report fills); reconcile manually")
-        plan.extend((journal, target, payload) for payload in additions)
+        mine = {order_no: fill for order_no, fill in fills.items() if fill["symbol"] == symbol}
+        plan.extend((journal, day, payload) for day, payload in _plan_symbol(journal, mine, days))
     return plan
+
+
+def _plan_symbol(
+    journal: ExecutionJournal, fills: dict[str, dict[str, Any]], days: tuple[str, ...],
+) -> list[tuple[str, dict[str, Any]]]:
+    symbol, config = journal.symbol, StrategyConfig(symbol=journal.symbol)
+    partitions = journal.trading_days()
+    current = [day for day in partitions if day in days]
+    previous_day = ([day for day in partitions if day < min(days)] or [""])[-1]
+    scope = ([previous_day] if previous_day else []) + current
+    booked: dict[str, list[dict[str, Any]]] = {}
+    cursors: dict[str, dict[str, int]] = {}
+    acked: dict[str, dict[str, str]] = {}
+    home: dict[str, str] = {}
+    for day in scope:
+        events = journal.events(day)
+        booked[day] = [event["payload"] for event in events if event["kind"] == "fill"]
+        cursors[day] = replay_fills(booked[day], config)[1]
+        acked[day] = {str(event["payload"].get("order_no")): str(event["payload"].get("side"))
+                      for event in events if event["kind"] == "order_ack"}
+        for order_no in set(cursors[day]) | set(acked[day]):
+            if home.setdefault(order_no, day) != day:
+                raise RecoveryRefused(f"{symbol} order {order_no} is journaled on several trading days")
+
+    additions: dict[str, list[dict[str, Any]]] = {day: [] for day in scope}
+    unknown: list[dict[str, Any]] = []
+    for order_no, fill in fills.items():
+        day = home.get(order_no, "")
+        previous = cursors[day].get(order_no, 0) if day else 0
+        if fill["total"] < previous:
+            raise RecoveryRefused(f"journal holds more fills than TTB for {symbol} order {order_no}")
+        if fill["total"] == previous:
+            continue
+        if day and acked[day].get(order_no, fill["side"]) != fill["side"]:
+            raise RecoveryRefused(f"TTB side of {symbol} order {order_no} differs from the journaled order")
+        (additions[day] if day else unknown).append({
+            "order_id": order_no, "side": fill["side"], "price": fill["price"],
+            "quantity": fill["total"] - previous, "deal_total": fill["total"], "source": "auto_recovery",
+        })
+
+    def flat_with(choice: str) -> bool:
+        for day in scope:
+            # An untouched earlier partition is not replayed by the bot.
+            if day not in days and day != choice and not additions[day]:
+                continue
+            try:
+                fills_of_day = booked[day] + additions[day] + (unknown if day == choice else [])
+                if replay_fills(fills_of_day, config)[0].position:
+                    return False
+            except JournalError as exc:
+                raise RecoveryRefused(f"{symbol} report fills would not replay: {exc}") from exc
+        return True
+
+    choices = [""]
+    if unknown:
+        choices = list(current)
+        # Only a deferred recovery closes yesterday's position: no bot order since.
+        if previous_day and not any(acked[day] for day in current):
+            choices.append(previous_day)
+    valid = [choice for choice in choices if flat_with(choice)]
+    if len(valid) != 1:
+        detail = "several trading days could take them" if valid else "no trading day replays flat with them"
+        raise RecoveryRefused(
+            f"{symbol} journal does not reconcile with the TTB report ({len(unknown)} unjournaled fills; "
+            f"{detail}; partitions {scope or 'none'}); reconcile manually")
+    choice = valid[0]
+    return [(day, payload) for day in scope for payload in additions[day]] + [(choice, payload) for payload in unknown]
 
 
 def _reconcile_journals(
@@ -406,8 +426,9 @@ def _recover(
     for symbol, qty in positions.items():
         try:
             _flatten_symbol(api, symbol, qty, policy, sleep, actions)
-        except RecoveryRefused as exc:
-            append_audit(audit_dir, {"action": "auto_recovery_failed", "reason": str(exc), "actions": actions})
+        except Exception as exc:  # audit the orders already sent, whatever stopped the flatten
+            append_audit(audit_dir, {"action": "auto_recovery_failed", "reason": f"{type(exc).__name__}: {exc}",
+                                     "actions": actions})
             raise
 
     clean = _clean_twice(api, policy, sleep)
