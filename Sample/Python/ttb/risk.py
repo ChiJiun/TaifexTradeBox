@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from strategy_core import OrderIntent, StrategyConfig
 from .api import _decoded, is_success_response
@@ -32,6 +32,10 @@ class PreTradeLimits:
     # TTB QUERYMARGIN returns one row per currency (TWD/USD/JPY/CNY, observed
     # 2026-10-18); the margin field is read from this currency's row only.
     available_margin_currency: str = "TWD"
+    # TTB holds this share of a new order's contract value as margin and
+    # rejects it when available margin is short, so an entry also needs at
+    # least that much headroom. 0 checks the fixed minimum only.
+    entry_margin_rate: float = 0.0
 
     def validate(self) -> None:
         if min(self.max_orders_per_minute, self.max_cancels_per_minute, self.max_daily_orders) <= 0:
@@ -42,6 +46,8 @@ class PreTradeLimits:
             raise ValueError("minimum_available_margin must be a nonnegative finite number")
         if bool(self.available_margin_field) != bool(self.minimum_available_margin):
             raise ValueError("both a verified margin field and a positive minimum margin are required")
+        if not 0 <= self.entry_margin_rate < 1:
+            raise ValueError("entry_margin_rate must be in [0, 1)")
 
 
 def parse_available_margin(response: Any, field: str, currency: str = "TWD") -> float:
@@ -285,6 +291,7 @@ def assess_pretrade(
     order_rate: DurableOrderRateGuard,
     now: float,
     margin_supplier: Callable[[], Any],
+    unbound: Iterable[OrderIntent] = (),
 ) -> None:
     """Identical live/offline pre-trade risk policy, with injected margin data.
 
@@ -307,5 +314,13 @@ def assess_pretrade(
     margin = parse_available_margin(
         margin_supplier(), limits.available_margin_field, limits.available_margin_currency,
     )
-    if margin < limits.minimum_available_margin:
+    # Entries sent but not yet bound may not be reflected in the margin read,
+    # e.g. the buy side of a flat grid while its sell side is checked, so
+    # they are taken off it before either check.
+    margin -= sum(
+        sent.quantity * sent.price for sent in unbound if sent.role == "entry"
+    ) * config.point_value * limits.entry_margin_rate
+    required = max(limits.minimum_available_margin,
+                   intent.quantity * intent.price * config.point_value * limits.entry_margin_rate)
+    if margin < required:
         raise EntryBlocked("available TTB margin below required headroom")

@@ -14,7 +14,7 @@ from typing import Any
 
 from strategies import MovingAverageStrategy
 from strategy_core import PositionLedger, StrategyConfig
-from ttb.api import SharedReportsApi, TTBApi
+from ttb.api import SharedReportsApi, TTBApi, TTBApiError
 from ttb.engine import BotEngine, CsvRecorder
 from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
 from ttb.runtime import SessionSchedule, TAIPEI_TZ
@@ -28,7 +28,7 @@ from ttb.calendar import (
 from datetime import datetime
 from ttb.health import HealthReporter
 from ttb.status_server import StatusServer
-from ttb.risk import PreTradeLimits
+from ttb.risk import PreTradeLimits, PreTradeRiskError, parse_available_margin
 from ttb.contracts import point_value_for
 from ttb.orders import (
     ShadowGateway,
@@ -91,6 +91,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--daily-loss-limit", type=float, default=10_000.0)
     parser.add_argument("--max-drawdown", type=float, default=40_000.0)
     parser.add_argument("--poll-seconds", type=float, default=0.5)
+    parser.add_argument("--entry-margin-rate", type=float, default=0.0,
+                        help="block an entry unless available margin covers this share of its contract value")
+    parser.add_argument("--sizing-equity", type=float, default=0.0,
+                        help="equity for margin_share grid sizing outside TTB mode; TTB mode reads AVAILABELMARGIN")
+    parser.add_argument("--entry-cutoff-minutes", type=float, default=None,
+                        help="no entries while flat this many minutes before the close (default 25, virtual-max 10)")
+    parser.add_argument("--flatten-minutes", type=float, default=None,
+                        help="flatten at the touch from this many minutes before the close (default 10, virtual-max 3)")
     parser.add_argument("--max-orders-per-minute", type=int, default=20)
     parser.add_argument("--max-cancels-per-minute", type=int, default=60)
     parser.add_argument("--max-daily-orders", type=int, default=250)
@@ -298,6 +306,42 @@ def build_strategy(args: argparse.Namespace, config: StrategyConfig, ledger: Pos
     return None
 
 
+def _inject_sizing_equity(args: argparse.Namespace, api: TTBApi) -> None:
+    """Give a margin_share grid the account equity it sizes from.
+
+    The bot starts flat with no working orders, so TTB's available margin is
+    the equity at that moment; each daily start re-sizes from it.
+    """
+    if not args.strategy_module:
+        return
+    try:
+        params = json.loads(args.strategy_params_json)
+    except json.JSONDecodeError:
+        return  # build_strategy reports it
+    if not isinstance(params, dict) or not params.get("margin_share"):
+        return
+    equity = args.sizing_equity
+    if args.mode == "ttb":
+        # TTB is often slow to answer right after login; a failed start costs
+        # one of the supervisor's daily recoveries.
+        for attempt in range(3):
+            try:
+                equity = parse_available_margin(
+                    api.query_margin(), args.available_margin_field or "AVAILABELMARGIN",
+                    args.available_margin_currency,
+                )
+                break
+            except (PreTradeRiskError, TTBApiError):
+                if attempt == 2:
+                    raise
+                LOG.warning("sizing equity read failed; retrying")
+                time.sleep(5)
+    if equity <= 0:
+        raise SystemExit("margin_share sizing needs a positive equity (--sizing-equity or TTB available margin)")
+    LOG.info("grid sizing from equity %.0f, margin_share %s", equity, params["margin_share"])
+    args.strategy_params_json = json.dumps({**params, "equity": equity})
+
+
 def _resolve_front_month(spec: str, calendar_file: Path) -> str:
     return resolve_symbol(spec, datetime.now(TAIPEI_TZ).date(), TradingCalendar.from_file(calendar_file))
 
@@ -396,6 +440,7 @@ def build_leg(args: argparse.Namespace, api: TTBApi) -> Leg:
         minimum_available_margin=args.min_available_margin,
         available_margin_field=args.available_margin_field,
         available_margin_currency=args.available_margin_currency,
+        entry_margin_rate=args.entry_margin_rate,
     )
     limits.validate()
     gateway = (
@@ -407,6 +452,7 @@ def build_leg(args: argparse.Namespace, api: TTBApi) -> Leg:
             journal_dir=args.journal_dir, margin_cache_seconds=args.margin_cache_seconds,
         )
     )
+    _inject_sizing_equity(args, api)
     strategy = build_strategy(args, config, ledger)
     calendar = None
     contract = None
@@ -445,6 +491,8 @@ def build_leg(args: argparse.Namespace, api: TTBApi) -> Leg:
         risk_state_path=args.risk_state_file,
         flatten_on_shutdown=(args.mode == "ttb" and args.flatten_on_shutdown),
         feed_dead_seconds=args.feed_dead_seconds,
+        entry_cutoff_minutes=args.entry_cutoff_minutes,
+        flatten_minutes=args.flatten_minutes,
     )
     engine.health.update(mode=args.mode, strategy=args.strategy_module or args.strategy)
     monitor = QuoteMonitor(
