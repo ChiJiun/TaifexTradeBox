@@ -95,7 +95,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--entry-margin-rate", type=float, default=0.0,
                         help="block an entry unless available margin covers this share of its contract value")
     parser.add_argument("--sizing-equity", type=float, default=0.0,
-                        help="equity for margin_share grid sizing outside TTB mode; TTB mode reads AVAILABELMARGIN")
+                        help="equity for margin_share/level_share grid sizing outside TTB mode; TTB mode reads AVAILABELMARGIN")
     parser.add_argument("--entry-cutoff-minutes", type=float, default=None,
                         help="no entries while flat this many minutes before the close (default 25, virtual-max 10)")
     parser.add_argument("--flatten-minutes", type=float, default=None,
@@ -308,7 +308,7 @@ def build_strategy(args: argparse.Namespace, config: StrategyConfig, ledger: Pos
 
 
 def _inject_sizing_equity(args: argparse.Namespace, api: TTBApi) -> None:
-    """Give a margin_share grid the account equity it sizes from.
+    """Give a margin_share or level_share grid the account equity it sizes from.
 
     The bot starts flat with no working orders, so TTB's available margin is
     the equity at that moment; each daily start re-sizes from it.
@@ -319,7 +319,7 @@ def _inject_sizing_equity(args: argparse.Namespace, api: TTBApi) -> None:
         params = json.loads(args.strategy_params_json)
     except json.JSONDecodeError:
         return  # build_strategy reports it
-    if not isinstance(params, dict) or not params.get("margin_share"):
+    if not isinstance(params, dict) or not (params.get("margin_share") or params.get("level_share")):
         return
     equity = args.sizing_equity
     if args.mode == "ttb":
@@ -338,8 +338,9 @@ def _inject_sizing_equity(args: argparse.Namespace, api: TTBApi) -> None:
                 LOG.warning("sizing equity read failed; retrying")
                 time.sleep(5)
     if equity <= 0:
-        raise SystemExit("margin_share sizing needs a positive equity (--sizing-equity or TTB available margin)")
-    LOG.info("grid sizing from equity %.0f, margin_share %s", equity, params["margin_share"])
+        raise SystemExit("grid sizing needs a positive equity (--sizing-equity or TTB available margin)")
+    LOG.info("grid sizing from equity %.0f, margin_share %s, level_share %s", equity,
+             params.get("margin_share", 0), params.get("level_share", 0))
     args.strategy_params_json = json.dumps({**params, "equity": equity})
 
 
