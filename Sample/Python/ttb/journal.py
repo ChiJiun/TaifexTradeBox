@@ -7,13 +7,67 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from strategy_core import Fill, PositionLedger, StrategyConfig
 
 
 class JournalError(RuntimeError):
     """A corrupted/unwritable execution journal must stop all live trading."""
+
+
+class JournalLock:
+    """Exclusive OS lock on a journal directory, held by the live bot for its whole run.
+
+    The OS releases it when the holder exits, even on a crash, so a lock that
+    cannot be taken proves a live process (the bot) still owns the journals.
+    Offline writers such as auto-recovery take it before touching them.
+    """
+
+    NAME = "writer.lock"
+
+    def __init__(self, directory: Path) -> None:
+        self.path = Path(directory) / self.NAME
+        self._handle: Any = None
+
+    def acquire(self) -> "JournalLock":
+        if self._handle is not None:
+            return self
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise JournalError(f"execution journal is locked by a running process: {self.path}") from exc
+        self._handle = handle
+        return self
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass  # closing the handle drops the lock anyway
+        finally:
+            handle.close()
+
+    def __enter__(self) -> "JournalLock":
+        return self.acquire()
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.release()
 
 
 class ExecutionJournal:
@@ -36,10 +90,13 @@ class ExecutionJournal:
         self._cache: dict[str, list[dict[str, Any]]] = {}
         if validate_all:
             # Validate every retained partition on startup, not just today.
-            for path in sorted(self.directory.glob(f"events-{self.symbol}-*.jsonl")):
-                day = path.stem.rsplit("-", 3)[-3:]
-                date_text = "-".join(day)
+            for date_text in self.trading_days():
                 self._read(date_text)
+
+    def trading_days(self) -> list[str]:
+        """Trading days that have a partition on disk for this symbol."""
+        return ["-".join(path.stem.rsplit("-", 3)[-3:])
+                for path in sorted(self.directory.glob(f"events-{self.symbol}-*.jsonl"))]
 
     def _path(self, trading_day: str) -> Path:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", trading_day):
@@ -133,26 +190,30 @@ class ExecutionJournal:
             return record
 
     def replay_ledger(self, trading_day: str, config: StrategyConfig) -> tuple[PositionLedger, dict[str, int]]:
-        ledger = PositionLedger(config)
-        filled_totals: dict[str, int] = {}
-        for event in self.events(trading_day):
-            if event["kind"] != "fill":
-                continue
-            row = event["payload"]
-            try:
-                order_id = str(row["order_id"])
-                total = int(row["deal_total"])
-                delta = int(row["quantity"])
-                side = str(row["side"])
-                price = float(row["price"])
-                if (
-                    not order_id or side not in ("buy", "sell") or delta <= 0 or
-                    total <= filled_totals.get(order_id, 0) or
-                    total - filled_totals.get(order_id, 0) != delta or price <= 0
-                ):
-                    raise ValueError("invalid fill cursor")
-                ledger.on_fill(Fill(side, price, delta, order_id))
-                filled_totals[order_id] = total
-            except (KeyError, ValueError, TypeError) as exc:
-                raise JournalError("cannot replay fill; execution journal corrupt") from exc
-        return ledger, filled_totals
+        return replay_fills(
+            (event["payload"] for event in self.events(trading_day) if event["kind"] == "fill"), config,
+        )
+
+
+def replay_fills(fills: Iterable[dict[str, Any]], config: StrategyConfig) -> tuple[PositionLedger, dict[str, int]]:
+    """Replay fill payloads with the journal's cursor rules; also vets fills before they are appended."""
+    ledger = PositionLedger(config)
+    filled_totals: dict[str, int] = {}
+    for row in fills:
+        try:
+            order_id = str(row["order_id"])
+            total = int(row["deal_total"])
+            delta = int(row["quantity"])
+            side = str(row["side"])
+            price = float(row["price"])
+            if (
+                not order_id or side not in ("buy", "sell") or delta <= 0 or
+                total <= filled_totals.get(order_id, 0) or
+                total - filled_totals.get(order_id, 0) != delta or price <= 0
+            ):
+                raise ValueError("invalid fill cursor")
+            ledger.on_fill(Fill(side, price, delta, order_id))
+            filled_totals[order_id] = total
+        except (KeyError, ValueError, TypeError) as exc:
+            raise JournalError("cannot replay fill; execution journal corrupt") from exc
+    return ledger, filled_totals

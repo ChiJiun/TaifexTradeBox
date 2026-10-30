@@ -8,8 +8,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from strategy_core import StrategyConfig
+
+from .api import extract_order_no
 from .calendar import CONTRACT_CODE, SUPPORTED_PRODUCTS
-from .orders import _response_rows, is_working_order, order_number, order_symbol, reported_position, _value
+from .journal import ExecutionJournal, JournalError, JournalLock, replay_fills
+from .orders import (
+    _explicit_side, _float, _response_rows, _strict_quantity, _value,
+    is_working_order, order_number, order_symbol, reported_position,
+)
 from .reconciliation import AccountInspectionError, AccountSnapshot, append_audit, inspect_account
 from .runtime import TAIPEI_TZ
 
@@ -31,13 +38,15 @@ class RecoveryPolicy:
 
     max_attempts_per_day: int = 3
     max_flatten_qty: int = 10
+    # Market IOCs per symbol: thin stock-futures books fill only part of one.
+    max_flatten_rounds: int = 3
     settle_seconds: float = 3.0
     timeout_seconds: float = 45.0
     poll_seconds: float = 1.0
 
     def validate(self) -> None:
-        if self.max_attempts_per_day <= 0 or self.max_flatten_qty <= 0:
-            raise ValueError("recovery attempt and quantity bounds must be positive")
+        if self.max_attempts_per_day <= 0 or self.max_flatten_qty <= 0 or self.max_flatten_rounds <= 0:
+            raise ValueError("recovery attempt, quantity and round bounds must be positive")
 
 
 class AttemptBudget:
@@ -89,17 +98,80 @@ def _working_orders(api: Any) -> list[tuple[str, str]]:
     return [(order_number(row), order_symbol(row)) for row in _response_rows(response) if is_working_order(row)]
 
 
-def _wait(condition: Callable[[], bool], policy: RecoveryPolicy, sleep: Callable[[float], None]) -> bool:
+def _wait(condition: Callable[[], Any], policy: RecoveryPolicy, sleep: Callable[[float], None]) -> Any:
+    """First truthy value of condition, or None at the timeout."""
     deadline = time.monotonic() + policy.timeout_seconds
     while True:
         try:
-            if condition():
-                return True
+            value = condition()
+            if value:
+                return value
+        except RecoveryRefused:
+            raise
         except (RuntimeError, AccountInspectionError):
             pass  # report briefly inconsistent; keep polling until timeout
         if time.monotonic() >= deadline:
-            return False
+            return None
         sleep(policy.poll_seconds)
+
+
+def _final_flatten_row(
+    api: Any, known: set[str], order_no: str, symbol: str, side: str, quantity: int,
+) -> dict[str, Any] | None:
+    """The report row of the market IOC just sent, once it can no longer fill."""
+    rows = _response_rows(api.query_orders())
+    if order_no:
+        matches = [row for row in rows if order_number(row) == order_no]
+    else:
+        # As in the bot, NEWORDER may not echo OrdNo; the account is
+        # exclusive and the bot is stopped, so one new matching row is ours.
+        matches = [
+            row for row in rows
+            if order_number(row) and order_number(row) not in known
+            and order_symbol(row) in ("", symbol)
+            and _explicit_side(_value(row, "BS", "Side", "ComdBS1")) == side
+            and int(_float(_value(row, "VOLM", "OrderQty", default=0))) == quantity
+        ]
+    if len({order_number(row) for row in matches}) > 1:
+        raise RecoveryRefused(f"several TTB orders match one flatten order for {symbol}")
+    # One order may span several report rows; it is final only when none still works.
+    if not matches or any(is_working_order(row) for row in matches):
+        return None
+    return max(matches, key=_deal_total)
+
+
+def _flatten_symbol(
+    api: Any, symbol: str, quantity: int, policy: RecoveryPolicy,
+    sleep: Callable[[float], None], actions: list[dict[str, Any]],
+) -> None:
+    """Market IOC until flat, resending only the rest the report proves open."""
+    remaining = quantity
+    for round_no in range(1, policy.max_flatten_rounds + 1):
+        side = "sell" if remaining > 0 else "buy"
+        size = abs(remaining)
+        known = {order_number(row) for row in _response_rows(api.query_orders()) if order_number(row)}
+        response = api.new_market_ioc(symbol, side, size)
+        action: dict[str, Any] = {"flatten": symbol, "side": side, "quantity": size, "round": round_no}
+        actions.append(action)
+        row = _wait(lambda: _final_flatten_row(api, known, extract_order_no(response), symbol, side, size),
+                    policy, sleep)
+        if row is None:
+            raise RecoveryRefused(f"flatten order for {symbol} never reached a final state in the TTB report")
+        filled = _deal_total(row)
+        if filled > size:
+            raise RecoveryRefused(f"flatten order for {symbol} reports more fills than ordered")
+        action.update(order_no=order_number(row), filled=filled)
+        remaining += filled if side == "buy" else -filled
+        # The position report must agree with the fills before any resend;
+        # a lagging report would otherwise resend lots that already closed.
+        expected = remaining
+        if not _wait(lambda: _signed_positions(api).get(symbol, 0) == expected or None, policy, sleep):
+            raise RecoveryRefused(f"{symbol} position report disagrees with flatten fills (expected {expected})")
+        if remaining == 0:
+            return
+        sleep(policy.settle_seconds)
+    raise RecoveryRefused(
+        f"account still not flat after {policy.max_flatten_rounds} market IOC rounds ({symbol} {remaining})")
 
 
 def _clean_twice(api: Any, policy: RecoveryPolicy, sleep: Callable[[float], None]) -> AccountSnapshot | None:
@@ -109,6 +181,157 @@ def _clean_twice(api: Any, policy: RecoveryPolicy, sleep: Callable[[float], None
     sleep(policy.settle_seconds)
     second = inspect_account(api, "ACCOUNT")
     return second if second.can_clear else None
+
+
+def _deal_total(row: dict[str, Any]) -> int:
+    return _strict_quantity(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0), "filled quantity")
+
+
+def _journal_symbols(journal_dir: Path, days: tuple[str, ...]) -> set[str]:
+    symbols: set[str] = set()
+    for day in days:
+        suffix = f"-{day}.jsonl"
+        for path in journal_dir.glob(f"events-*{suffix}"):
+            symbols.add(path.name[len("events-"):-len(suffix)].upper())
+    return symbols
+
+
+def _report_fills(api: Any) -> dict[str, dict[str, Any]]:
+    """Filled TTB orders by order number, one entry each even if the report repeats an order."""
+    orders: dict[str, dict[str, Any]] = {}
+    for row in _response_rows(api.query_orders()):
+        total = _deal_total(row)
+        if not total:
+            continue
+        symbol, order_no = order_symbol(row), order_number(row)
+        if not symbol or not order_no:
+            raise RecoveryRefused("a filled TTB order has no symbol or order number; reconcile the journal manually")
+        side = _explicit_side(_value(row, "BS", "Side", "ComdBS1"))
+        price = _float(_value(row, "DEAL_PRCE", "DealPrice", default=0))
+        if not side or price <= 0:
+            raise RecoveryRefused(f"TTB fill of {symbol} order {order_no} has no usable side/price")
+        seen = orders.get(order_no)
+        if seen and (seen["symbol"], seen["side"]) != (symbol, side):
+            raise RecoveryRefused(f"TTB report rows of order {order_no} disagree on symbol or side")
+        if not seen or total > seen["total"]:
+            orders[order_no] = {"symbol": symbol, "side": side, "price": price, "total": total}
+    return orders
+
+
+def _plan_journal_fills(
+    api: Any, journal_dir: Path, days: tuple[str, ...],
+) -> list[tuple[ExecutionJournal, str, dict[str, Any]]]:
+    """Fill events that bring each journal in line with the flat account.
+
+    Runs only after two clean inspections, so every TTB order is final and
+    every position is 0. Fills the journal lacks are taken from the order
+    report: an order the journal already knows (order_ack or fill) in one of
+    `days` (what a restarted bot replays) or in the last partition before them
+    is caught up in that partition; an order no partition knows (auto-
+    recovery's own market IOCs) is booked into the one partition that this
+    makes flat, which is the last partition before `days` only for a position
+    carried over by a deferred recovery (no bot order acknowledged since).
+    Older partitions are not replayed by the bot and are left alone. The plan
+    is accepted only if replaying every touched partition and every partition
+    of `days` with the journal's own cursor rules ends flat, and exactly one
+    partition can take the unknown fills; anything else refuses before writing.
+    """
+    fills = _report_fills(api)
+    plan: list[tuple[ExecutionJournal, str, dict[str, Any]]] = []
+    for symbol in sorted({fill["symbol"] for fill in fills.values()} | _journal_symbols(journal_dir, days)):
+        journal = ExecutionJournal(journal_dir, symbol)  # validates every retained partition
+        mine = {order_no: fill for order_no, fill in fills.items() if fill["symbol"] == symbol}
+        plan.extend((journal, day, payload) for day, payload in _plan_symbol(journal, mine, days))
+    return plan
+
+
+def _plan_symbol(
+    journal: ExecutionJournal, fills: dict[str, dict[str, Any]], days: tuple[str, ...],
+) -> list[tuple[str, dict[str, Any]]]:
+    symbol, config = journal.symbol, StrategyConfig(symbol=journal.symbol)
+    partitions = journal.trading_days()
+    current = [day for day in partitions if day in days]
+    previous_day = ([day for day in partitions if day < min(days)] or [""])[-1]
+    scope = ([previous_day] if previous_day else []) + current
+    booked: dict[str, list[dict[str, Any]]] = {}
+    cursors: dict[str, dict[str, int]] = {}
+    acked: dict[str, dict[str, str]] = {}
+    home: dict[str, str] = {}
+    for day in scope:
+        events = journal.events(day)
+        booked[day] = [event["payload"] for event in events if event["kind"] == "fill"]
+        cursors[day] = replay_fills(booked[day], config)[1]
+        acked[day] = {str(event["payload"].get("order_no")): str(event["payload"].get("side"))
+                      for event in events if event["kind"] == "order_ack"}
+        for order_no in set(cursors[day]) | set(acked[day]):
+            if home.setdefault(order_no, day) != day:
+                raise RecoveryRefused(f"{symbol} order {order_no} is journaled on several trading days")
+
+    additions: dict[str, list[dict[str, Any]]] = {day: [] for day in scope}
+    unknown: list[dict[str, Any]] = []
+    for order_no, fill in fills.items():
+        day = home.get(order_no, "")
+        previous = cursors[day].get(order_no, 0) if day else 0
+        if fill["total"] < previous:
+            raise RecoveryRefused(f"journal holds more fills than TTB for {symbol} order {order_no}")
+        if fill["total"] == previous:
+            continue
+        if day and acked[day].get(order_no, fill["side"]) != fill["side"]:
+            raise RecoveryRefused(f"TTB side of {symbol} order {order_no} differs from the journaled order")
+        (additions[day] if day else unknown).append({
+            "order_id": order_no, "side": fill["side"], "price": fill["price"],
+            "quantity": fill["total"] - previous, "deal_total": fill["total"], "source": "auto_recovery",
+        })
+
+    def flat_with(choice: str) -> bool:
+        for day in scope:
+            # An untouched earlier partition is not replayed by the bot.
+            if day not in days and day != choice and not additions[day]:
+                continue
+            try:
+                fills_of_day = booked[day] + additions[day] + (unknown if day == choice else [])
+                if replay_fills(fills_of_day, config)[0].position:
+                    return False
+            except JournalError as exc:
+                raise RecoveryRefused(f"{symbol} report fills would not replay: {exc}") from exc
+        return True
+
+    choices = [""]
+    if unknown:
+        choices = list(current)
+        # Only a deferred recovery closes yesterday's position: no bot order since.
+        if previous_day and not any(acked[day] for day in current):
+            choices.append(previous_day)
+    valid = [choice for choice in choices if flat_with(choice)]
+    if len(valid) != 1:
+        detail = "several trading days could take them" if valid else "no trading day replays flat with them"
+        raise RecoveryRefused(
+            f"{symbol} journal does not reconcile with the TTB report ({len(unknown)} unjournaled fills; "
+            f"{detail}; partitions {scope or 'none'}); reconcile manually")
+    choice = valid[0]
+    return [(day, payload) for day in scope for payload in additions[day]] + [(choice, payload) for payload in unknown]
+
+
+def _reconcile_journals(
+    api: Any, journal_dir: Path, days: tuple[str, ...], audit_dir: Path, actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Write the planned fills, then prove every journal replays flat."""
+    try:
+        plan = _plan_journal_fills(api, journal_dir, days)
+        written: list[dict[str, Any]] = []
+        for journal, day, payload in plan:
+            journal.append("fill", payload, trading_day=day)
+            written.append({"journal_fill": journal.symbol, "trading_day": day, **payload})
+        for symbol, day in sorted({(journal.symbol, day) for journal, day, _payload in plan}):
+            reread = ExecutionJournal(journal_dir, symbol)
+            if any(reread.replay_ledger(check, StrategyConfig(symbol=symbol))[0].position
+                   for check in {day, *days}):
+                raise RecoveryRefused(f"{symbol} journal still not flat after reconciliation")
+    except (JournalError, RuntimeError) as exc:
+        reason = str(exc) if isinstance(exc, RecoveryRefused) else f"execution journal unusable: {exc}"
+        append_audit(audit_dir, {"action": "auto_recovery_failed", "reason": reason, "actions": actions})
+        raise RecoveryRefused(reason) from exc
+    return written
 
 
 def _clear_flag(flag: Path, audit_dir: Path, snapshot: AccountSnapshot, actions: list[dict[str, Any]]) -> bool:
@@ -132,23 +355,50 @@ def auto_recover(
     market_open: bool,
     sleep: Callable[[float], None] = time.sleep,
     today: str | None = None,
+    journal_dir: Path | None = None,
+    journal_days: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Cancel every working order and flatten futures, then clear the latch.
 
     Preconditions enforced by the caller (CLI/supervisor): the TTB account is
     used exclusively by this bot and the bot process is stopped. Every write
     is audited; the latch is cleared only after two clean inspections.
+
+    With journal_dir, the bot's journal lock must be free (bot stopped), and
+    the latch is cleared only once the journals of journal_days (the trading
+    days a restarted bot may replay; default today) match the flat account.
     """
     policy.validate()
     day = today or datetime.now(TAIPEI_TZ).date().isoformat()
+    lock = JournalLock(journal_dir) if journal_dir is not None else None
+    if lock is not None:
+        try:
+            lock.acquire()
+        except JournalError as exc:
+            raise RecoveryRefused(f"the bot still holds its execution journal; refusing to recover: {exc}") from exc
+    try:
+        return _recover(api, flag, audit_dir, budget, policy, market_open, sleep, day,
+                        journal_dir, tuple(dict.fromkeys(journal_days or (day,))))
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _recover(
+    api: Any, flag: Path, audit_dir: Path, budget: AttemptBudget, policy: RecoveryPolicy,
+    market_open: bool, sleep: Callable[[float], None], day: str,
+    journal_dir: Path | None, journal_days: tuple[str, ...],
+) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     try:
         clean = _clean_twice(api, policy, sleep)
     except AccountInspectionError as exc:
         raise RecoveryDeferred(f"account reports unavailable: {exc}") from exc
     if clean is not None:
+        if journal_dir is not None:
+            actions += _reconcile_journals(api, journal_dir, journal_days, audit_dir, actions)
         cleared = _clear_flag(flag, audit_dir, clean, actions)
-        return {"ok": True, "action": "already_clean", "flag_cleared": cleared}
+        return {"ok": True, "action": "already_clean", "actions": actions, "flag_cleared": cleared}
 
     positions = _signed_positions(api)
     unsupported = sorted(symbol for symbol in positions if not CONTRACT_CODE.fullmatch(symbol))
@@ -174,16 +424,18 @@ def auto_recover(
 
     positions = _signed_positions(api)
     for symbol, qty in positions.items():
-        side = "sell" if qty > 0 else "buy"
-        api.new_market_ioc(symbol, side, abs(qty))
-        actions.append({"flatten": symbol, "side": side, "quantity": abs(qty)})
-    if positions and not _wait(lambda: not _signed_positions(api) and not _working_orders(api), policy, sleep):
-        append_audit(audit_dir, {"action": "auto_recovery_failed", "reason": "position not flat", "actions": actions})
-        raise RecoveryRefused("account still not flat after market IOC flatten")
+        try:
+            _flatten_symbol(api, symbol, qty, policy, sleep, actions)
+        except Exception as exc:  # audit the orders already sent, whatever stopped the flatten
+            append_audit(audit_dir, {"action": "auto_recovery_failed", "reason": f"{type(exc).__name__}: {exc}",
+                                     "actions": actions})
+            raise
 
     clean = _clean_twice(api, policy, sleep)
     if clean is None:
         append_audit(audit_dir, {"action": "auto_recovery_failed", "reason": "final inspection", "actions": actions})
         raise RecoveryRefused("final double inspection is not clean")
+    if journal_dir is not None:
+        actions += _reconcile_journals(api, journal_dir, journal_days, audit_dir, actions)
     cleared = _clear_flag(flag, audit_dir, clean, actions)
     return {"ok": True, "action": "recovered", "attempt": attempt, "actions": actions, "flag_cleared": cleared}

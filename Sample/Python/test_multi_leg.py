@@ -75,6 +75,13 @@ class LegParsingTests(unittest.TestCase):
         self.assertEqual(legs[1].output, Path("output") / "runs" / "AUTO_CDF")
         self.assertEqual(legs[1].risk_state_file, Path("output") / "risk-state-AUTO_CDF.json")
 
+    def test_legs_share_the_journal_directory_auto_recovery_reads(self):
+        # The bot locks this directory once for all legs, and auto-recovery
+        # reconciles every symbol's journal from it.
+        legs = sim_hft_bot.leg_namespaces(["--symbol", "auto:CCF", "--leg-json", '["--symbol", "auto:CDF"]'])
+        # Neither is set, so every gateway falls back to output/journal.
+        self.assertEqual({(leg.journal_dir, leg.rate_counters_file) for leg in legs}, {(None, None)})
+
     def test_a_single_leg_keeps_its_original_paths(self):
         (leg,) = sim_hft_bot.leg_namespaces(["--symbol", "CCFK6"])
         self.assertEqual(leg.output, Path("output") / "runs")

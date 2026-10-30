@@ -25,6 +25,35 @@ ENTRY_BLOCK_RETRY_SECONDS = 5.0
 # order unowned, which latches the bot.
 REPORT_REUSE_SECONDS = 0.5
 MAX_MARGIN_CACHE_SECONDS = 30.0
+# Shutdown flatten IOC prices: ticks through the far touch per attempt. Stock
+# futures books are a few lots deep, so an IOC at the touch alone leaves the
+# position open. A marketable limit still fills at the best resting prices.
+SHUTDOWN_FLATTEN_OFFSET_TICKS = (2, 5, 10)
+# Never price a flatten further than this from the touch. TAIFEX daily limits
+# are +-10% of the reference price and the touch itself is inside them, so
+# only a market already within 3% of a limit can see an attempt rejected. The
+# bot cannot tell a rejected NEWORDER from a lost reply, so it never resends
+# blindly; the shutdown then fails closed and auto-recovery's market IOC,
+# which TAIFEX keeps inside the limits, takes over.
+SHUTDOWN_FLATTEN_MAX_OFFSET_FRACTION = 0.03
+
+
+def shutdown_flatten_price(quote: Quote, side: str, tick_size: float, offset_ticks: int) -> float:
+    """Marketable IOC limit price offset_ticks through the far touch, capped by the band above."""
+    if tick_size <= 0 or offset_ticks < 0:
+        raise ValueError("tick_size must be positive and offset_ticks non-negative")
+    touches = [price for price in ((quote.ask, quote.last) if side == "buy" else (quote.bid, quote.last))
+               if price > 0]
+    if not touches:
+        raise ValueError("quote has no usable price for a flatten")
+    base = max(touches) if side == "buy" else min(touches)
+    # Off-grid touches round away from the book so the price stays marketable.
+    base_units = math.ceil(base / tick_size - 1e-9) if side == "buy" else math.floor(base / tick_size + 1e-9)
+    cap_units = math.floor(base * SHUTDOWN_FLATTEN_MAX_OFFSET_FRACTION / tick_size + 1e-9)
+    units = min(offset_ticks, cap_units)
+    if side == "sell":
+        units = min(units, base_units - 1)
+    return round((base_units + units if side == "buy" else base_units - units) * tick_size, 10)
 
 
 class ReportChannelLost(RuntimeError):
@@ -732,18 +761,21 @@ class TTBOrderGateway:
             except Exception:
                 LOG.exception("unable to cancel %s", current)
 
-    def emergency_flatten(self, quote: Quote, timeout_seconds: float = 15.0) -> bool:
+    def emergency_flatten(self, quote: Quote, timeout_seconds: float = 45.0) -> bool:
         """Best-effort IOC flatten for an explicitly requested graceful shutdown.
 
         The broker-reported position is authoritative. Existing working orders
         are cancelled first; a new opposite-side IOC order is only sent after
         the order report confirms no working order remains for the symbol.
+        An IOC that leaves lots open is followed by a more aggressive one for
+        the rest (SHUTDOWN_FLATTEN_OFFSET_TICKS), each only once the broker
+        position and the journaled fills agree.
         """
         if not self.bootstrapped or not quote.is_valid() or self.unsafe_reason or self.pending:
             return False
         self.cancel_all()
         deadline = time.monotonic() + max(2.0, timeout_seconds)
-        flatten_sent = False
+        attempts = 0
         while time.monotonic() < deadline:
             self._drop_shared_reports()
             orders_response = self.api.query_orders()
@@ -763,12 +795,7 @@ class TTBOrderGateway:
                 # Broker position can update before the filled order appears in
                 # the order report. Keep polling until the local ledger sees the
                 # execution too; never send a second flatten while broker is flat.
-                try:
-                    self.last_poll = 0.0
-                    self.before_decision(quote)
-                except RuntimeError as exc:
-                    if "position mismatch" not in str(exc).lower():
-                        raise
+                self._flatten_poll(quote)
                 if self.ledger.position == 0:
                     return True
                 time.sleep(self.poll_seconds)
@@ -776,42 +803,53 @@ class TTBOrderGateway:
             if working:
                 time.sleep(self.poll_seconds)
                 continue
-            if not flatten_sent:
-                side = "sell" if self.reported_position > 0 else "buy"
-                price = quote.bid if side == "sell" else quote.ask
-                self.order_rate.record("order", time.time())
-                self.record_event("order_intent", {
-                    "side": side, "quantity": abs(self.reported_position),
-                    "role": "shutdown_flatten", "price": price,
-                })
-                # A shutdown flatten is rare; never bind it against a reused read.
-                known = self._report_snapshot(fresh=True)
-                response = self.api.new_order(
-                    TTBOrderRequest(
-                        symbol=self.config.symbol,
-                        side=side,
-                        price=price,
-                        quantity=abs(self.reported_position),
-                        time_in_force="2",
-                        position_effect="Y",
-                    )
-                )
-                self._track_sent(
-                    OrderIntent(side, price, abs(self.reported_position), "risk_exit", "shutdown flatten"),
-                    "Y", extract_order_no(response), known,
-                )
-                flatten_sent = True
-                LOG.warning("shutdown flatten sent side=%s qty=%s price=%s", side, abs(self.reported_position), price)
-            try:
-                self.last_poll = 0.0
-                self.before_decision(quote)
-            except RuntimeError as exc:
-                # Position mismatch is expected briefly while broker reports
-                # transition; any other reconciliation failure remains fatal.
-                if "position mismatch" not in str(exc).lower():
-                    raise
+            if attempts < len(SHUTDOWN_FLATTEN_OFFSET_TICKS) and not self.pending:
+                if attempts:
+                    # The rest is known only from one read in which the previous
+                    # IOC is bound and terminal, its final fills are journaled
+                    # and the broker position agrees with them.
+                    self._flatten_poll(quote)
+                if not attempts or (
+                    not self.pending and not self.active
+                    and self.reported_position == self.ledger.position != 0
+                ):
+                    self._send_shutdown_flatten(quote, SHUTDOWN_FLATTEN_OFFSET_TICKS[attempts])
+                    attempts += 1
+            self._flatten_poll(quote)
             time.sleep(self.poll_seconds)
         return False
+
+    def _flatten_poll(self, quote: Quote) -> None:
+        try:
+            self.last_poll = 0.0
+            self.before_decision(quote)
+        except RuntimeError as exc:
+            # Position mismatch is expected briefly while broker reports
+            # transition; any other reconciliation failure remains fatal.
+            if "position mismatch" not in str(exc).lower():
+                raise
+
+    def _send_shutdown_flatten(self, quote: Quote, offset_ticks: int) -> None:
+        side = "sell" if self.reported_position > 0 else "buy"
+        quantity = abs(self.reported_position)
+        price = shutdown_flatten_price(quote, side, self.config.tick_size, offset_ticks)
+        self.order_rate.record("order", time.time())
+        self.record_event("order_intent", {
+            "side": side, "quantity": quantity,
+            "role": "shutdown_flatten", "price": price,
+        })
+        # A shutdown flatten is rare; never bind it against a reused read.
+        known = self._report_snapshot(fresh=True)
+        response = self.api.new_order(TTBOrderRequest(
+            symbol=self.config.symbol, side=side, price=price, quantity=quantity,
+            time_in_force="2", position_effect="Y",
+        ))
+        self._track_sent(
+            OrderIntent(side, price, quantity, "risk_exit", "shutdown flatten"),
+            "Y", extract_order_no(response), known,
+        )
+        LOG.warning("shutdown flatten sent side=%s qty=%s price=%s offset_ticks=%s",
+                    side, quantity, price, offset_ticks)
 
     def finalize_shutdown(self, timeout_seconds: float = 10.0) -> bool:
         """Cancel tracked orders and verify that the TTB account is flat before exit."""

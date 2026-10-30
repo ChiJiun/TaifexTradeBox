@@ -28,6 +28,7 @@ from ttb.calendar import (
 from datetime import datetime
 from ttb.health import HealthReporter
 from ttb.status_server import StatusServer
+from ttb.journal import JournalError, JournalLock
 from ttb.risk import PreTradeLimits, PreTradeRiskError, parse_available_margin
 from ttb.contracts import point_value_for
 from ttb.orders import (
@@ -524,6 +525,18 @@ def main(argv: list[str] | None = None) -> int:
     symbols = [leg.config.symbol for leg in legs]
     if len(set(symbols)) != len(symbols):
         raise SystemExit(f"each leg needs its own contract: {symbols}")
+    # Held for the whole run (the OS drops it on a crash): auto-recovery must
+    # never trade or rewrite the journals while this bot can still trade.
+    # Legs share a journal directory by default; each one is locked once.
+    journal_locks = []
+    directories = [leg.gateway.journal.directory for leg in legs if isinstance(leg.gateway, TTBOrderGateway)]
+    for directory in dict.fromkeys(Path(d).resolve() for d in directories):
+        try:
+            journal_locks.append(JournalLock(directory).acquire())
+        except JournalError as exc:
+            for lock in journal_locks:
+                lock.release()
+            raise SystemExit(f"execution journal already in use: {exc}") from exc
     if multi:
         combined = HealthReporter(args.health_file)
 
@@ -611,6 +624,8 @@ def main(argv: list[str] | None = None) -> int:
                 leg.ledger.position,
                 leg.engine.recorder.path,
             )
+        for lock in journal_locks:
+            lock.release()
         if multi:
             combined.update(**snapshot())
     return 2 if any(leg.engine.fatal_error or leg.ledger.position for leg in legs) else 0
