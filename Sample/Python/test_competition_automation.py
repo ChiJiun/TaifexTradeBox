@@ -703,9 +703,15 @@ class CompetitionConfigTests(unittest.TestCase):
         # PowerShell names ignore case, so `$template = ... | ConvertFrom-Json`
         # under `[string]$Template` silently became a string and broke
         # set_mode.ps1 -Mode ttb on the VM (2026-10-30).
+        # Only the shipped script folders: a recursive scan of the repo root
+        # also reaches C:\TTB\deploy-backups on the VM (older copies) and
+        # .claude/worktrees locally.
         root = HERE.parents[1]
+        folders = [HERE / "automation"] + [root / name for name in ("azure", "gcp", "deploy")]
+        scripts = sorted(path for folder in folders for path in folder.glob("*.ps1"))
+        self.assertIn(HERE / "automation" / "set_mode.ps1", scripts)
         offenders = []
-        for path in sorted(root.rglob("*.ps1")):
+        for path in scripts:
             text = path.read_text(encoding="utf-8", errors="replace")
             block = re.search(r"(?is)^\s*param\s*\((.*?)\)\s*$", text, re.M)
             if not block:
