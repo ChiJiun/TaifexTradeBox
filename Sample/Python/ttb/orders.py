@@ -17,6 +17,14 @@ from .journal import ExecutionJournal
 
 LOG = logging.getLogger("ttb.orders")
 ENTRY_BLOCK_RETRY_SECONDS = 5.0
+# TTB sleeps 500 ms in every local API request before handling it, so a
+# NEWORDER reaches its server at least this long after the bot sends it. An
+# order report read no longer ago than this leaves a binding window no wider
+# than a fresh snapshot taken right before NEWORDER did. Reuse widens that
+# window by at most this much; a late row bound by mistake leaves the real
+# order unowned, which latches the bot.
+REPORT_REUSE_SECONDS = 0.5
+MAX_MARGIN_CACHE_SECONDS = 30.0
 
 
 class ReportChannelLost(RuntimeError):
@@ -239,6 +247,7 @@ class TTBOrderGateway:
         risk_limits: PreTradeLimits | None = None,
         risk_counters_path: Path | None = None,
         journal_dir: Path | None = None,
+        margin_cache_seconds: float = 5.0,
     ) -> None:
         self.api = module_or_api if isinstance(module_or_api, TTBApi) else TTBApi(module_or_api)
         # Keep the old public attribute for code that inspected it.
@@ -276,10 +285,19 @@ class TTBOrderGateway:
         self.unsafe_reason = ""
         self.risk_block_reason = ""
         self.entry_blocked_until = 0.0
+        # Each TTB call costs 0.5 s or more; reuse recent reads in _place.
+        if not 0.0 <= margin_cache_seconds <= MAX_MARGIN_CACHE_SECONDS:
+            raise ValueError(f"margin_cache_seconds must be within 0..{MAX_MARGIN_CACHE_SECONDS:g}")
+        self.margin_cache_seconds = margin_cache_seconds
+        self._margin_cache: tuple[float, int, int, Any] | None = None
+        self._report_order_nos: set[str] = set()
+        self._report_read_at = float("-inf")
 
     def set_trading_day(self, trading_day: str) -> None:
         if self.current_trading_day != trading_day:
             self.current_trading_day = trading_day
+            self._margin_cache = None
+            self._report_read_at = float("-inf")
             _, cursors = self.journal.replay_ledger(trading_day, self.config)
             self.seen_deal_qty = cursors
 
@@ -355,14 +373,18 @@ class TTBOrderGateway:
         if time.monotonic() - self.last_poll < self.poll_seconds:
             return []
         self.last_poll = time.monotonic()
-        response = self.api.query_orders()
-        if not is_success_response(response):
-            raise RuntimeError("Order reconciliation failed")
+        # Positions first, so the order report is the freshest read of the
+        # cycle and an order placed right after this poll can bind against it.
         position_response = self.api.query_positions()
         if not is_success_response(position_response):
             raise RuntimeError("Position reconciliation failed")
+        response = self.api.query_orders()
+        if not is_success_response(response):
+            raise RuntimeError("Order reconciliation failed")
+        read_at = time.monotonic() - self._orders_age()
         self.reported_position = reported_position(position_response, self.config.symbol)
         rows = _response_rows(response)
+        self._remember_report(rows, read_at)
         report_summary = {
             "orders": [{
                 "order_no": order_number(row),
@@ -528,7 +550,7 @@ class TTBOrderGateway:
             assess_pretrade(
                 intent, self.ledger.position, self.active, self.config,
                 self.risk_limits, order_rate=self.order_rate, now=now,
-                margin_supplier=self.api.query_margin,
+                margin_supplier=self._margin_response,
             )
         except PreTradeRiskError as exc:
             reason = str(exc)
@@ -572,10 +594,62 @@ class TTBOrderGateway:
             response,
         )
 
-    def _report_snapshot(self) -> set[str]:
+    def _margin_response(self) -> Any:
+        """QUERYMARGIN, reused for a few seconds while neither the position nor exposure has grown.
+
+        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). It is not
+        known whether TTB reserves margin for working orders, so a read vouches
+        only for what it can have seen either way: the absolute position (a
+        fill that grows it lowers headroom even when exposure stays put) and
+        the worst one-sided exposure of the position plus bound working
+        orders, as in validate_exposure. Unbound orders may not have reached
+        TTB when it answered, so they count against the current exposure but
+        never towards the cached one. Floating PnL within the window is not
+        reflected; margin_cache_seconds bounds that.
+        """
+        now = time.monotonic()
+        position = self.ledger.position
+
+        def exposure(include_pending: bool) -> int:
+            working = [(side, int(order.get("qty", 0))) for side, order in self.active.items()]
+            if include_pending:
+                working += [(side, int(sent["intent"].quantity)) for side, sent in self.pending.items()]
+            buys = sum(qty for side, qty in working if side == "buy")
+            sells = sum(qty for side, qty in working if side == "sell")
+            return max(abs(position + buys), abs(position - sells))
+
+        if self._margin_cache is not None:
+            read_at, read_held, read_exposure, response = self._margin_cache
+            if (now - read_at < self.margin_cache_seconds and abs(position) <= read_held
+                    and exposure(True) <= read_exposure):
+                return response
+        response = self.api.query_margin()
+        self._margin_cache = (
+            (now, abs(position), exposure(False), response) if is_success_response(response) else None
+        )
+        return response
+
+    def _remember_report(self, rows: list[dict[str, Any]], read_at: float) -> None:
+        self._report_order_nos = {order_number(row) for row in rows if order_number(row)}
+        self._report_read_at = read_at
+
+    def _report_snapshot(self, fresh: bool = False) -> set[str]:
         # Every OrdNo already in the report before NEWORDER can never be the
         # new order, even a same-price row that arrived after the last poll.
-        return {order_number(row) for row in _response_rows(self.api.query_orders())}
+        # A poll read within REPORT_REUSE_SECONDS stands in for a fresh read.
+        if not fresh and time.monotonic() - self._report_read_at <= REPORT_REUSE_SECONDS:
+            return set(self._report_order_nos)
+        if hasattr(self.api, "drop_report"):
+            self.api.drop_report("orders")  # a shared read may be older than the reuse window
+        rows = _response_rows(self.api.query_orders())
+        self._remember_report(rows, time.monotonic() - self._orders_age())
+        return set(self._report_order_nos)
+
+    def _orders_age(self) -> float:
+        # A multi-leg bot shares one order report between legs (SharedReportsApi);
+        # its age counts against REPORT_REUSE_SECONDS like a reused poll.
+        report_age = getattr(self.api, "report_age", None)
+        return report_age("orders") if report_age else 0.0
 
     def _track_sent(self, intent: OrderIntent, effect: str, order_no: str, known: set[str]) -> None:
         if order_no:
@@ -696,7 +770,8 @@ class TTBOrderGateway:
                     "side": side, "quantity": abs(self.reported_position),
                     "role": "shutdown_flatten", "price": price,
                 })
-                known = self._report_snapshot()
+                # A shutdown flatten is rare; never bind it against a reused read.
+                known = self._report_snapshot(fresh=True)
                 response = self.api.new_order(
                     TTBOrderRequest(
                         symbol=self.config.symbol,

@@ -108,6 +108,24 @@ class SharedReportsTests(unittest.TestCase):
         api.query_orders()
         self.assertEqual(module.order_queries, 2)
 
+    def test_order_binding_never_treats_a_shared_report_as_fresher_than_it_is(self):
+        # PR #54 binds new orders against a report at most REPORT_REUSE_SECONDS
+        # old; a leg must not stretch that with another leg's shared read.
+        from ttb.orders import REPORT_REUSE_SECONDS, TTBOrderGateway
+        now = [100.0]
+        module = FakeModule()
+        api = SharedReportsApi(module, max_age=1.0, clock=lambda: now[0])
+        api.query_orders()
+        now[0] += 0.8
+        gateway = TTBOrderGateway.__new__(TTBOrderGateway)
+        gateway.api = api
+        self.assertAlmostEqual(gateway._orders_age(), 0.8)
+        self.assertGreater(gateway._orders_age(), REPORT_REUSE_SECONDS)
+        gateway._report_order_nos, gateway._report_read_at = set(), float("-inf")
+        gateway._report_snapshot()
+        self.assertEqual(module.order_queries, 2)
+        self.assertAlmostEqual(gateway._orders_age(), 0.0)
+
 
 class MultiLegMainTests(unittest.TestCase):
     def run_main(self, root: Path, module: FakeModule, mode_args: list[str]) -> int:

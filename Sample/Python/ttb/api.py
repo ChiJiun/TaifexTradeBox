@@ -304,6 +304,17 @@ class SharedReportsApi(TTBApi):
             self._cache[name] = (self.clock(), response)
             return response
 
+    def report_age(self, name: str) -> float:
+        """Seconds since the shared ``name`` report was fetched from TTB."""
+        with self._lock:
+            cached = self._cache.get(name)
+        return max(0.0, self.clock() - cached[0]) if cached is not None else 0.0
+
+    def drop_report(self, name: str) -> None:
+        """Make the next read of ``name`` fetch from TTB."""
+        with self._lock:
+            self._cache.pop(name, None)
+
     def query_positions(self) -> Any:
         return self._shared("positions", super().query_positions)
 

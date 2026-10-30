@@ -29,11 +29,13 @@ $ErrorActionPreference = 'Stop'
 $configPath = Join-Path $WorkDir 'automation\config.json'
 $templatePath = Join-Path $WorkDir (Join-Path 'automation' $Template)
 $current = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
-$template = Get-Content -Raw -LiteralPath $templatePath -Encoding UTF8 | ConvertFrom-Json
+# PowerShell names are case-insensitive: $template would be the [string]$Template
+# parameter and turn the parsed JSON into a string.
+$templateConfig = Get-Content -Raw -LiteralPath $templatePath -Encoding UTF8 | ConvertFrom-Json
 $checks = [ordered]@{}
 
 if ($Mode -eq 'ttb') {
-    $new = $template
+    $new = $templateConfig
     $keepKeys = if (-not $PSBoundParameters.ContainsKey('Template')) {
         'symbol', 'ttbCompetition', 'ttbCredentialTarget', 'strategy', 'strategyModule'
     } else {
