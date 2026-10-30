@@ -597,10 +597,12 @@ class TTBOrderGateway:
     def _margin_response(self) -> Any:
         """QUERYMARGIN, reused for a few seconds while neither the position nor exposure has grown.
 
-        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). It is not
-        known whether TTB reserves margin for working orders, so a read vouches
-        only for what it can have seen either way: the absolute position (a
-        fill that grows it lowers headroom even when exposure stays put) and
+        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). TTB holds
+        margin for every working opening order at its limit price, both sides
+        of a flat grid included (measured 2026-10-30), but not for closing
+        orders. A read vouches only for what it can have seen: the absolute
+        position (a fill that grows it lowers headroom even when exposure
+        stays put) and
         the worst one-sided exposure of the position plus bound working
         orders, as in validate_exposure. Unbound orders may not have reached
         TTB when it answered, so they count against the current exposure but

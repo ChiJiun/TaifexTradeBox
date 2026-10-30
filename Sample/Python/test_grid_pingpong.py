@@ -213,7 +213,7 @@ class GridTemplateTests(unittest.TestCase):
         for leg in config["legs"]:
             argv += ["--leg-json", json.dumps(["--symbol", months[leg["symbol"]]] + leg["extraArgs"])]
         legs = sim_hft_bot.leg_namespaces(argv)
-        self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "CDFK6", "DHFK6"])
+        self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "DHFK6", "CDFK6"])
         levels = []
         for args in legs:
             strategy_config = sim_hft_bot.build_config(args)
@@ -228,6 +228,15 @@ class GridTemplateTests(unittest.TestCase):
         # A leg stops adding entries once available margin falls below its
         # headroom, so the higher the headroom the later the leg in priority.
         self.assertEqual(sorted(legs, key=lambda a: a.min_available_margin), legs)
+        # TTB holds 16.2% of the limit price for every working entry and
+        # rejects one it cannot cover, which stops the bot. Each headroom
+        # must cover the leg's own order at a price above the research range.
+        high = {"CCFK6": 130, "DHFK6": 300, "CDFK6": 2800}
+        for args in legs:
+            self.assertGreater(args.min_available_margin, high[args.symbol] * args.point_value * 0.162)
+        # CDF's one lot is most of the headroom, so it never reuses a margin
+        # read that the smaller legs may have spent since.
+        self.assertEqual(legs[-1].margin_cache_seconds, 0)
 
 
 class StockFuturesContractTests(unittest.TestCase):
