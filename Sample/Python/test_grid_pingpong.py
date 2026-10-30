@@ -376,6 +376,13 @@ class LevelSizingTests(unittest.TestCase):
         (stop,) = strategy.decide(tick("09:01:05", 2410, 3.0)).intents
         self.assertEqual(stop.role, "risk_exit")
 
+    def test_lots_and_levels_are_not_both_sized(self):
+        config = StrategyConfig(symbol="CDFK6", tick_size=5, point_value=2000, fee_per_fill=50, tax_rate=0.00002,
+                                base_qty=1, max_order_qty=5, max_inventory=5)
+        with self.assertRaisesRegex(ValueError, "not both"):
+            GridPingPongStrategy(config, PositionLedger(config), grid_points=5, levels=5, margin_share=0.5,
+                                 level_share=0.5, equity=5e6)
+
     def test_level_count_never_exceeds_the_configured_levels(self):
         strategy = self.make(1e9)
         self.fill_down(strategy, 4)

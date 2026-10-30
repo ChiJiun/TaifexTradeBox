@@ -62,6 +62,10 @@ class GridSettings:
             raise ValueError("invalid stop settings")
         if not (0 <= self.margin_share <= 1 and 0 <= self.level_share <= 1):
             raise ValueError("margin_share and level_share must be in [0, 1]")
+        if self.margin_share and self.level_share:
+            # Each share is a fraction of equity on its own; together they
+            # would hold neither.
+            raise ValueError("size either the lots per level or the level count, not both")
         if (self.margin_share or self.level_share) and (self.equity <= 0 or self.margin_rate <= 0):
             raise ValueError("margin sizing needs a positive equity and margin_rate")
 
