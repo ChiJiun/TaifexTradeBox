@@ -5,7 +5,9 @@ Run from Sample/Python every minute (the "TTB Notifier" scheduled task, via pyw.
     python -m automation.notify
 
 The webhook comes from the TTB_ALERT_WEBHOOK_URL user environment variable,
-the same one health_watchdog.ps1 uses; without it nothing is sent. Fills are
+the same one health_watchdog.ps1 uses; without it nothing is sent. If
+TTB_ALERT_MENTION_USER_ID holds a Discord user ID, the daily summary @s that
+user (fills do not, there are too many of them). Fills are
 read from the local trade database (refreshed from the execution journal
 first), so a notification never depends on the bot process being alive.
 """
@@ -34,11 +36,22 @@ MAX_FILL_LINES = 20
 SIDE_NAMES = {"buy": "買", "sell": "賣"}
 
 
-def post(url: str, text: str) -> None:
+def post(url: str, text: str, mention_user_id: str = "") -> None:
     # content (Discord) / text (Slack); Discord rejects content over 2000 chars.
     text = text[:1900]
-    response = requests.post(url, json={"content": text, "text": text}, timeout=10)
+    payload: dict[str, Any] = {"content": text, "text": text}
+    if mention_user_id:
+        # Discord only; allowed_mentions pings just this user, never @everyone.
+        payload["content"] = f"<@{mention_user_id}> {text}"
+        payload["allowed_mentions"] = {"users": [mention_user_id]}
+    response = requests.post(url, json=payload, timeout=10)
     response.raise_for_status()
+
+
+def mention_user_id(raw: str) -> str:
+    """A Discord user ID from the environment, or "" when unset or malformed."""
+    raw = raw.strip()
+    return raw if raw.isascii() and raw.isdigit() else ""
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -110,7 +123,7 @@ def summary_message(trading_day: str, fills: list[dict[str, Any]], margin: dict[
                     position: int | None, error: str = "") -> str:
     bought = sum(int(fill.get("quantity") or 0) for fill in fills if fill.get("side") == "buy")
     sold = sum(int(fill.get("quantity") or 0) for fill in fills if fill.get("side") == "sell")
-    lines = [f"**{trading_day} 收盤摘要**", f"成交 {len(fills)} 筆（買 {bought} 口、賣 {sold} 口）"]
+    lines = [f"📊 **【每日結算】{trading_day}**", f"成交 {len(fills)} 筆（買 {bought} 口、賣 {sold} 口）"]
     if margin is not None:
         previous = _number(margin.get("PREV_BALN"))
         equity = _number(margin.get("ACCT_NETV_FUTS"))
@@ -136,7 +149,8 @@ def account_snapshot(host: str, symbol: str) -> tuple[dict[str, Any], int]:
 
 def run(*, now: datetime, url: str, db_path: Path, journal_dir: Path, state_path: Path,
         calendar: TradingCalendar | None,
-        snapshot: Callable[[], tuple[dict[str, Any], int]], send: Callable[[str, str], None] = post) -> list[str]:
+        snapshot: Callable[[], tuple[dict[str, Any], int]], send: Callable[..., None] = post,
+        mention_user_id: str = "") -> list[str]:
     """One notifier pass; returns what was sent. State advances only after a send succeeds."""
     sync_journal(journal_dir, db_path)
     state = load_state(state_path)
@@ -161,7 +175,7 @@ def run(*, now: datetime, url: str, db_path: Path, journal_dir: Path, state_path
             error = ""
         except Exception as exc:
             margin, position, error = None, None, f"{type(exc).__name__}: {exc}"
-        send(url, summary_message(today, day_fills(db_path, today), margin, position, error))
+        send(url, summary_message(today, day_fills(db_path, today), margin, position, error), mention_user_id)
         state["summary_day"] = today
         save_state(state_path, state)
         sent.append("summary")
@@ -190,23 +204,32 @@ def main(argv: list[str] | None = None) -> int:
     if not url:
         print(json.dumps({"ok": True, "sent": [], "reason": "TTB_ALERT_WEBHOOK_URL not set"}))
         return 0
+    raw_mention = os.environ.get("TTB_ALERT_MENTION_USER_ID", "")
+    mention = mention_user_id(raw_mention)
     try:
         calendar = TradingCalendar.from_file(args.calendar) if args.calendar.exists() else None
         now = datetime.now(TAIPEI)
         symbol = _symbol(args.config, now.date(), calendar)
         sent = run(now=now, url=url, db_path=args.db, journal_dir=args.journal_dir,
                    state_path=args.state, calendar=calendar,
-                   snapshot=lambda: account_snapshot(args.host, symbol))
+                   snapshot=lambda: account_snapshot(args.host, symbol), mention_user_id=mention)
+        if "summary" in sent and raw_mention.strip() and not mention:
+            _log_error(args.state, "TTB_ALERT_MENTION_USER_ID is not a numeric Discord user ID; sent without mention")
     except Exception as exc:
         # pyw.exe (no console) runs this task, so errors go to a file.
-        error = f"{datetime.now(TAIPEI).isoformat()} {type(exc).__name__}: {exc}"
-        args.state.parent.mkdir(parents=True, exist_ok=True)
-        with (args.state.parent / "notify-error.log").open("a", encoding="utf-8") as log:
-            log.write(error + "\n")
+        error = _log_error(args.state, f"{type(exc).__name__}: {exc}")
         print(json.dumps({"ok": False, "error": error}), file=sys.stderr)
         return 2
     print(json.dumps({"ok": True, "sent": sent}))
     return 0
+
+
+def _log_error(state_path: Path, message: str) -> str:
+    error = f"{datetime.now(TAIPEI).isoformat()} {message}"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with (state_path.parent / "notify-error.log").open("a", encoding="utf-8") as log:
+        log.write(error + "\n")
+    return error
 
 
 def _symbol(config_path: Path, today: date, calendar: TradingCalendar | None) -> str:

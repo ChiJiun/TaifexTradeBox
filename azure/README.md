@@ -187,7 +187,7 @@ Get-Content C:\TTB\Sample\Python\output\health.json
 Get-Content C:\TTB\Sample\Python\output\supervisor\supervisor.log -Tail 50
 ```
 
-`install_azure_tasks.ps1` 也會建立 `TTB Health Watchdog`，每 5 分鐘執行一次。若需要外部告警，可只在 VM 使用者環境設定 `TTB_ALERT_WEBHOOK_URL`；repo 不保存 webhook secret。watchdog 只在故障轉態、每 60 分鐘持續故障提醒與恢復時送出通知。
+`install_azure_tasks.ps1` 也會建立 `TTB Health Watchdog`，每 5 分鐘執行一次。若需要外部告警，可只在 VM 使用者環境設定 `TTB_ALERT_WEBHOOK_URL`；repo 不保存 webhook secret。watchdog 只在故障轉態、每 60 分鐘持續故障提醒與恢復時送出通知。若要在 Discord @自己，另設 `TTB_ALERT_MENTION_USER_ID`（Discord 使用者 ID，純數字），故障／恢復通知與每日結算都會 @該使用者。
 
 健康狀態的主要值：
 
@@ -242,7 +242,7 @@ powershell -ExecutionPolicy Bypass -File azure\Deploy-TtbRuntime.ps1 -Apply
 2. 在 VM 以系統管理員執行 [Set-TtbAutologon.ps1](Set-TtbAutologon.ps1)：下載並驗證簽章的 Sysinternals Autologon，提示輸入 Windows 密碼後存成加密 LSA secret。VM 重開後自動登入 → `TTB Automation` 登入觸發 → supervisor 啟動 TTB 並自動登入競賽。
 3. 以 `azureuser` 執行 `cmdkey /generic:TaifexTradeBox/TTB /user:<TTB 帳號> /pass` 儲存 TTB 帳密；`automation\config.json` 以 [config.competition.example.json](../Sample/Python/automation/config.competition.example.json) 為範本，填入 `ttbCompetition`。
 4. 結束 RDP 時在 VM 內以系統管理員執行 `azure\Disconnect-RdpToConsole.ps1`，把工作階段交回主控台，不要登出。
-5. 外部告警：在 `azureuser` 環境變數設定 `TTB_ALERT_WEBHOOK_URL`（Discord/Slack incoming webhook 皆可，payload 含 `content`/`text`）。
+5. 外部告警：在 `azureuser` 環境變數設定 `TTB_ALERT_WEBHOOK_URL`（Discord/Slack incoming webhook 皆可，payload 含 `content`/`text`）；要被 @ 時再設 `TTB_ALERT_MENTION_USER_ID`（僅 Discord）。
 
 完整部署步驟表、`set_mode.ps1` 的 live 切換檢查與自動恢復的邊界見 [OPERATIONS.md §8](../Sample/Python/OPERATIONS.md#8-競賽全自動模式opt-in)。
 
