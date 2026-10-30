@@ -532,6 +532,16 @@ class BotEngine:
                         )
                         self.stop_event.set()
                 else:
+                    if phase == "trading" and has_seen_quote:
+                        # Between two ticks of a quiet contract the last
+                        # tick's state stands; a position held mid-session is
+                        # the strategy's, not one awaiting reconciliation.
+                        self.health.update(
+                            session_phase=session.phase,
+                            trading_day=session.trading_day,
+                            position=self.ledger.position,
+                        )
+                        continue
                     if phase == "closed" and not self.closed_cleanup_done and self.ledger.position == 0:
                         if hasattr(self.gateway, "cancel_all"):
                             self.gateway.cancel_all()  # type: ignore[attr-defined]
