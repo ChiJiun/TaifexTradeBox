@@ -272,10 +272,6 @@ class TTBApi:
         """
         return self.module.QUERYRESTOREFILLREPORT()
 
-    def query_fills(self) -> Any:
-        """Backward-compatible alias; new code should use query_positions()."""
-        return self.query_positions()
-
     def query_orders(self) -> Any:
         return self.module.QUERYRESTOREREPORT()
 

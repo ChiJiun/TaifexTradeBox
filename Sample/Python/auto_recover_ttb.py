@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from ttb.auto_recovery import AttemptBudget, RecoveryDeferred, RecoveryPolicy, RecoveryRefused, auto_recover
+from ttb.auto_recovery import AttemptBudget, RecoveryDeferred, RecoveryPolicy, auto_recover
 from ttb.calendar import TradingCalendar
 from ttb.runtime import SessionSchedule
 

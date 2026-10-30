@@ -7,7 +7,6 @@ from unittest.mock import patch
 from reconcile_ttb import _config, parse_args, reconcile
 from ttb.reconciliation import (
     AccountInspectionError,
-    append_audit,
     clear_reconciliation_flag,
     inspect_account,
 )

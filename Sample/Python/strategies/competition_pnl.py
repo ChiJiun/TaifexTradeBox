@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass
 
-from strategy_core import OrderIntent, PositionLedger, Quote, StrategyConfig, StrategyDecision
+from strategy_core import PositionLedger, Quote, StrategyConfig, StrategyDecision
 from .sticky_maker import StickyOneTickMaker
 
 

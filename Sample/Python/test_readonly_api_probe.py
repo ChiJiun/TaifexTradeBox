@@ -1,7 +1,5 @@
 import json
-import tempfile
 import unittest
-from pathlib import Path
 
 from strategy_core import Quote
 from ttb.api import TTBApi

@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 from ttb.api import TTBApi
 from ttb.reconciliation import (
     AccountInspectionError,
-    AccountSnapshot,
     append_audit,
     audit_snapshot,
     clear_reconciliation_flag,
