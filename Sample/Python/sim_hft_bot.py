@@ -121,6 +121,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="after quotes have started, exit fail-closed if market data stays stale this long; 0 disables",
     )
     parser.add_argument("--resume-fresh-ticks", type=int, default=3)
+    parser.add_argument(
+        "--feed-dead-seconds",
+        type=float,
+        default=0.0,
+        help="stop when no symbol on TTB's quote feed ticks this long during a session; "
+             "needs a liquid canary subscribed in TTB (supervisor quoteCanary); 0 disables",
+    )
     parser.add_argument("--regular-open", default="08:45")
     parser.add_argument("--regular-close", default="13:45")
     parser.add_argument("--after-hours-open", default="15:00")
@@ -359,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         session_schedule=schedule,
         risk_state_path=args.risk_state_file,
         flatten_on_shutdown=(args.mode == "ttb" and args.flatten_on_shutdown),
+        feed_dead_seconds=args.feed_dead_seconds,
     )
     strategy_name = args.strategy_module or args.strategy
     engine.health.update(mode=args.mode, strategy=strategy_name)
@@ -366,6 +374,10 @@ def main(argv: list[str] | None = None) -> int:
         api, args.zmq_port, config.symbol, engine.submit,
         max_exchange_lag_seconds=args.max_exchange_lag_seconds,
         on_status=lambda stats: engine.health.update(market_data=stats),
+    )
+    feed = (
+        ZmqQuoteSubscriber(args.zmq_port, "", lambda _raw: engine.note_feed_tick())
+        if args.feed_dead_seconds > 0 else None
     )
     status_server = StatusServer(args.status_host, args.status_port, engine.health.snapshot)
 
@@ -379,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
         engine.start()
         status_server.start()
         monitor.start()
+        if feed is not None:
+            feed.start()
         LOG.info("monitoring %s; press Ctrl+C to stop", config.symbol)
         next_roll_check = time.monotonic() + max(5.0, args.roll_check_seconds)
         while not engine.stop_event.wait(1.0):
@@ -395,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
                     engine.stop_event.set()
     finally:
         monitor.close()
+        if feed is not None:
+            feed.close()
         status_server.close()
         engine.close()
         LOG.info(

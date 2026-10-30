@@ -44,8 +44,13 @@ function Invoke-TtbLogin {
     $loginArgs = @('-m', 'automation.ttb_login', '--config', $ConfigPath, '--ttb-exe', $TtbExe)
     # TTB only publishes ticks for symbols in its quote-settings tab and drops
     # saved ones it cannot quote at login; re-add the resolved contract.
-    $resolved = (& py.exe -3.13 -m automation.resolve_symbol ([string]$config.symbol) 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
+    # quoteCanary is a liquid contract whose silence means TTB's whole quote
+    # feed died (the bot's --feed-dead-seconds watches every subscribed tick).
+    foreach ($symbol in @([string]$config.symbol, [string]$config.quoteCanary)) {
+        if ([string]::IsNullOrWhiteSpace($symbol)) { continue }
+        $resolved = (& py.exe -3.13 -m automation.resolve_symbol $symbol 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $resolved) { $loginArgs += @('--subscribe', $resolved) }
+    }
     # Live orders must never run while TTB may resend failed orders on its own.
     if ($config.mode -eq 'ttb') { $loginArgs += @('--require-auto-resubmit-off', '--require-report-channel', '--require-quotes') }
     return Invoke-PythonTool 'ttb_login' $loginArgs

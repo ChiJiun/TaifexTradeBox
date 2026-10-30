@@ -144,6 +144,63 @@ class EngineRuntimeTests(unittest.TestCase):
             finally:
                 engine.close()
 
+    def _feed_engine(self, directory, trading):
+        schedule = SimpleNamespace(status=lambda _local=None: SimpleNamespace(
+            phase="regular" if trading() else "closed", trading_day="2026-10-30", trading=trading(),
+            minutes_since_open=60.0, minutes_until_close=60.0, reason="",
+        ))
+        config = StrategyConfig(symbol="CCFK6", max_order_qty=1, max_inventory=1, warmup_ticks=2)
+        # Sparse-contract stale windows like the CCF grid template's.
+        return BotEngine(
+            config, ShadowGateway(PositionLedger(config)), Path(directory) / "runs",
+            session_schedule=schedule, quote_stale_seconds=300, stale_fatal_seconds=900,
+            feed_dead_seconds=0.3,
+        )
+
+    def _wait_stop(self, engine, seconds):
+        deadline = time.monotonic() + seconds
+        while not engine.stop_event.is_set() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return engine.stop_event.is_set()
+
+    def test_silent_quote_feed_stops_engine_before_sparse_stale_windows(self):
+        # 2026-10-30: TTB's quote feed died twice in one morning while the
+        # grid's 900 s first-quote grace and 900 s stale fatal kept the bot
+        # waiting for half an hour.
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._feed_engine(directory, lambda: True)
+            engine.start()
+            try:
+                self.assertTrue(self._wait_stop(engine, 3.0))
+                self.assertIn("TTB quote feed silent", engine.fatal_error)
+                self.assertEqual(engine.health.snapshot()["state"], "error")
+            finally:
+                engine.close()
+
+    def test_ticks_of_other_symbols_keep_the_feed_alive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._feed_engine(directory, lambda: True)
+            engine.start()
+            try:
+                end = time.monotonic() + 1.0
+                while time.monotonic() < end:
+                    engine.note_feed_tick()
+                    time.sleep(0.05)
+                self.assertFalse(engine.stop_event.is_set())
+                self.assertEqual(engine.fatal_error, "")
+            finally:
+                engine.close()
+
+    def test_feed_silence_outside_the_session_is_not_an_outage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._feed_engine(directory, lambda: False)
+            engine.start()
+            try:
+                self.assertFalse(self._wait_stop(engine, 1.0))
+                self.assertEqual(engine.fatal_error, "")
+            finally:
+                engine.close()
+
 
     def test_quiet_gap_between_ticks_keeps_the_trading_state(self):
         # 2026-10-30: the CCF grid held 1 lot between sparse ticks, and every
