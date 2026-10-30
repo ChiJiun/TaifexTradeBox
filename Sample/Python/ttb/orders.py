@@ -707,12 +707,17 @@ class TTBOrderGateway:
         if counter_failure:
             self._latch_unsafe("rate-counter persistence failed during cancel; manual reconciliation required")
 
-    def _reported_terminal(self, order_no: str) -> bool:
-        # A report shared by several legs may predate the fill that made TTB
-        # reject this cancel; only a read after the reject can show it.
+    def _drop_shared_reports(self) -> None:
+        # Reports shared by several legs may predate a fill that already
+        # changed the account. Cancel rejects and shutdown flattens act on
+        # what they read, so they always read after this point.
         drop = getattr(self.api, "drop_report", None)
         if drop is not None:
             drop("orders")
+            drop("positions")
+
+    def _reported_terminal(self, order_no: str) -> bool:
+        self._drop_shared_reports()
         response = self.api.query_orders()
         if not is_success_response(response):
             return False
@@ -739,6 +744,7 @@ class TTBOrderGateway:
         deadline = time.monotonic() + max(2.0, timeout_seconds)
         flatten_sent = False
         while time.monotonic() < deadline:
+            self._drop_shared_reports()
             orders_response = self.api.query_orders()
             position_response = self.api.query_positions()
             if not is_success_response(orders_response) or not is_success_response(position_response):
@@ -811,6 +817,7 @@ class TTBOrderGateway:
         self.cancel_all()
         deadline = time.monotonic() + max(1.0, timeout_seconds)
         while time.monotonic() < deadline:
+            self._drop_shared_reports()
             orders_response = self.api.query_orders()
             position_response = self.api.query_positions()
             if not is_success_response(orders_response) or not is_success_response(position_response):

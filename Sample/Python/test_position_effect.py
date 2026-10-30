@@ -136,6 +136,24 @@ class GatewayPositionEffectTests(unittest.TestCase):
         with self.assertRaises(TTBApiError):
             self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
 
+    def test_shutdown_flatten_sends_nothing_when_the_exit_filled_before_the_cancel(self):
+        self.ledger.on_fill(Fill("buy", 19990, 1, "X0", 99))
+        self.module.QUERYRESTOREFILLREPORT = lambda: {"Code": "0000", "Data": [
+            {"COMD_ID": "TXFA7", "BS": "B", "Hold": "1"}]}
+        self.gateway.sync((OrderIntent("sell", 20010, 1, "exit", "test"),), quote())
+        self.gateway.api.query_positions()
+        # The exit fills at the exchange; the cancel that shutdown sends is
+        # rejected and the account is flat.
+        self.module.CANCELORDER = lambda payload: {"Code": "9999", "ErrMsg": "cannot cancel"}
+        self.module.QUERYRESTOREREPORT = lambda: {"Code": "0000", "Data": [{
+            "ORDNO": "A1", "COMD_ID": "TXFA7", "BS": "S", "VOLM": "1", "LESS_VOLM": "0",
+            "DEAL_TOTL": "1", "DEAL_PRCE": "20010", "ORDR_PRCE": "20010", "STAT": "完全成交",
+        }]}
+        self.module.QUERYRESTOREFILLREPORT = lambda: {"Code": "0000", "Data": []}
+        self.assertTrue(self.gateway.emergency_flatten(quote(), timeout_seconds=2.0))
+        self.assertEqual(len(self.module.payloads), 1)
+        self.assertEqual(self.ledger.position, 0)
+
     def test_rejected_cancel_still_latches_when_the_rate_counter_cannot_persist(self):
         self._reject_cancel_with_report("完全成交")
         def broken(*_args, **_kwargs):
