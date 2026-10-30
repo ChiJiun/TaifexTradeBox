@@ -563,24 +563,51 @@ def _confirm_auto_resubmit_off(window: Any) -> list[str]:
     return steps
 
 
+REPORT_CHANNEL_ATTEMPTS = 3
+
+
 def _require_report_channel(window: Any) -> None:
-    if not window.report_channel_alive():
-        raise ReportChannelDead("TTB report channel did not answer an equity refresh; restart TTB")
+    # On 2026-10-30 TTB's server left most first equity refreshes after a
+    # login unanswered for over 15 s, and every miss cost a TTB restart plus a
+    # 5-minute backoff. A dead channel stays dead across presses, so pressing
+    # again in the same session only spares the restart when it is alive.
+    for _ in range(REPORT_CHANNEL_ATTEMPTS):
+        if window.report_channel_alive():
+            return
+    raise ReportChannelDead(
+        f"TTB report channel did not answer {REPORT_CHANNEL_ATTEMPTS} equity refreshes; restart TTB"
+    )
+
+
+QUOTE_CONFIRMED = frozenset({"subscribed", "added"})
 
 
 def _require_quotes(quotes: dict[str, str]) -> None:
-    missing = {symbol: state for symbol, state in quotes.items() if state not in {"subscribed", "added"}}
+    missing = {symbol: state for symbol, state in quotes.items() if state not in QUOTE_CONFIRMED}
     if missing:
         raise QuoteNotSubscribed(f"TTB quote subscription not confirmed: {missing}; restart TTB")
 
 
+SUBSCRIBE_ATTEMPTS = 3
+SUBSCRIBE_RETRY_SECONDS = 5.0
+
+
 def _subscribe_all(window: Any, symbols: tuple[str, ...]) -> dict[str, str]:
-    results = {}
-    for symbol in symbols:
-        try:
-            results[symbol] = window.subscribe_quote(symbol)
-        except Exception as exc:  # never fail a verified login over quotes
-            results[symbol] = f"error:{type(exc).__name__}"
+    # TTB answers a basic-quote query with 錯誤商品代碼 for a valid contract
+    # now and then (2026-10-30, CCFK6) and then accepts it seconds later.
+    results: dict[str, str] = {}
+    pending = list(symbols)
+    for attempt in range(SUBSCRIBE_ATTEMPTS):
+        if attempt:
+            time.sleep(SUBSCRIBE_RETRY_SECONDS)
+        for symbol in pending:
+            try:
+                results[symbol] = window.subscribe_quote(symbol)
+            except Exception as exc:  # never fail a verified login over quotes
+                results[symbol] = f"error:{type(exc).__name__}"
+        pending = [symbol for symbol in pending if results[symbol] not in QUOTE_CONFIRMED]
+        if not pending:
+            break
     return results
 
 

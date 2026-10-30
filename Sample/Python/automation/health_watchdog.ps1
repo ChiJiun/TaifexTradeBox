@@ -1,6 +1,8 @@
-param(
+﻿param(
     [string]$WorkDir = 'C:\TTB\Sample\Python',
     [string]$AlertWebhookUrl = $env:TTB_ALERT_WEBHOOK_URL,
+    # Discord user ID to @ in failure and recovery alerts; empty sends no mention.
+    [string]$MentionUserId = $env:TTB_ALERT_MENTION_USER_ID,
     [int]$RepeatAlertMinutes = 60,
     # Taipei minutes of day: from 08:55 (the bot needs a few minutes after the
     # 08:45 open to log in and pass the live gate) to 13:40 (it flattens and
@@ -45,6 +47,26 @@ function Test-MarketHours([datetime]$At) {
     return $minutes -ge $AlertFromMinutes -and $minutes -le $AlertUntilMinutes
 }
 
+# Operators read these on a phone; say plainly whether the bot broke or recovered.
+function Format-AlertSummary([string]$Kind, [int]$ExitCode, [string]$HostName, $LastAlertAt) {
+    if ($Kind -eq 'recovery') {
+        # Show Taipei time whatever the host's time zone; a repeat alert
+        # moves lastAlertAt, so it is the latest failure alert, not the first.
+        $since = ''
+        # An unreadable time must not stop the recovery alert itself.
+        if ($LastAlertAt) {
+            try {
+                $at = [TimeZoneInfo]::ConvertTime(
+                    [datetimeoffset]::Parse([string]$LastAlertAt, [Globalization.CultureInfo]::InvariantCulture),
+                    [TimeZoneInfo]::FindSystemTimeZoneById('Taipei Standard Time'))
+                $since = '，最後一次故障通知於 ' + $at.ToString('MM/dd HH:mm')
+            } catch {}
+        }
+        return "✅【已恢復】TaifexTradeBox bot 健康檢查恢復正常（主機 $HostName$since）"
+    }
+    return "🔴【故障】TaifexTradeBox bot 健康檢查失敗（exit=$ExitCode，主機 $HostName），請查看 supervisor.log"
+}
+
 $alerted = [bool]($previous -and $previous.alerted)
 $lastAlertAt = if ($previous) { $previous.lastAlertAt } else { $null }
 $shouldAlert = $false
@@ -60,22 +82,35 @@ if ($exitCode -ne 0) {
     $shouldAlert = $true
 }
 if ($shouldAlert -and $AlertWebhookUrl) {
-    $summary = 'TaifexTradeBox {0} on {1}: exit={2}' -f $kind, $env:COMPUTERNAME, $exitCode
+    $summary = Format-AlertSummary $kind $exitCode $env:COMPUTERNAME $lastAlertAt
     $detailText = $output.Trim()
     if ($detailText.Length -gt 1500) { $detailText = $detailText.Substring(0, 1500) }
+    $message = if ($detailText) { "$summary`n詳細：$detailText" } else { $summary }
     $payload = [ordered]@{
         # content (Discord) / text (Slack) let common chat webhooks render it.
-        content = "$summary`n$detailText"
-        text = "$summary`n$detailText"
+        content = $message
+        text = $message
         source = 'TaifexTradeBox'
         kind = $kind
         checkedAt = $now.ToString('o')
         exitCode = $exitCode
         host = $env:COMPUTERNAME
         details = $output.Trim()
-    } | ConvertTo-Json -Depth 6
+    }
+    $mentionId = "$MentionUserId".Trim()
+    if ($mentionId -match '^[0-9]+$') {
+        # Discord only; allowed_mentions pings just this user, never @everyone
+        # or a role that happens to appear in the check output.
+        $payload.content = "<@$mentionId> $message"
+        $payload.allowed_mentions = @{ users = @($mentionId) }
+    } elseif ($mentionId) {
+        Add-Content -LiteralPath (Join-Path $stateDir 'health-watchdog-error.log') -Value ("{0} TTB_ALERT_MENTION_USER_ID is not a numeric Discord user ID; sent without mention" -f $now.ToString('o')) -Encoding utf8
+    }
+    $payload = $payload | ConvertTo-Json -Depth 6
     try {
-        Invoke-RestMethod -Method Post -Uri $AlertWebhookUrl -ContentType 'application/json' -Body $payload -TimeoutSec 10 | Out-Null
+        # PowerShell 5.1 encodes a string body as ISO-8859-1; send UTF-8 bytes.
+        Invoke-RestMethod -Method Post -Uri $AlertWebhookUrl -ContentType 'application/json; charset=utf-8' `
+            -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 10 | Out-Null
         $lastAlertAt = $now.ToString('o')
         $alerted = $kind -eq 'failure'
     } catch {

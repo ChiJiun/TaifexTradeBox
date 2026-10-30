@@ -123,6 +123,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="after quotes have started, exit fail-closed if market data stays stale this long; 0 disables",
     )
     parser.add_argument("--resume-fresh-ticks", type=int, default=3)
+    parser.add_argument(
+        "--feed-dead-seconds",
+        type=float,
+        default=0.0,
+        help="stop when no symbol on TTB's quote feed ticks this long during a session; "
+             "needs a liquid canary subscribed in TTB (supervisor quoteCanary); 0 disables",
+    )
     parser.add_argument("--regular-open", default="08:45")
     parser.add_argument("--regular-close", default="13:45")
     parser.add_argument("--after-hours-open", default="15:00")
@@ -437,6 +444,7 @@ def build_leg(args: argparse.Namespace, api: TTBApi) -> Leg:
         session_schedule=schedule,
         risk_state_path=args.risk_state_file,
         flatten_on_shutdown=(args.mode == "ttb" and args.flatten_on_shutdown),
+        feed_dead_seconds=args.feed_dead_seconds,
     )
     engine.health.update(mode=args.mode, strategy=args.strategy_module or args.strategy)
     monitor = QuoteMonitor(
@@ -476,6 +484,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         snapshot = legs[0].engine.health.snapshot
     status_server = StatusServer(args.status_host, args.status_port, snapshot)
+    # One subscription to every symbol TTB publishes feeds all legs' dead-feed
+    # timers: a quiet contract on one leg is not a dead TTB feed.
+    def feed_tick(_raw: dict[str, Any]) -> None:
+        for leg in legs:
+            leg.engine.note_feed_tick()
+
+    feed = (
+        ZmqQuoteSubscriber(args.zmq_port, "", feed_tick)
+        if any(leg.engine.feed_dead_seconds for leg in legs) else None
+    )
 
     def stop_all() -> None:
         for leg in legs:
@@ -504,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         status_server.start()
         for leg in legs:
             leg.monitor.start()
+        if feed is not None:
+            feed.start()
         LOG.info("monitoring %s; press Ctrl+C to stop", ", ".join(symbols))
         next_roll_check = time.monotonic() + max(5.0, args.roll_check_seconds)
         while not legs[0].engine.stop_event.wait(1.0):
@@ -530,6 +550,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         for leg in legs:
             leg.monitor.close()
+        if feed is not None:
+            feed.close()
         status_server.close()
         for leg in legs:
             leg.engine.close()

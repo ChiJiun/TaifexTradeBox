@@ -197,6 +197,10 @@ class GridTemplateTests(unittest.TestCase):
                 # a day and the 120 s fatal one would stop the bot.
                 self.assertGreaterEqual(args.quote_stale_seconds, 300)
                 self.assertGreaterEqual(args.stale_fatal_seconds, 900)
+                # Those wide windows cannot catch a dead TTB feed; a silent
+                # liquid canary can, well before them.
+                self.assertTrue(config["quoteCanary"].startswith("auto:TXF"))
+                self.assertTrue(0 < args.feed_dead_seconds < args.quote_stale_seconds)
                 gate = config["liveGate"]
                 quote = Quote(symbol=symbol, bid=last, ask=last + gate["tickSize"], bid_qty=5, ask_qty=5, last=last,
                               last_qty=1, total_volume=1, exchange_time="09:00:00", received_at=1.0)
@@ -245,6 +249,10 @@ class GridTemplateTests(unittest.TestCase):
         # CDF's one lot is most of the headroom, so it never reuses a margin
         # read that the smaller legs may have spent since.
         self.assertEqual(legs[-1].margin_cache_seconds, 0)
+        # The supervisor subscribes the liquid canary next to every leg; each
+        # leg inherits the primary's dead-feed timer.
+        self.assertEqual(config["quoteCanary"], "auto:TXF")
+        self.assertEqual({args.feed_dead_seconds for args in legs}, {90.0})
 
 
 class StockFuturesContractTests(unittest.TestCase):

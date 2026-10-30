@@ -83,6 +83,8 @@ powershell -File automation\set_mode.ps1 -Mode ttb -Template config.competition.
 
 股票期貨的成交比台指期稀疏很多。研究期間 CCF 每天約有 7 次、CDF 約 16 次超過 120 秒沒有成交。如果 TTB 只在成交時推送報價，預設的 `--quote-stale-seconds 5` 會讓 bot 一天撤掉全部掛單幾百次，`--stale-fatal-seconds 120` 也會讓它停機。所以範本放寬為 CCF 300／900 秒、CDF 600／1800 秒，依據是研究期間超過這些門檻的空窗每天不到 1 次。
 
+放寬的代價是：TTB 的行情連線整個斷掉時，bot 要等將近半小時才會停機。2026-10-30 上午，TTB 行情顯示「已註冊」但完全沒有 tick，這種情況發生了兩次。所以範本另外設定 `quoteCanary: auto:TXF` 和 `--feed-dead-seconds 90`：supervisor 登入時一併訂閱台指期，bot 監聽 TTB 推送的所有 tick。交易時段內如果 90 秒都沒有任何商品跳動，就判定 TTB 行情斷線，撤單後結束，讓 supervisor 重啟 TTB。
+
 範本的 `liveGate.tickSize` 和 `liveGate.distanceTicks` 會讓探針單掛在市價下方約 5～6%，落在漲跌停範圍內。
 
 ## 多標的組合
@@ -100,7 +102,8 @@ powershell -File automation\set_mode.ps1 -Mode ttb -Template config.competition.
 - 主標的沿用 `symbol` 和 `extraArgs`。
 - 其他標的寫在 `legs`，每一項有 `symbol`、`extraArgs`、`liveGate`。
 - `extraArgs` 只要列出和主標的不同的參數，其餘沿用主標的的命令列。
-- supervisor 會替每個 leg 訂閱報價、各跑一次 live gate 探針，再用 `--leg-json` 把 leg 傳給 bot。
+- supervisor 會替每個 leg 和 `quoteCanary` 訂閱報價、各跑一次 live gate 探針，再用 `--leg-json` 把 leg 傳給 bot。
+- `--feed-dead-seconds` 寫在主標的的 `extraArgs`，所有 leg 都沿用。bot 只開一個訂閱 TTB 全部 tick 的連線，任何商品跳動都會重設每個 leg 的斷線計時，所以冷門的 leg 不會因自己沒成交而被判斷線。
 
 執行方式：
 

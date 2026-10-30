@@ -185,6 +185,13 @@ def probe_after(window, target):
 
 
 class LoginTests(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        from automation import ttb_login
+        patcher = mock.patch.object(ttb_login, "SUBSCRIBE_RETRY_SECONDS", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_choose_competition(self):
         self.assertEqual(choose_competition(["A 競賽"], ""), "A 競賽")
         self.assertEqual(choose_competition(["校內期貨", "全國盃"], "校內"), "校內期貨")
@@ -309,6 +316,38 @@ class LoginTests(unittest.TestCase):
             else:
                 with self.assertRaises(ReportChannelDead):
                     call()
+
+    def test_live_login_presses_equity_refresh_again_before_giving_up(self):
+        from ttb.session import SessionProbe
+        ok = SessionProbe(api_reachable=True, codes={"margin": "0000", "orders": "0000", "positions": "0000"})
+        for answers, passes in (([False, False, True], True), ([False] * 5, False)):
+            window = FakeWindow(logged=True, auto_resubmit="off", channel_alive=True)
+            replies = iter(answers)
+            presses = []
+            window.report_channel_alive = lambda: presses.append(1) or next(replies)
+            call = lambda: ensure_logged_in(
+                competition="", credential_target="t", ttb_exe=Path("TTB.exe"), probe=lambda: ok,
+                window_factory=lambda: window, require_auto_resubmit_off=True, require_report_channel=True,
+            )
+            if passes:
+                self.assertTrue(call()["ok"])
+            else:
+                with self.assertRaises(ReportChannelDead):
+                    call()
+            self.assertEqual(len(presses), 3)
+
+    def test_rejected_quote_subscription_is_retried_in_the_same_login(self):
+        from unittest import mock
+        from automation import ttb_login
+        window = FakeWindow(logged=True)
+        replies = {"CCFK6": iter(["add_failed:['錯誤商品代碼']", "added"]), "BAD": iter(["add_failed:x"] * 3)}
+        calls = []
+        window.subscribe_quote = lambda symbol: calls.append(symbol) or next(replies[symbol])
+        with mock.patch.object(ttb_login.time, "sleep") as sleep:
+            result = ttb_login._subscribe_all(window, ("CCFK6", "BAD"))
+        self.assertEqual(result, {"CCFK6": "added", "BAD": "add_failed:x"})
+        self.assertEqual(calls, ["CCFK6", "BAD", "CCFK6", "BAD", "BAD"])
+        self.assertEqual(sleep.call_count, 2)
 
     def test_live_login_refuses_an_unconfirmed_quote_subscription(self):
         from ttb.session import SessionProbe
@@ -622,6 +661,9 @@ class CompetitionConfigTests(unittest.TestCase):
         self.assertIn("$loginFailures -ge $maxLoginFailuresBeforeRestart", supervisor)
         supervisor.index("Stop-Process -Name TTB", supervisor.index("$loginFailures -ge"))
         self.assertIn("$loginFailures = 0", supervisor)
+        # The bot's --feed-dead-seconds only works when the liquid canary is
+        # subscribed in TTB next to every traded contract.
+        self.assertIn("@(Get-BotLegs | ForEach-Object { $_.symbol }) + @([string]$config.quoteCanary)", supervisor)
         self.assertIn("automation.live_gate", supervisor)
         self.assertLess(supervisor.index("automation.live_gate"), supervisor.index("launching bot mode="))
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")

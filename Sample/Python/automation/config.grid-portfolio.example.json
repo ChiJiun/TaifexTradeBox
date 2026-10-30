@@ -1,5 +1,6 @@
 {
   "symbol": "auto:CCF",
+  "quoteCanary": "auto:TXF",
   "mode": "ttb",
   "strategy": "market-maker",
   "strategyModule": "strategies.grid_pingpong:GridPingPongStrategy",
@@ -32,6 +33,8 @@
     "900",
     "--resume-fresh-ticks",
     "3",
+    "--feed-dead-seconds",
+    "90",
     "--max-notional",
     "5000000",
     "--available-margin-field",

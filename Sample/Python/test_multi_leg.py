@@ -39,6 +39,24 @@ class SilentMonitor:
         pass
 
 
+class TickOnStartFeed:
+    """Delivers one tick of a contract no leg trades, as TTB's canary would."""
+
+    instances: list["TickOnStartFeed"] = []
+
+    def __init__(self, port, symbol, callback):
+        self.symbol = symbol
+        self.callback = callback
+        self.closed = False
+        TickOnStartFeed.instances.append(self)
+
+    def start(self):
+        self.callback({"Symbol": "TXFK6"})
+
+    def close(self):
+        self.closed = True
+
+
 class LegParsingTests(unittest.TestCase):
     def test_a_leg_inherits_the_primary_line_and_overrides_what_it_lists(self):
         legs = sim_hft_bot.leg_namespaces([
@@ -154,6 +172,27 @@ class MultiLegMainTests(unittest.TestCase):
             self.assertTrue((root / "health-CCFK6.json").exists())
             self.assertTrue((root / "health-CDFK6.json").exists())
             self.assertTrue((root / "runs" / "CDFK6").is_dir())
+
+    def test_one_whole_feed_subscription_keeps_every_legs_dead_feed_timer_alive(self):
+        # A sparse leg's own contract may not tick for minutes; any tick on
+        # TTB's feed proves the feed is alive for every leg.
+        TickOnStartFeed.instances.clear()
+        noted = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(sim_hft_bot, "ZmqQuoteSubscriber", TickOnStartFeed), \
+                patch.object(sim_hft_bot.BotEngine, "note_feed_tick", autospec=True,
+                             side_effect=lambda engine: noted.append(engine.config.symbol)):
+            self.assertEqual(self.run_main(Path(tmp), FakeModule(), ["--feed-dead-seconds", "90"]), 0)
+        self.assertEqual([feed.symbol for feed in TickOnStartFeed.instances], [""])
+        self.assertEqual(sorted(noted), ["CCFK6", "CDFK6"])
+        self.assertTrue(TickOnStartFeed.instances[0].closed)
+
+    def test_no_feed_subscription_without_a_dead_feed_timer(self):
+        TickOnStartFeed.instances.clear()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(sim_hft_bot, "ZmqQuoteSubscriber", TickOnStartFeed):
+            self.assertEqual(self.run_main(Path(tmp), FakeModule(), []), 0)
+        self.assertEqual(TickOnStartFeed.instances, [])
 
     def test_live_legs_refuse_to_start_on_a_non_flat_account_before_any_order(self):
         module = FakeModule(positions=[{"ComdID1": "DHFK6", "ComdBS1": "B", "Hold": "1"}])

@@ -174,7 +174,7 @@ mstsc /v:20.189.93.22
 - TTB 是 GUI 程式；RDP 可以中斷，但不可登出 Windows。VM 重開機後仍可能需要人工登入 TTB、選擇正確競賽並核對帳戶。
 - Live gateway 會用 TTB 的委託報告與 `QUERYRESTOREFILLREPORT()` 做 broker-side 持倉對帳；若發現既有 working order、非零持倉或持倉長時間不一致，仍會 fail closed。異常退出後 supervisor 不會自動重啟 live 模式，避免未知狀態下重送委託。
 - quote/decision CSV 會依台北日期每日輪替；runtime 檔預設保留 14 天，supervisor log 超過 10 MB 會輪替，避免長時間運作塞滿磁碟。
-- `TTB Health Watchdog` 每 5 分鐘執行健康檢查；若設定環境變數 `TTB_ALERT_WEBHOOK_URL`，盤中（交易日 08:55–13:40）故障轉態、持續故障每小時與恢復時會送出 webhook。
+- `TTB Health Watchdog` 每 5 分鐘執行健康檢查；若設定環境變數 `TTB_ALERT_WEBHOOK_URL`，盤中（交易日 08:55–13:40）故障轉態、持續故障每小時與恢復時會送出 webhook；再設 `TTB_ALERT_MENTION_USER_ID`（Discord 使用者 ID）時，這些通知與每日結算會 @該使用者。
 - `TTB Notifier` 每分鐘把新成交送到同一個 webhook，並在收盤後送一次每日損益摘要。
 
 非使用期間可釋放 VM 以停止計算費用：
