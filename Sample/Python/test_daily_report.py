@@ -1,6 +1,5 @@
 import csv
 import json
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime

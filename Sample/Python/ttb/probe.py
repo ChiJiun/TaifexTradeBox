@@ -5,11 +5,10 @@ import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 from strategy_core import Quote
 
-from .api import TTBApi, TTBOrderRequest, extract_order_no, is_success_response
+from .api import TTBApi, TTBOrderRequest, extract_order_no
 from .orders import (
     _float,
     _response_rows,

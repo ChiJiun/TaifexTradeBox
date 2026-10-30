@@ -20,7 +20,7 @@ from typing import Any, Iterable
 from monte_carlo_market_maker import synthetic_quotes
 from replay_market_maker import replay
 from ttb.contracts import point_value_for
-from strategy_core import SizingMode, StrategyConfig
+from strategy_core import StrategyConfig
 
 
 def _numbers(text: str, cast: type = float) -> list[Any]:

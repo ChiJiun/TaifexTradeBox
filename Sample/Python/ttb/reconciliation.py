@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .api import is_success_response
-from .orders import _recursive_json, _value, is_terminal_order, order_number, order_remaining, order_symbol
+from .orders import _recursive_json, _value, is_terminal_order, order_number, order_symbol
 
 
 class AccountInspectionError(RuntimeError):
