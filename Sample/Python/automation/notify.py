@@ -33,6 +33,8 @@ TAIPEI = timezone(timedelta(hours=8))
 SUMMARY_FROM = dtime(13, 46)
 SUMMARY_UNTIL = dtime(14, 30)
 MAX_FILL_LINES = 20
+# The chart needs matplotlib and the webhook; a failure retries a few times.
+MAX_REPORT_ATTEMPTS = 3
 SIDE_NAMES = {"buy": "買", "sell": "賣"}
 
 
@@ -46,6 +48,22 @@ def post(url: str, text: str, mention_user_id: str = "") -> None:
         payload["allowed_mentions"] = {"users": [mention_user_id]}
     response = requests.post(url, json=payload, timeout=10)
     response.raise_for_status()
+
+
+def post_files(url: str, text: str, paths: list[Path]) -> None:
+    """Discord only: a message with file attachments (charts, CSVs)."""
+    files = {f"files[{index}]": (path.name, path.read_bytes()) for index, path in enumerate(paths)}
+    response = requests.post(url, data={"payload_json": json.dumps({"content": text[:1900]})},
+                             files=files, timeout=30)
+    response.raise_for_status()
+
+
+def daily_report(day: str, db_path: Path, url: str, send_files: Callable[..., None] = post_files) -> None:
+    from automation.daily_report import build_report, report_message
+
+    report = build_report(day=day, db_path=db_path, runs_dir=db_path.parent / "runs",
+                          out_dir=db_path.parent / "reports")
+    send_files(url, report_message(day, report), list(report["paths"].values()))
 
 
 def mention_user_id(raw: str) -> str:
@@ -150,7 +168,7 @@ def account_snapshot(host: str, symbol: str) -> tuple[dict[str, Any], int]:
 def run(*, now: datetime, url: str, db_path: Path, journal_dir: Path, state_path: Path,
         calendar: TradingCalendar | None,
         snapshot: Callable[[], tuple[dict[str, Any], int]], send: Callable[..., None] = post,
-        mention_user_id: str = "") -> list[str]:
+        mention_user_id: str = "", report: Callable[[str], None] | None = None) -> list[str]:
     """One notifier pass; returns what was sent. State advances only after a send succeeds."""
     sync_journal(journal_dir, db_path)
     state = load_state(state_path)
@@ -179,6 +197,15 @@ def run(*, now: datetime, url: str, db_path: Path, journal_dir: Path, state_path
         state["summary_day"] = today
         save_state(state_path, state)
         sent.append("summary")
+    if (report is not None and state.get("summary_day") == today and state.get("report_day") != today
+            and int(state.get("report_attempts", {}).get(today, 0)) < MAX_REPORT_ATTEMPTS):
+        # The chart follows the summary; a failure never holds the summary back.
+        state["report_attempts"] = {today: int(state.get("report_attempts", {}).get(today, 0)) + 1}
+        save_state(state_path, state)
+        report(today)
+        state["report_day"] = today
+        save_state(state_path, state)
+        sent.append("report")
     return sent
 
 
@@ -212,7 +239,8 @@ def main(argv: list[str] | None = None) -> int:
         symbol = _symbol(args.config, now.date(), calendar)
         sent = run(now=now, url=url, db_path=args.db, journal_dir=args.journal_dir,
                    state_path=args.state, calendar=calendar,
-                   snapshot=lambda: account_snapshot(args.host, symbol), mention_user_id=mention)
+                   snapshot=lambda: account_snapshot(args.host, symbol), mention_user_id=mention,
+                   report=lambda day: daily_report(day, args.db, url))
         if "summary" in sent and raw_mention.strip() and not mention:
             _log_error(args.state, "TTB_ALERT_MENTION_USER_ID is not a numeric Discord user ID; sent without mention")
     except Exception as exc:

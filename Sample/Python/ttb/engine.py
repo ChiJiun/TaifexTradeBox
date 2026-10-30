@@ -161,6 +161,9 @@ class BotEngine:
         session_schedule: SessionSchedule | None = None,
         risk_state_path: Path | None = None,
         flatten_on_shutdown: bool = False,
+        feed_dead_seconds: float = 0.0,
+        entry_cutoff_minutes: float | None = None,
+        flatten_minutes: float | None = None,
     ) -> None:
         self.config = config
         self.ledger = gateway.ledger
@@ -185,6 +188,12 @@ class BotEngine:
         self.skipped_quotes = 0
         self.decision_count = 0
         self.first_quote_grace_seconds = max(30.0, self.quote_stale_seconds * 3.0)
+        self.feed_dead_seconds = max(0.0, feed_dead_seconds)
+        # Minutes before the close: no entries while flat, then flatten at the
+        # touch every cycle. None keeps the defaults for the mode.
+        self.entry_cutoff_minutes = entry_cutoff_minutes
+        self.flatten_minutes = flatten_minutes
+        self.feed_seen_at = self.started_at
         self.closed_cleanup_done = False
         self.fatal_error = ""
         self.session_schedule = session_schedule or SessionSchedule()
@@ -289,6 +298,25 @@ class BotEngine:
             self._previous_halt_reason = str(getattr(self.strategy, "halt_reason", ""))
         self._risk_state_ready = True
 
+    def note_feed_tick(self) -> None:
+        """Record a tick of any symbol on TTB's quote feed (subscriber thread)."""
+        self.feed_seen_at = time.monotonic()
+
+    def _stop_on_dead_feed(self, silent: float) -> None:
+        # Every symbol TTB publishes, including the liquid canary the
+        # supervisor subscribes, went quiet: TTB's quote feed died and only a
+        # TTB restart brings it back, so stop instead of waiting out the
+        # per-contract stale windows that sparse contracts need.
+        if hasattr(self.gateway, "cancel_all"):
+            self.gateway.cancel_all()  # type: ignore[attr-defined]
+        self.fatal_error = (
+            f"TTB quote feed silent for {silent:.1f}s "
+            f"(feed dead threshold {self.feed_dead_seconds:.1f}s); restart TTB"
+        )
+        LOG.error(self.fatal_error)
+        self.health.update(state="error", fatal_error=self.fatal_error, position=self.ledger.position)
+        self.stop_event.set()
+
     def _checkpoint_risk_state(self) -> None:
         if not self.current_trading_day or not self._risk_state_ready:
             return
@@ -337,8 +365,10 @@ class BotEngine:
         decision = self.strategy.decide(quote)
         session = self.session_schedule.status(local)
         entry_delay_minutes = 0.0 if self.config.virtual_max_mode else 10.0
-        entry_cutoff_minutes = 10.0 if self.config.virtual_max_mode else 25.0
-        flatten_buffer_minutes = 3.0 if self.config.virtual_max_mode else 10.0
+        entry_cutoff_minutes = (self.entry_cutoff_minutes if self.entry_cutoff_minutes is not None
+                                else 10.0 if self.config.virtual_max_mode else 25.0)
+        flatten_buffer_minutes = (self.flatten_minutes if self.flatten_minutes is not None
+                                  else 3.0 if self.config.virtual_max_mode else 10.0)
         if not session.trading or session.minutes_until_close <= flatten_buffer_minutes:
             position = self.ledger.position
             intents = (
@@ -484,6 +514,12 @@ class BotEngine:
                 session = self.session_schedule.status()
                 phase = "trading" if session.trading else "closed"
                 has_seen_quote = self.last_quote is not None
+                if phase != "trading":
+                    # The silence window starts at the open, not at launch.
+                    self.feed_seen_at = now
+                elif self.feed_dead_seconds and now - self.feed_seen_at > self.feed_dead_seconds:
+                    self._stop_on_dead_feed(now - self.feed_seen_at)
+                    continue
                 no_first_quote = (
                     phase == "trading"
                     and not has_seen_quote

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from strategy_core import PositionLedger, Quote, StrategyConfig
+from strategy_core import Fill, PositionLedger, Quote, StrategyConfig
 from ttb.engine import BotEngine, DailyCsvWriter
 from ttb.orders import ShadowGateway
 from ttb.runtime import RiskStateStore, SessionSchedule
@@ -144,6 +144,63 @@ class EngineRuntimeTests(unittest.TestCase):
             finally:
                 engine.close()
 
+    def _feed_engine(self, directory, trading):
+        schedule = SimpleNamespace(status=lambda _local=None: SimpleNamespace(
+            phase="regular" if trading() else "closed", trading_day="2026-10-30", trading=trading(),
+            minutes_since_open=60.0, minutes_until_close=60.0, reason="",
+        ))
+        config = StrategyConfig(symbol="CCFK6", max_order_qty=1, max_inventory=1, warmup_ticks=2)
+        # Sparse-contract stale windows like the CCF grid template's.
+        return BotEngine(
+            config, ShadowGateway(PositionLedger(config)), Path(directory) / "runs",
+            session_schedule=schedule, quote_stale_seconds=300, stale_fatal_seconds=900,
+            feed_dead_seconds=0.3,
+        )
+
+    def _wait_stop(self, engine, seconds):
+        deadline = time.monotonic() + seconds
+        while not engine.stop_event.is_set() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return engine.stop_event.is_set()
+
+    def test_silent_quote_feed_stops_engine_before_sparse_stale_windows(self):
+        # 2026-10-30: TTB's quote feed died twice in one morning while the
+        # grid's 900 s first-quote grace and 900 s stale fatal kept the bot
+        # waiting for half an hour.
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._feed_engine(directory, lambda: True)
+            engine.start()
+            try:
+                self.assertTrue(self._wait_stop(engine, 3.0))
+                self.assertIn("TTB quote feed silent", engine.fatal_error)
+                self.assertEqual(engine.health.snapshot()["state"], "error")
+            finally:
+                engine.close()
+
+    def test_ticks_of_other_symbols_keep_the_feed_alive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._feed_engine(directory, lambda: True)
+            engine.start()
+            try:
+                end = time.monotonic() + 1.0
+                while time.monotonic() < end:
+                    engine.note_feed_tick()
+                    time.sleep(0.05)
+                self.assertFalse(engine.stop_event.is_set())
+                self.assertEqual(engine.fatal_error, "")
+            finally:
+                engine.close()
+
+    def test_feed_silence_outside_the_session_is_not_an_outage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._feed_engine(directory, lambda: False)
+            engine.start()
+            try:
+                self.assertFalse(self._wait_stop(engine, 1.0))
+                self.assertEqual(engine.fatal_error, "")
+            finally:
+                engine.close()
+
 
     def test_quiet_gap_between_ticks_keeps_the_trading_state(self):
         # 2026-10-30: the CCF grid held 1 lot between sparse ticks, and every
@@ -226,6 +283,62 @@ class RiskStateStoreTests(unittest.TestCase):
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["version"], 1)
             self.assertEqual(raw["symbol"], "TMFJ6")
+
+    def test_previous_day_state_for_another_symbol_is_ignored(self):
+        # 2026-10-30: the VM switched from TMF to CCF before the open and the
+        # bot stopped on yesterday's TMFK6 file.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "risk-state.json"
+            RiskStateStore(path, "TMFK6").checkpoint(
+                trading_day="2026-10-29", realized_pnl=-595.8, peak_realized_pnl=0.0,
+                fees_and_tax=355.8, fill_count=6, peak_equity=0.0, halt_reason="", position=0,
+            )
+            store = RiskStateStore(path, "CCFK6")
+            self.assertEqual(store.load("2026-10-30"), {})
+            store.checkpoint(
+                trading_day="2026-10-30", realized_pnl=0.0, peak_realized_pnl=0.0,
+                fees_and_tax=0.0, fill_count=0, peak_equity=0.0, halt_reason="", position=0,
+            )
+            self.assertEqual(store.load("2026-10-30")["symbol"], "CCFK6")
+            with self.assertRaisesRegex(RuntimeError, "symbol mismatched"):
+                RiskStateStore(path, "TMFK6").load("2026-10-30")
+
+
+
+class SessionBufferTests(unittest.TestCase):
+    def engine(self, directory, **buffers):
+        schedule = SimpleNamespace(status=lambda _local=None: SimpleNamespace(
+            phase="regular", trading_day="2026-10-30", trading=True,
+            minutes_since_open=250.0, minutes_until_close=7.0, reason="",
+        ))
+        config = StrategyConfig(symbol="CCFK6", max_order_qty=1, max_inventory=1, warmup_ticks=2)
+        return BotEngine(config, ShadowGateway(PositionLedger(config)), Path(directory) / "runs",
+                         session_schedule=schedule, **buffers)
+
+    def quote(self):
+        now = time.monotonic()
+        return Quote(symbol="CCFK6", bid=108.0, ask=108.5, bid_qty=5, ask_qty=5, last=108.0, last_qty=1,
+                     total_volume=1, exchange_time="13:38:00", received_at=now)
+
+    def test_default_buffers_flatten_ten_minutes_before_the_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self.engine(directory)
+            try:
+                engine.ledger.on_fill(Fill("buy", 108.0, 1, "F1", 0.0))
+                decision = engine.process_quote(self.quote())
+                self.assertEqual([(i.side, i.price, i.role) for i in decision.intents], [("sell", 108.0, "risk_exit")])
+            finally:
+                engine.close()
+
+    def test_shorter_buffers_keep_the_strategy_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self.engine(directory, entry_cutoff_minutes=5, flatten_minutes=5)
+            try:
+                engine.ledger.on_fill(Fill("buy", 108.0, 1, "F1", 0.0))
+                decision = engine.process_quote(self.quote())
+                self.assertNotIn("session close", [i.reason for i in decision.intents])
+            finally:
+                engine.close()
 
 
 if __name__ == "__main__":

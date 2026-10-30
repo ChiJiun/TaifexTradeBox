@@ -332,6 +332,13 @@ powershell -ExecutionPolicy Bypass -File automation\install_azure_tasks.ps1 -Run
 
 - watchdog 只在盤中（交易日 08:55–13:40，台北時間）發故障警報，持續故障每小時提醒一次，發過警報後恢復時再通知；開機後、收盤後的預期異常不發。
 - `TTB Notifier` 排程（`pyw -3.13 -m automation.notify`，每分鐘）從 `output/trades.sqlite3` 送出新成交，並在交易日 13:46 後送一次「📊【每日結算】」（成交筆數、權益數、前日餘額、當日損益、手續費與交易稅、收盤部位）。首次執行只記下目前位置，不補發歷史成交；送出失敗下一分鐘重試，錯誤寫入 `output/supervisor/notify-error.log`。
+- 每日結算送出後，notifier 接著送「📈【收盤圖表】」（`automation/daily_report.py`），附三個檔案：
+  - `report-<日期>.png`：每個成交商品的價格走勢，標出每筆買賣和沖銷配對（紅線獲利、綠線虧損）；當日盤中累積淨損益；競賽以來每日淨損益與累積報酬率（以 200 萬計）。
+  - `fills-<日期>.csv`：當日每筆成交（時間、商品、買賣、價格、口數、成交後部位、委託書號），供覆盤。
+  - `roundtrips-<日期>.csv`：先進先出配對的沖銷紀錄（進出場時間與價格、點數、毛損益、手續費稅、淨損益、持有秒數）。
+  - 檔案也留在 VM 的 `output/reports/<日期>/`。損益由成交以手續費每口 50、期交稅 0.00002 估算，和 TTB 權益數可能有小差異；以每日結算的 TTB 數字為準。
+  - 需要 `matplotlib`（已列入 `requirements.txt`）。產生或送出失敗時下一分鐘重試，每天最多 3 次，不影響每日結算。也可手動執行 `py -3.13 -m automation.daily_report --day 2026-10-30`。
+  - 附檔只支援 Discord webhook。
 - 另外設定 `TTB_ALERT_MENTION_USER_ID`（Discord 使用者 ID，純數字；在 Discord 開啟開發者模式後對自己按右鍵「複製使用者 ID」）時，watchdog 的故障、持續故障提醒、恢復通知與每日結算會在開頭 @該使用者，payload 帶 `allowed_mentions` 只通知這個人；成交通知不 @。未設定時行為不變；格式不是純數字時照常送出但不 @，並寫一筆錯誤到 `health-watchdog-error.log`／`notify-error.log`。這個 ID 與 webhook 一樣只放在 VM 使用者環境變數，不寫進 repo。
 
 quote/decision CSV 依台北日期每日輪替；`cleanup_runtime.ps1` 預設保留 14 天 runtime CSV／order-probe 檔，supervisor log 超過 10 MB 也會輪替。`flattenOnShutdown=true` 只會在 `ttb` 模式、交易時段、且 bot 有有效行情時，於正常停止流程嘗試 IOC flatten；預設為 `false`，避免未經確認自動平倉。

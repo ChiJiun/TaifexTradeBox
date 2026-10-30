@@ -33,6 +33,12 @@ class GridSettings:
     flatten_minute: int = 13 * 60 + 35
     stop_slip_ticks: float = 2.0
     stop_ttl_seconds: float = 6.0
+    # Size every level from the account: margin_share of equity buys
+    # levels x qty lots at margin_rate of the current contract value, so the
+    # grid grows with equity and shrinks as the price rises. 0 keeps base_qty.
+    margin_share: float = 0.0
+    margin_rate: float = 0.162
+    equity: float = 0.0
 
     def validate(self, config: StrategyConfig) -> None:
         if self.grid_points <= 0 or self.exit_grids < 1 or self.levels < 1:
@@ -50,6 +56,10 @@ class GridSettings:
             raise ValueError("entry window must end before the flatten time")
         if self.stop_slip_ticks < 0 or self.stop_ttl_seconds <= 0:
             raise ValueError("invalid stop settings")
+        if not 0 <= self.margin_share <= 1:
+            raise ValueError("margin_share must be in [0, 1]")
+        if self.margin_share and (self.equity <= 0 or self.margin_rate <= 0):
+            raise ValueError("margin sizing needs a positive equity and margin_rate")
 
 
 class GridPingPongStrategy:
@@ -74,6 +84,8 @@ class GridPingPongStrategy:
         self.stopping = False
         self.risk_exit: OrderIntent | None = None
         self.risk_exit_at = 0.0
+        self.qty = config.base_qty
+        self.sized = False
 
     def parameters(self) -> dict:
         return asdict(self.settings)
@@ -82,10 +94,19 @@ class GridPingPongStrategy:
         g = self.settings.grid_points
         return round(price / g) * g
 
+    def _size(self, price: float) -> None:
+        s = self.settings
+        if not s.margin_share or price <= 0 or self.sized:
+            return
+        self.sized = True
+        lot_margin = price * self.config.point_value * s.margin_rate
+        cap = max(1, min(self.config.max_order_qty, self.config.max_inventory // s.levels))
+        self.qty = max(1, min(cap, int(s.margin_share * s.equity // (s.levels * lot_margin))))
+
     def _infer_anchor(self, position: int) -> float:
         # Held levels are anchor - g ... anchor - n*g (mirrored for shorts),
         # so their average sits (n + 1) / 2 grids from the anchor.
-        g, q = self.settings.grid_points, self.config.base_qty
+        g, q = self.settings.grid_points, self.qty
         held = math.ceil(abs(position) / q)
         sign = 1 if position > 0 else -1
         return self._snap(self.ledger.average_price + sign * (held + 1) * g / 2)
@@ -98,8 +119,12 @@ class GridPingPongStrategy:
         if seconds is None:
             return StrategyDecision((), features, False, "grid: no exchange time")
         s, tick, now = self.settings, self.config.tick_size, quote.received_at
-        g, q = s.grid_points, self.config.base_qty
         pos = self.ledger.position
+        if pos == 0:
+            # Sized once, from the first flat price: held levels stay uniform
+            # and a price near a lot boundary never re-quotes the grid.
+            self._size(quote.last)
+        g, q = s.grid_points, self.qty
         if self.anchor is None:
             self.anchor = self._snap(quote.last) if pos == 0 else self._infer_anchor(pos)
             LOGGER.info("grid anchor %.2f (position %s)", self.anchor, pos)
@@ -151,7 +176,10 @@ class GridPingPongStrategy:
                 intents.append(OrderIntent("buy" if pos > 0 else "sell", deepest - sign * g, q,
                                            "entry", f"grid level {held + 1}"))
         # An entry already through the market would fill at once above (below)
-        # its level; skip it until price comes back to the level.
+        # its level; skip it until price comes back to the level. An entry that
+        # only touches the best opposite quote fills at its own level and stays:
+        # skipping it froze a CCF grid for 50 minutes on 2026-10-30 while the
+        # bid sat on the next sell level.
         intents = [i for i in intents if i.role != "entry" or (
-            i.price <= quote.last and i.price < quote.ask if i.side == "buy" else i.price >= quote.last and i.price > quote.bid)]
+            i.price <= quote.last and i.price <= quote.ask if i.side == "buy" else i.price >= quote.last and i.price >= quote.bid)]
         return StrategyDecision(tuple(intents), features, False, f"grid anchor {self.anchor:g} held {held}")

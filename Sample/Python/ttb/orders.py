@@ -11,11 +11,12 @@ from typing import Any, Protocol
 from strategy_core import Fill, IndependentFillSimulator, OrderIntent, PositionLedger, Quote, StrategyConfig
 
 from .api import TTBApi, TTBApiError, TTBOrderRequest, extract_order_no, is_success_response, position_effect_for
-from .risk import DurableOrderRateGuard, PreTradeLimits, PreTradeRiskError, assess_pretrade
+from .risk import DurableOrderRateGuard, EntryBlocked, PreTradeLimits, PreTradeRiskError, assess_pretrade
 from .journal import ExecutionJournal
 
 
 LOG = logging.getLogger("ttb.orders")
+ENTRY_BLOCK_RETRY_SECONDS = 5.0
 # TTB sleeps 500 ms in every local API request before handling it, so a
 # NEWORDER reaches its server at least this long after the bot sends it. An
 # order report read no longer ago than this leaves a binding window no wider
@@ -312,6 +313,7 @@ class TTBOrderGateway:
         self.unknown_order_nos: set[str] = set()
         self.unsafe_reason = ""
         self.risk_block_reason = ""
+        self.entry_blocked_until = 0.0
         # Each TTB call costs 0.5 s or more; reuse recent reads in _place.
         if not 0.0 <= margin_cache_seconds <= MAX_MARGIN_CACHE_SECONDS:
             raise ValueError(f"margin_cache_seconds must be within 0..{MAX_MARGIN_CACHE_SECONDS:g}")
@@ -343,6 +345,58 @@ class TTBOrderGateway:
         LOG.critical("TTB order safety latch: %s", self.unsafe_reason)
         raise RuntimeError(self.unsafe_reason)
 
+    def bootstrap(self) -> None:
+        """Load the account baseline before any leg of a multi-leg bot trades.
+
+        The baseline demands a flat account with no working order, so every
+        leg sharing the account must take it before the first one sends.
+        """
+        self._assert_safe()
+        if self.bootstrapped:
+            return
+        response = self.api.query_orders()
+        position_response = self.api.query_positions()
+        if not is_success_response(response) or not is_success_response(position_response):
+            raise RuntimeError("TTB baseline reconciliation failed")
+        self.reported_position = reported_position(position_response, self.config.symbol)
+        self._load_baseline(_response_rows(response), position_response)
+
+    def _load_baseline(self, rows: list[dict[str, Any]], position_response: Any) -> None:
+        self.preexisting_order_nos = {
+            order_number(row)
+            for row in rows
+            if order_number(row)
+        }
+        # A one-symbol bot must not start when another contract has
+        # unowned account exposure (including the old expiry month).
+        # Otherwise a manual symbol edit could effectively cross-roll an
+        # unresolved position without reconciliation.
+        working = [
+            order_number(row) or "UNKNOWN"
+            for row in rows if is_working_order(row)
+        ]
+        if working:
+            raise RuntimeError(
+                "Working orders already exist in TTB account; reconcile manually before startup: "
+                + ", ".join(working)
+            )
+        open_positions = [
+            row for row in _response_rows(position_response)
+            if _strict_quantity(
+                _value(row, "Hold", "HOLD", "PositionQty", "Qty", default=None),
+                "position quantity",
+            ) > 0
+        ]
+        if open_positions:
+            raise RuntimeError(
+                "Non-flat TTB account position exists; reconcile ALL symbols before startup"
+            )
+        self.bootstrapped = True
+        LOG.info(
+            "TTB baseline loaded: %s existing order ids ignored; position confirmed flat",
+            len(self.preexisting_order_nos),
+        )
+
     def before_decision(self, quote: Quote) -> list[Fill]:
         self._assert_safe()
         if time.monotonic() - self.last_poll < self.poll_seconds:
@@ -356,7 +410,7 @@ class TTBOrderGateway:
         response = self.api.query_orders()
         if not is_success_response(response):
             raise RuntimeError("Order reconciliation failed")
-        read_at = time.monotonic()
+        read_at = time.monotonic() - self._orders_age()
         self.reported_position = reported_position(position_response, self.config.symbol)
         rows = _response_rows(response)
         self._remember_report(rows, read_at)
@@ -373,40 +427,7 @@ class TTBOrderGateway:
             self.record_event("broker_report", report_summary)
             self._last_broker_report = report_summary
         if not self.bootstrapped:
-            self.preexisting_order_nos = {
-                order_number(row)
-                for row in rows
-                if order_number(row)
-            }
-            # A one-symbol bot must not start when another contract has
-            # unowned account exposure (including the old expiry month).
-            # Otherwise a manual symbol edit could effectively cross-roll an
-            # unresolved position without reconciliation.
-            working = [
-                order_number(row) or "UNKNOWN"
-                for row in rows if is_working_order(row)
-            ]
-            if working:
-                raise RuntimeError(
-                    "Working orders already exist in TTB account; reconcile manually before startup: "
-                    + ", ".join(working)
-                )
-            open_positions = [
-                row for row in _response_rows(position_response)
-                if _strict_quantity(
-                    _value(row, "Hold", "HOLD", "PositionQty", "Qty", default=None),
-                    "position quantity",
-                ) > 0
-            ]
-            if open_positions:
-                raise RuntimeError(
-                    "Non-flat TTB account position exists; reconcile ALL symbols before startup"
-                )
-            self.bootstrapped = True
-            LOG.info(
-                "TTB baseline loaded: %s existing order ids ignored; position confirmed flat",
-                len(self.preexisting_order_nos),
-            )
+            self._load_baseline(rows, position_response)
             return []
         self._bind_sent_orders(rows)
         # Check the entire report before applying any fills or permitting a
@@ -534,7 +555,14 @@ class TTBOrderGateway:
             elif current and wanted and self._stale(current, wanted):
                 self._cancel(side, current)
             elif wanted and not current and side not in self.pending:
-                self._place(wanted)
+                if wanted.role == "entry" and time.monotonic() < self.entry_blocked_until:
+                    continue
+                try:
+                    self._place(wanted)
+                except EntryBlocked:
+                    # Full margin or order budget only skips the entry; the
+                    # bot keeps managing its exits instead of stopping.
+                    self.entry_blocked_until = time.monotonic() + ENTRY_BLOCK_RETRY_SECONDS
 
     def _stale(self, current: dict[str, Any], wanted: OrderIntent) -> bool:
         # A fill on the other side can turn an opening order into a closing
@@ -552,16 +580,20 @@ class TTBOrderGateway:
                 intent, self.ledger.position, self.active, self.config,
                 self.risk_limits, order_rate=self.order_rate, now=now,
                 margin_supplier=self._margin_response,
+                unbound=[sent["intent"] for sent in self.pending.values()],
             )
         except PreTradeRiskError as exc:
-            self.risk_block_reason = str(exc)
-            # A crash in audit persistence itself also blocks the order.
-            self.record_event("risk_block", {
-                "reason": self.risk_block_reason,
-                "role": intent.role,
-                "side": intent.side,
-                "quantity": intent.quantity,
-            })
+            reason = str(exc)
+            # A blocked entry is retried every few seconds; journal each
+            # reason once. A crash in audit persistence also blocks the order.
+            if reason != self.risk_block_reason:
+                self.record_event("risk_block", {
+                    "reason": reason,
+                    "role": intent.role,
+                    "side": intent.side,
+                    "quantity": intent.quantity,
+                })
+            self.risk_block_reason = reason
             raise
         self.risk_block_reason = ""
         # Persist the attempt before the network side effect; do not allow a
@@ -595,10 +627,12 @@ class TTBOrderGateway:
     def _margin_response(self) -> Any:
         """QUERYMARGIN, reused for a few seconds while neither the position nor exposure has grown.
 
-        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). It is not
-        known whether TTB reserves margin for working orders, so a read vouches
-        only for what it can have seen either way: the absolute position (a
-        fill that grows it lowers headroom even when exposure stays put) and
+        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). TTB holds
+        margin for every working opening order at its limit price, both sides
+        of a flat grid included (measured 2026-10-30), but not for closing
+        orders. A read vouches only for what it can have seen: the absolute
+        position (a fill that grows it lowers headroom even when exposure
+        stays put) and
         the worst one-sided exposure of the position plus bound working
         orders, as in validate_exposure. Unbound orders may not have reached
         TTB when it answered, so they count against the current exposure but
@@ -637,9 +671,17 @@ class TTBOrderGateway:
         # A poll read within REPORT_REUSE_SECONDS stands in for a fresh read.
         if not fresh and time.monotonic() - self._report_read_at <= REPORT_REUSE_SECONDS:
             return set(self._report_order_nos)
+        if hasattr(self.api, "drop_report"):
+            self.api.drop_report("orders")  # a shared read may be older than the reuse window
         rows = _response_rows(self.api.query_orders())
-        self._remember_report(rows, time.monotonic())
+        self._remember_report(rows, time.monotonic() - self._orders_age())
         return set(self._report_order_nos)
+
+    def _orders_age(self) -> float:
+        # A multi-leg bot shares one order report between legs (SharedReportsApi);
+        # its age counts against REPORT_REUSE_SECONDS like a reused poll.
+        report_age = getattr(self.api, "report_age", None)
+        return report_age("orders") if report_age else 0.0
 
     def _track_sent(self, intent: OrderIntent, effect: str, order_no: str, known: set[str]) -> None:
         if order_no:
@@ -695,7 +737,17 @@ class TTBOrderGateway:
         if counter_failure:
             self._latch_unsafe("rate-counter persistence failed during cancel; manual reconciliation required")
 
+    def _drop_shared_reports(self) -> None:
+        # Reports shared by several legs may predate a fill that already
+        # changed the account. Cancel rejects and shutdown flattens act on
+        # what they read, so they always read after this point.
+        drop = getattr(self.api, "drop_report", None)
+        if drop is not None:
+            drop("orders")
+            drop("positions")
+
     def _reported_terminal(self, order_no: str) -> bool:
+        self._drop_shared_reports()
         response = self.api.query_orders()
         if not is_success_response(response):
             return False
@@ -725,6 +777,7 @@ class TTBOrderGateway:
         deadline = time.monotonic() + max(2.0, timeout_seconds)
         attempts = 0
         while time.monotonic() < deadline:
+            self._drop_shared_reports()
             orders_response = self.api.query_orders()
             position_response = self.api.query_positions()
             if not is_success_response(orders_response) or not is_success_response(position_response):
@@ -803,6 +856,7 @@ class TTBOrderGateway:
         self.cancel_all()
         deadline = time.monotonic() + max(1.0, timeout_seconds)
         while time.monotonic() < deadline:
+            self._drop_shared_reports()
             orders_response = self.api.query_orders()
             position_response = self.api.query_positions()
             if not is_success_response(orders_response) or not is_success_response(position_response):

@@ -175,8 +175,10 @@ class RiskGatewayTests(unittest.TestCase):
         class FakeModule:
             def __init__(self):
                 self.orders = 0
+                self.margin_queries = 0
 
             def QUERYMARGIN(self):
+                self.margin_queries += 1
                 return {"Code": "0000", "Data": [{"Available": margin}]}
 
             def QUERYRESTOREREPORT(self):
@@ -198,10 +200,44 @@ class RiskGatewayTests(unittest.TestCase):
         gw.bootstrapped = True
         return module, gw
 
-    def test_broker_margin_below_headroom_blocks_neworder(self):
+    def test_broker_margin_below_headroom_skips_the_entry_without_stopping(self):
         module, gateway = self.gateway(margin="100")
-        with self.assertRaisesRegex(PreTradeRiskError, "below required"):
-            gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertEqual(module.orders, 0)
+        self.assertIn("below required", gateway.risk_block_reason)
+        # Retried only after the back-off, so a full account is not polled every tick.
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertEqual(module.margin_queries, 1)
+
+    def test_an_entry_needs_headroom_for_its_own_margin(self):
+        need = 20000 * self.config.point_value * 0.162
+        limits = PreTradeLimits(max_notional=5_000_000, minimum_available_margin=1000,
+                                available_margin_field="Available", entry_margin_rate=0.162)
+        module, gateway = self.gateway(margin=str(need - 1), limits=limits)
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertEqual(module.orders, 0)
+        self.assertIn("below required", gateway.risk_block_reason)
+        module, gateway = self.gateway(margin=str(need), limits=limits)
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertEqual(module.orders, 1)
+
+    def test_an_unbound_entry_counts_against_the_next_entry(self):
+        # TTB may answer QUERYMARGIN before an unbound order reached it, so the
+        # sell side of a flat grid also needs headroom for the buy side.
+        need = 20000 * self.config.point_value * 0.162
+        limits = PreTradeLimits(max_notional=5_000_000, minimum_available_margin=1000,
+                                available_margin_field="Available", entry_margin_rate=0.162)
+        module, gateway = self.gateway(margin=str(1.5 * need), limits=limits)
+        module.NEWORDER = lambda payload: (setattr(module, "orders", module.orders + 1), {"Code": "0000"})[1]
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),
+                      OrderIntent("sell", 20001, 1, "entry", "test")), quote())
+        self.assertEqual(module.orders, 1)
+        self.assertIn("below required", gateway.risk_block_reason)
+
+    def test_a_blocked_exit_still_stops_the_bot(self):
+        module, gateway = self.gateway(margin="100")
+        with self.assertRaisesRegex(PreTradeRiskError, "reduce-only"):
+            gateway.sync((OrderIntent("sell", 20000, 1, "exit", "test"),), quote())
         self.assertEqual(module.orders, 0)
 
     def test_missing_margin_configuration_fails_closed(self):

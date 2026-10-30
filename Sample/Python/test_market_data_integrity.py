@@ -181,6 +181,26 @@ class QuoteIntegrityTests(unittest.TestCase):
             subscriber.close()
             publisher.close(linger=0)
 
+    def test_zmq_subscriber_without_symbol_receives_every_contract(self):
+        import json
+        import zmq
+        context = zmq.Context.instance()
+        publisher = context.socket(zmq.PUB)
+        port = publisher.bind_to_random_port("tcp://127.0.0.1")
+        received = []
+        subscriber = ZmqQuoteSubscriber(port, "", received.append)
+        subscriber.start()
+        try:
+            deadline = time.monotonic() + 5
+            while len({row["Symbol"] for row in received}) < 2 and time.monotonic() < deadline:
+                publisher.send_multipart([b"TTB$Tick$TXFK6", json.dumps({"Symbol": "TXFK6"}).encode()])
+                publisher.send_multipart([b"TTB$Tick$CCFK6", json.dumps({"Symbol": "CCFK6"}).encode()])
+                time.sleep(0.05)
+            self.assertEqual({row["Symbol"] for row in received}, {"TXFK6", "CCFK6"})
+        finally:
+            subscriber.close()
+            publisher.close(linger=0)
+
 
 if __name__ == "__main__":
     unittest.main()

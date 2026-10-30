@@ -124,6 +124,27 @@ class GridPingPongTests(unittest.TestCase):
         orders = by_side(strategy.decide(tick("09:00:10", 2421, 3.0)))
         self.assertEqual((orders["buy"].price, orders["buy"].role), (2420, "entry"))
 
+    def test_an_entry_on_the_best_opposite_quote_still_rests(self):
+        # The level fills at its own price when it only touches the far side
+        # of the book, so it must not be skipped as through the market.
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.fill("buy", 2425)
+        touching = Quote(symbol="CDFK6", bid=2415, ask=2420, bid_qty=5, ask_qty=5, last=2420, last_qty=1,
+                         total_volume=2, exchange_time="09:00:05", received_at=2.0)
+        orders = by_side(strategy.decide(touching))
+        self.assertEqual((orders["buy"].price, orders["buy"].role), (2420, "entry"))
+
+    def test_a_short_grid_keeps_selling_its_level_while_the_bid_sits_on_it(self):
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.fill("sell", 2435)
+        touching = Quote(symbol="CDFK6", bid=2440, ask=2445, bid_qty=5, ask_qty=5, last=2440, last_qty=1,
+                         total_volume=2, exchange_time="09:00:05", received_at=2.0)
+        orders = by_side(strategy.decide(touching))
+        self.assertEqual((orders["sell"].price, orders["sell"].role), (2440, "entry"))
+        self.assertEqual((orders["buy"].price, orders["buy"].role), (2430, "exit"))
+
     def test_stop_holds_its_price_until_the_ttl_expires(self):
         strategy = self.make()
         strategy.decide(tick("09:00:00", 2430, 1.0))
@@ -197,12 +218,80 @@ class GridTemplateTests(unittest.TestCase):
                 # a day and the 120 s fatal one would stop the bot.
                 self.assertGreaterEqual(args.quote_stale_seconds, 300)
                 self.assertGreaterEqual(args.stale_fatal_seconds, 900)
+                # Those wide windows cannot catch a dead TTB feed; a silent
+                # liquid canary can, well before them.
+                self.assertTrue(config["quoteCanary"].startswith("auto:TXF"))
+                self.assertTrue(0 < args.feed_dead_seconds < args.quote_stale_seconds)
                 gate = config["liveGate"]
                 quote = Quote(symbol=symbol, bid=last, ask=last + gate["tickSize"], bid_qty=5, ask_qty=5, last=last,
                               last_qty=1, total_volume=1, exchange_time="09:00:00", received_at=1.0)
                 price = far_limit_price(quote, "buy", gate["tickSize"], gate["distanceTicks"])
                 # Far enough not to fill, inside the 10% daily limit.
                 self.assertTrue(last * 0.9 < price < last * 0.96, price)
+
+
+    def test_portfolio_template_runs_every_leg_as_a_grid_with_ccf_first_for_margin(self):
+        folder = Path(__file__).resolve().parent / "automation"
+        config = json.loads((folder / "config.grid-portfolio.example.json").read_text(encoding="utf-8"))
+        argv = ["--symbol", "CCFK6", "--strategy-module", config["strategyModule"]] + config["extraArgs"]
+        months = {"auto:CDF": "CDFK6", "auto:DHF": "DHFK6"}
+        for leg in config["legs"]:
+            argv += ["--leg-json", json.dumps(["--symbol", months[leg["symbol"]]] + leg["extraArgs"])]
+        legs = sim_hft_bot.leg_namespaces(argv)
+        self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "DHFK6", "CDFK6"])
+        inventories, sized, most = [], {}, {}
+        for args in legs:
+            args.sizing_equity = 2_000_000
+            sim_hft_bot._inject_sizing_equity(args, None)
+            strategy_config = sim_hft_bot.build_config(args)
+            strategy = sim_hft_bot.build_strategy(args, strategy_config, PositionLedger(strategy_config))
+            self.assertIsInstance(strategy, GridPingPongStrategy)
+            self.assertEqual(strategy_config.max_order_qty, strategy_config.max_inventory)
+            self.assertEqual(strategy_config.max_inventory % strategy.settings.levels, 0)
+            strategy._size({"CCFK6": 100, "DHFK6": 200, "CDFK6": 2000}[args.symbol])
+            sized[args.symbol] = strategy.qty
+            # Each daily start re-sizes from equity, so a growing account
+            # reaches the inventory cap.
+            levels = strategy.settings.levels
+            most[args.symbol] = (strategy_config.max_inventory // levels
+                                 if strategy.settings.margin_share else strategy_config.base_qty)
+            self.assertEqual(strategy.settings.grid_points, args.tick_size)
+            self.assertGreaterEqual(args.quote_stale_seconds, 300)
+            self.assertGreaterEqual(args.stale_fatal_seconds, 900)
+            inventories.append(strategy_config.max_inventory)
+            # The grid runs to three minutes before the close, then flattens.
+            self.assertEqual((args.entry_cutoff_minutes, args.flatten_minutes), (3, 3))
+            self.assertEqual(strategy.settings.last_entry_minute, 13 * 60 + 42)
+            # Every entry needs headroom for its own lots, whatever the sizing.
+            self.assertEqual(args.entry_margin_rate, 0.162)
+        self.assertEqual(sized, {"CCFK6": 2, "DHFK6": 1, "CDFK6": 1})
+        self.assertEqual(config["autoRecovery"]["maxFlattenQty"], max(inventories))
+        # A leg stops adding entries once available margin falls below its
+        # headroom, so the higher the headroom the later the leg in priority.
+        self.assertEqual(sorted(legs, key=lambda a: a.min_available_margin), legs)
+        # TTB holds 16.2% of the limit price for every working entry and
+        # rejects one it cannot cover, which stops the bot. Each headroom
+        # must cover the leg's own order at a price above the research range.
+        high = {"CCFK6": 130, "DHFK6": 300, "CDFK6": 2800}
+        lot = {args.symbol: high[args.symbol] * args.point_value * 0.162 for args in legs}
+        for args in legs:
+            self.assertGreater(args.min_available_margin, lot[args.symbol])
+            # Max notional is a fatal limit, not an entry block; a price rally
+            # alone must never reach it.
+            self.assertGreater(args.max_notional, high[args.symbol] * args.point_value * args.max_inventory)
+        # An entry leaves at least its leg's headroom less its own lots. Legs
+        # with lower headroom that read margin up to 5 s ago may each re-quote
+        # both sides after that, at the most they size to.
+        for i, args in enumerate(legs[1:], 1):
+            lower = sum(2 * lot[other.symbol] * most[other.symbol] for other in legs[:i])
+            self.assertGreaterEqual(args.min_available_margin - lot[args.symbol] * most[args.symbol], lower)
+        # CDF's one lot is most of the headroom, so it never reuses a margin
+        # read that the smaller legs may have spent since.
+        self.assertEqual(legs[-1].margin_cache_seconds, 0)
+        # The supervisor subscribes the liquid canary next to every leg; each
+        # leg inherits the primary's dead-feed timer.
+        self.assertEqual(config["quoteCanary"], "auto:TXF")
+        self.assertEqual({args.feed_dead_seconds for args in legs}, {90.0})
 
 
 class StockFuturesContractTests(unittest.TestCase):
@@ -223,6 +312,41 @@ class StockFuturesContractTests(unittest.TestCase):
         self.assertEqual(point_value_for("CCFK6"), 2000.0)
         with self.assertRaises(ValueError):
             point_value_for("CDFK6", 200.0)
+
+
+
+class MarginSizingTests(unittest.TestCase):
+    def make(self, equity, share=0.5):
+        config = StrategyConfig(symbol="CDFK6", tick_size=5, point_value=2000, fee_per_fill=50, tax_rate=0.00002,
+                                base_qty=1, max_order_qty=12, max_inventory=12)
+        self.ledger = PositionLedger(config)
+        return GridPingPongStrategy(config, self.ledger, grid_points=5, levels=3, stop_grids=1,
+                                    margin_share=share, equity=equity)
+
+    def test_lots_per_level_follow_equity_and_contract_margin(self):
+        # One CDF lot at 2430 holds 2430 * 2000 * 16.2% = 787,320 of margin.
+        self.assertEqual(by_side(self.make(10_000_000).decide(tick("09:00:00", 2430, 1.0)))["buy"].quantity, 2)
+        self.assertEqual(by_side(self.make(30_000_000).decide(tick("09:00:00", 2430, 1.0)))["buy"].quantity, 4)
+        self.assertEqual(by_side(self.make(2_000_000).decide(tick("09:00:00", 2430, 1.0)))["buy"].quantity, 1)
+
+    def test_lots_per_level_never_exceed_the_inventory_cap(self):
+        orders = by_side(self.make(1e9, share=1).decide(tick("09:00:00", 2430, 1.0)))
+        self.assertEqual(orders["buy"].quantity, 4)
+
+    def test_lots_per_level_are_sized_once_per_start(self):
+        strategy = self.make(10_000_000)
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.ledger.on_fill(Fill("buy", 2425, 2, "F1", 0.0))
+        # Cheaper lots would size up, but held levels keep their size.
+        orders = by_side(strategy.decide(tick("09:00:05", 2000, 2.0)))
+        self.assertEqual((orders["sell"].quantity, orders["sell"].role), (2, "risk_exit"))
+        # Nor does the grid re-quote at a new size once flat again.
+        self.ledger.on_fill(Fill("sell", 2000, 2, "F2", 3.0))
+        self.assertEqual(by_side(strategy.decide(tick("09:00:10", 2000, 4.0)))["buy"].quantity, 2)
+
+    def test_sizing_needs_an_equity(self):
+        with self.assertRaisesRegex(ValueError, "positive equity"):
+            self.make(0)
 
 
 if __name__ == "__main__":

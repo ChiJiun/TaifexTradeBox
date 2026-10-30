@@ -124,7 +124,11 @@ class MarketDataIntegrity:
 
 
 class ZmqQuoteSubscriber:
-    """Bounded SUB queue, exact-symbol subscription, atomic multipart reads."""
+    """Bounded SUB queue, exact-symbol subscription, atomic multipart reads.
+
+    An empty symbol subscribes to every tick TTB publishes, which tells a dead
+    TTB quote feed apart from one quiet contract.
+    """
 
     def __init__(self, port: int, symbol: str, callback: Callable[[dict[str, Any]], None]) -> None:
         import zmq
@@ -163,7 +167,7 @@ class ZmqQuoteSubscriber:
                 continue
             try:
                 topic = frames[0].decode("utf-8")
-                if topic.split(".")[0] != self.topic:
+                if self.symbol and topic.split(".")[0] != self.topic:
                     continue
                 self.callback(json.loads(frames[1]))
             except Exception:

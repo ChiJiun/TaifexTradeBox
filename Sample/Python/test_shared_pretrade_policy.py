@@ -107,8 +107,8 @@ class SharedRiskPolicyTests(unittest.TestCase):
             journal_dir=self.path / "journal",
         )
         gateway.bootstrapped = True
-        with self.assertRaisesRegex(PreTradeRiskError, "headroom"):
-            gateway.sync((self.intent,), quote())
+        # A margin block only skips the entry; the bot keeps running.
+        gateway.sync((self.intent,), quote())
         self.assertEqual(fake.orders, 0)
         self.assertIn("headroom", gateway.snapshot()["risk_block_reason"])
         self.assertEqual(
