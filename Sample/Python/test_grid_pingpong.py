@@ -197,6 +197,10 @@ class GridTemplateTests(unittest.TestCase):
                 # a day and the 120 s fatal one would stop the bot.
                 self.assertGreaterEqual(args.quote_stale_seconds, 300)
                 self.assertGreaterEqual(args.stale_fatal_seconds, 900)
+                # Those wide windows cannot catch a dead TTB feed; a silent
+                # liquid canary can, well before them.
+                self.assertTrue(config["quoteCanary"].startswith("auto:TXF"))
+                self.assertTrue(0 < args.feed_dead_seconds < args.quote_stale_seconds)
                 gate = config["liveGate"]
                 quote = Quote(symbol=symbol, bid=last, ask=last + gate["tickSize"], bid_qty=5, ask_qty=5, last=last,
                               last_qty=1, total_volume=1, exchange_time="09:00:00", received_at=1.0)
