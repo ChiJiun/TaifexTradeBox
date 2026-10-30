@@ -19,7 +19,9 @@ LOG = logging.getLogger("ttb.orders")
 # TTB sleeps 500 ms in every local API request before handling it, so a
 # NEWORDER reaches its server at least this long after the bot sends it. An
 # order report read no longer ago than this leaves a binding window no wider
-# than a fresh snapshot taken right before NEWORDER did.
+# than a fresh snapshot taken right before NEWORDER did. Reuse widens that
+# window by at most this much; a late row bound by mistake leaves the real
+# order unowned, which latches the bot.
 REPORT_REUSE_SECONDS = 0.5
 MAX_MARGIN_CACHE_SECONDS = 30.0
 
@@ -285,13 +287,15 @@ class TTBOrderGateway:
         if not 0.0 <= margin_cache_seconds <= MAX_MARGIN_CACHE_SECONDS:
             raise ValueError(f"margin_cache_seconds must be within 0..{MAX_MARGIN_CACHE_SECONDS:g}")
         self.margin_cache_seconds = margin_cache_seconds
-        self._margin_cache: tuple[float, int, Any] | None = None
+        self._margin_cache: tuple[float, int, int, Any] | None = None
         self._report_order_nos: set[str] = set()
         self._report_read_at = float("-inf")
 
     def set_trading_day(self, trading_day: str) -> None:
         if self.current_trading_day != trading_day:
             self.current_trading_day = trading_day
+            self._margin_cache = None
+            self._report_read_at = float("-inf")
             _, cursors = self.journal.replay_ledger(trading_day, self.config)
             self.seen_deal_qty = cursors
 
@@ -560,27 +564,38 @@ class TTBOrderGateway:
         )
 
     def _margin_response(self) -> Any:
-        """QUERYMARGIN, reused for a few seconds while exposure has not grown.
+        """QUERYMARGIN, reused for a few seconds while neither the position nor exposure has grown.
 
-        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). Exposure is
-        the worst one-sided position including working and unbound orders, as
-        in validate_exposure: a read taken at an equal or larger exposure still
-        bounds the headroom even if TTB reserves margin for working orders, and
-        any growth forces a fresh read.
+        TTB makes four remote calls per QUERYMARGIN (about 0.7 s). It is not
+        known whether TTB reserves margin for working orders, so a read vouches
+        only for what it can have seen either way: the absolute position (a
+        fill that grows it lowers headroom even when exposure stays put) and
+        the worst one-sided exposure of the position plus bound working
+        orders, as in validate_exposure. Unbound orders may not have reached
+        TTB when it answered, so they count against the current exposure but
+        never towards the cached one. Floating PnL within the window is not
+        reflected; margin_cache_seconds bounds that.
         """
         now = time.monotonic()
-        working = [(side, int(order.get("qty", 0))) for side, order in self.active.items()]
-        working += [(side, int(sent["intent"].quantity)) for side, sent in self.pending.items()]
-        buys = sum(qty for side, qty in working if side == "buy")
-        sells = sum(qty for side, qty in working if side == "sell")
         position = self.ledger.position
-        exposure = max(abs(position + buys), abs(position - sells))
+
+        def exposure(include_pending: bool) -> int:
+            working = [(side, int(order.get("qty", 0))) for side, order in self.active.items()]
+            if include_pending:
+                working += [(side, int(sent["intent"].quantity)) for side, sent in self.pending.items()]
+            buys = sum(qty for side, qty in working if side == "buy")
+            sells = sum(qty for side, qty in working if side == "sell")
+            return max(abs(position + buys), abs(position - sells))
+
         if self._margin_cache is not None:
-            read_at, read_exposure, response = self._margin_cache
-            if now - read_at < self.margin_cache_seconds and exposure <= read_exposure:
+            read_at, read_held, read_exposure, response = self._margin_cache
+            if (now - read_at < self.margin_cache_seconds and abs(position) <= read_held
+                    and exposure(True) <= read_exposure):
                 return response
         response = self.api.query_margin()
-        self._margin_cache = (now, exposure, response) if is_success_response(response) else None
+        self._margin_cache = (
+            (now, abs(position), exposure(False), response) if is_success_response(response) else None
+        )
         return response
 
     def _remember_report(self, rows: list[dict[str, Any]], read_at: float) -> None:

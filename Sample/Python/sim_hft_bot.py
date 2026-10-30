@@ -99,7 +99,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-available-margin", type=float, default=0.0,
                         help="mandatory positive margin headroom for TTB live entries")
     parser.add_argument("--margin-cache-seconds", type=float, default=5.0,
-                        help="reuse a QUERYMARGIN read this long while exposure (working orders included) has not grown; 0 reads every entry, max 30")
+                        help="reuse a QUERYMARGIN read this long while neither the position nor exposure (working orders included) has grown; 0 reads every entry, max 30")
     parser.add_argument("--available-margin-currency", default="TWD",
                         help="QUERYMARGIN row (CURRENCY field) the margin is read from")
     parser.add_argument("--rate-counters-file", type=Path, default=None,

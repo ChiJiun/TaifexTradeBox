@@ -487,8 +487,8 @@ class PlaceQueryReuseTests(unittest.TestCase):
         self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"),
                    OrderIntent("sell", 20010, 1, "entry", "test"))
         self.assertEqual(self.count(module, "margin"), 2)
-        read_at, _exposure, response = gateway._margin_cache
-        gateway._margin_cache = (read_at, 0, response)
+        read_at, held, _exposure, response = gateway._margin_cache
+        gateway._margin_cache = (read_at, held, 0, response)
         working = {"buy": {"order_no": "W1", "price": 20000, "qty": 1, "effect": "N"}}
         both = (OrderIntent("buy", 20000, 1, "entry", "test"),
                 OrderIntent("sell", 20010, 1, "entry", "test"))
@@ -497,6 +497,41 @@ class PlaceQueryReuseTests(unittest.TestCase):
             gateway.active = dict(working)
             gateway.sync(both, quote())
             self.assertEqual(self.count(module, "margin"), expected)
+
+    def test_fill_that_grows_the_position_forces_a_fresh_margin_read(self):
+        # If TTB reserves no margin for working orders, a fill lowers headroom
+        # while exposure stays put; a read at a smaller position cannot vouch.
+        module, gateway = self.setup_gateway()
+        gateway.active = {"buy": {"order_no": "W1", "price": 20000, "qty": 2, "effect": "N"}}
+        gateway._margin_response()
+        gateway._margin_response()
+        self.assertEqual(self.count(module, "margin"), 1)
+        gateway.active["buy"]["qty"] = 1  # a partial fill: exposure is still 2
+        gateway.ledger.position = 1
+        gateway._margin_response()
+        self.assertEqual(self.count(module, "margin"), 2)
+        del gateway.active["buy"]  # the rest fills; a sell is working
+        gateway.active["sell"] = {"order_no": "W2", "price": 20010, "qty": 1, "effect": "N"}
+        gateway.ledger.position = 2
+        gateway._margin_response()
+        self.assertEqual(self.count(module, "margin"), 3)
+
+    def test_unbound_entry_never_vouches_for_the_next_one(self):
+        # A buy sent right before the read may not have reached TTB yet.
+        module, gateway = self.setup_gateway()
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"),
+                   OrderIntent("sell", 20010, 1, "entry", "test"))
+        self.assertEqual(self.count(module, "margin"), 2)
+        gateway.pending.pop("sell")
+        gateway._margin_response()
+        self.assertEqual(self.count(module, "margin"), 3)
+
+    def test_trading_day_change_drops_cached_reads(self):
+        module, gateway = self.setup_gateway()
+        self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
+        gateway.set_trading_day("2099-12-31")
+        self.assertIsNone(gateway._margin_cache)
+        self.assertEqual(gateway._report_read_at, float("-inf"))
 
     def test_position_growth_either_way_forces_a_fresh_margin_read(self):
         module, gateway = self.setup_gateway()
@@ -519,8 +554,8 @@ class PlaceQueryReuseTests(unittest.TestCase):
     def test_expired_or_disabled_margin_cache_reads_again(self):
         module, gateway = self.setup_gateway()
         self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
-        read_at, exposure, response = gateway._margin_cache
-        gateway._margin_cache = (read_at - 5.0, exposure, response)
+        read_at, held, exposure, response = gateway._margin_cache
+        gateway._margin_cache = (read_at - 5.0, held, exposure, response)
         self.place(gateway, OrderIntent("buy", 20000, 1, "entry", "test"))
         self.assertEqual(self.count(module, "margin"), 2)
 
