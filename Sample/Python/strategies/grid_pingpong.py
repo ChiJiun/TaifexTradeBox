@@ -151,7 +151,10 @@ class GridPingPongStrategy:
                 intents.append(OrderIntent("buy" if pos > 0 else "sell", deepest - sign * g, q,
                                            "entry", f"grid level {held + 1}"))
         # An entry already through the market would fill at once above (below)
-        # its level; skip it until price comes back to the level.
+        # its level; skip it until price comes back to the level. An entry that
+        # only touches the best opposite quote fills at its own level and stays:
+        # skipping it froze a CCF grid for 50 minutes on 2026-10-30 while the
+        # bid sat on the next sell level.
         intents = [i for i in intents if i.role != "entry" or (
-            i.price <= quote.last and i.price < quote.ask if i.side == "buy" else i.price >= quote.last and i.price > quote.bid)]
+            i.price <= quote.last and i.price <= quote.ask if i.side == "buy" else i.price >= quote.last and i.price >= quote.bid)]
         return StrategyDecision(tuple(intents), features, False, f"grid anchor {self.anchor:g} held {held}")
