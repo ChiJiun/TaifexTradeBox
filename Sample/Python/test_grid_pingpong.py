@@ -124,6 +124,27 @@ class GridPingPongTests(unittest.TestCase):
         orders = by_side(strategy.decide(tick("09:00:10", 2421, 3.0)))
         self.assertEqual((orders["buy"].price, orders["buy"].role), (2420, "entry"))
 
+    def test_an_entry_on_the_best_opposite_quote_still_rests(self):
+        # The level fills at its own price when it only touches the far side
+        # of the book, so it must not be skipped as through the market.
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.fill("buy", 2425)
+        touching = Quote(symbol="CDFK6", bid=2415, ask=2420, bid_qty=5, ask_qty=5, last=2420, last_qty=1,
+                         total_volume=2, exchange_time="09:00:05", received_at=2.0)
+        orders = by_side(strategy.decide(touching))
+        self.assertEqual((orders["buy"].price, orders["buy"].role), (2420, "entry"))
+
+    def test_a_short_grid_keeps_selling_its_level_while_the_bid_sits_on_it(self):
+        strategy = self.make()
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.fill("sell", 2435)
+        touching = Quote(symbol="CDFK6", bid=2440, ask=2445, bid_qty=5, ask_qty=5, last=2440, last_qty=1,
+                         total_volume=2, exchange_time="09:00:05", received_at=2.0)
+        orders = by_side(strategy.decide(touching))
+        self.assertEqual((orders["sell"].price, orders["sell"].role), (2440, "entry"))
+        self.assertEqual((orders["buy"].price, orders["buy"].role), (2430, "exit"))
+
     def test_stop_holds_its_price_until_the_ttl_expires(self):
         strategy = self.make()
         strategy.decide(tick("09:00:00", 2430, 1.0))
