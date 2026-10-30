@@ -275,5 +275,37 @@ class StockFuturesContractTests(unittest.TestCase):
             point_value_for("CDFK6", 200.0)
 
 
+
+class MarginSizingTests(unittest.TestCase):
+    def make(self, equity, share=0.5):
+        config = StrategyConfig(symbol="CDFK6", tick_size=5, point_value=2000, fee_per_fill=50, tax_rate=0.00002,
+                                base_qty=1, max_order_qty=12, max_inventory=12)
+        self.ledger = PositionLedger(config)
+        return GridPingPongStrategy(config, self.ledger, grid_points=5, levels=3, stop_grids=1,
+                                    margin_share=share, equity=equity)
+
+    def test_lots_per_level_follow_equity_and_contract_margin(self):
+        # One CDF lot at 2430 holds 2430 * 2000 * 16.2% = 787,320 of margin.
+        self.assertEqual(by_side(self.make(10_000_000).decide(tick("09:00:00", 2430, 1.0)))["buy"].quantity, 2)
+        self.assertEqual(by_side(self.make(30_000_000).decide(tick("09:00:00", 2430, 1.0)))["buy"].quantity, 4)
+        self.assertEqual(by_side(self.make(2_000_000).decide(tick("09:00:00", 2430, 1.0)))["buy"].quantity, 1)
+
+    def test_lots_per_level_never_exceed_the_inventory_cap(self):
+        orders = by_side(self.make(1e9, share=1).decide(tick("09:00:00", 2430, 1.0)))
+        self.assertEqual(orders["buy"].quantity, 4)
+
+    def test_held_levels_keep_their_size_until_flat(self):
+        strategy = self.make(10_000_000)
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        self.ledger.on_fill(Fill("buy", 2425, 2, "F1", 0.0))
+        # Cheaper lots would size up, but only once the grid is flat again.
+        orders = by_side(strategy.decide(tick("09:00:05", 2000, 2.0)))
+        self.assertEqual((orders["sell"].quantity, orders["sell"].role), (2, "risk_exit"))
+
+    def test_sizing_needs_an_equity(self):
+        with self.assertRaisesRegex(ValueError, "positive equity"):
+            self.make(0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from strategy_core import PositionLedger, Quote, StrategyConfig
+from strategy_core import Fill, PositionLedger, Quote, StrategyConfig
 from ttb.engine import BotEngine, DailyCsvWriter
 from ttb.orders import ShadowGateway
 from ttb.runtime import RiskStateStore, SessionSchedule
@@ -283,6 +283,43 @@ class RiskStateStoreTests(unittest.TestCase):
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["version"], 1)
             self.assertEqual(raw["symbol"], "TMFJ6")
+
+
+
+class SessionBufferTests(unittest.TestCase):
+    def engine(self, directory, **buffers):
+        schedule = SimpleNamespace(status=lambda _local=None: SimpleNamespace(
+            phase="regular", trading_day="2026-10-30", trading=True,
+            minutes_since_open=250.0, minutes_until_close=7.0, reason="",
+        ))
+        config = StrategyConfig(symbol="CCFK6", max_order_qty=1, max_inventory=1, warmup_ticks=2)
+        return BotEngine(config, ShadowGateway(PositionLedger(config)), Path(directory) / "runs",
+                         session_schedule=schedule, **buffers)
+
+    def quote(self):
+        now = time.monotonic()
+        return Quote(symbol="CCFK6", bid=108.0, ask=108.5, bid_qty=5, ask_qty=5, last=108.0, last_qty=1,
+                     total_volume=1, exchange_time="13:38:00", received_at=now)
+
+    def test_default_buffers_flatten_ten_minutes_before_the_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self.engine(directory)
+            try:
+                engine.ledger.on_fill(Fill("buy", 108.0, 1, "F1", 0.0))
+                decision = engine.process_quote(self.quote())
+                self.assertEqual([(i.side, i.price, i.role) for i in decision.intents], [("sell", 108.0, "risk_exit")])
+            finally:
+                engine.close()
+
+    def test_shorter_buffers_keep_the_strategy_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self.engine(directory, entry_cutoff_minutes=5, flatten_minutes=5)
+            try:
+                engine.ledger.on_fill(Fill("buy", 108.0, 1, "F1", 0.0))
+                decision = engine.process_quote(self.quote())
+                self.assertNotIn("session close", [i.reason for i in decision.intents])
+            finally:
+                engine.close()
 
 
 if __name__ == "__main__":

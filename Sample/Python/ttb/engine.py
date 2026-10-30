@@ -162,6 +162,8 @@ class BotEngine:
         risk_state_path: Path | None = None,
         flatten_on_shutdown: bool = False,
         feed_dead_seconds: float = 0.0,
+        entry_cutoff_minutes: float | None = None,
+        flatten_minutes: float | None = None,
     ) -> None:
         self.config = config
         self.ledger = gateway.ledger
@@ -187,6 +189,10 @@ class BotEngine:
         self.decision_count = 0
         self.first_quote_grace_seconds = max(30.0, self.quote_stale_seconds * 3.0)
         self.feed_dead_seconds = max(0.0, feed_dead_seconds)
+        # Minutes before the close: no entries while flat, then flatten at the
+        # touch every cycle. None keeps the defaults for the mode.
+        self.entry_cutoff_minutes = entry_cutoff_minutes
+        self.flatten_minutes = flatten_minutes
         self.feed_seen_at = self.started_at
         self.closed_cleanup_done = False
         self.fatal_error = ""
@@ -359,8 +365,10 @@ class BotEngine:
         decision = self.strategy.decide(quote)
         session = self.session_schedule.status(local)
         entry_delay_minutes = 0.0 if self.config.virtual_max_mode else 10.0
-        entry_cutoff_minutes = 10.0 if self.config.virtual_max_mode else 25.0
-        flatten_buffer_minutes = 3.0 if self.config.virtual_max_mode else 10.0
+        entry_cutoff_minutes = (self.entry_cutoff_minutes if self.entry_cutoff_minutes is not None
+                                else 10.0 if self.config.virtual_max_mode else 25.0)
+        flatten_buffer_minutes = (self.flatten_minutes if self.flatten_minutes is not None
+                                  else 3.0 if self.config.virtual_max_mode else 10.0)
         if not session.trading or session.minutes_until_close <= flatten_buffer_minutes:
             position = self.ledger.position
             intents = (

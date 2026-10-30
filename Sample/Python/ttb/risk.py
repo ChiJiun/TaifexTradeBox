@@ -32,6 +32,10 @@ class PreTradeLimits:
     # TTB QUERYMARGIN returns one row per currency (TWD/USD/JPY/CNY, observed
     # 2026-10-18); the margin field is read from this currency's row only.
     available_margin_currency: str = "TWD"
+    # TTB holds this share of a new order's contract value as margin and
+    # rejects it when available margin is short, so an entry also needs at
+    # least that much headroom. 0 checks the fixed minimum only.
+    entry_margin_rate: float = 0.0
 
     def validate(self) -> None:
         if min(self.max_orders_per_minute, self.max_cancels_per_minute, self.max_daily_orders) <= 0:
@@ -42,6 +46,8 @@ class PreTradeLimits:
             raise ValueError("minimum_available_margin must be a nonnegative finite number")
         if bool(self.available_margin_field) != bool(self.minimum_available_margin):
             raise ValueError("both a verified margin field and a positive minimum margin are required")
+        if not 0 <= self.entry_margin_rate < 1:
+            raise ValueError("entry_margin_rate must be in [0, 1)")
 
 
 def parse_available_margin(response: Any, field: str, currency: str = "TWD") -> float:
@@ -307,5 +313,7 @@ def assess_pretrade(
     margin = parse_available_margin(
         margin_supplier(), limits.available_margin_field, limits.available_margin_currency,
     )
-    if margin < limits.minimum_available_margin:
+    required = max(limits.minimum_available_margin,
+                   intent.quantity * intent.price * config.point_value * limits.entry_margin_rate)
+    if margin < required:
         raise EntryBlocked("available TTB margin below required headroom")

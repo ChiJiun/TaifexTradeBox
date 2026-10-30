@@ -209,6 +209,18 @@ class RiskGatewayTests(unittest.TestCase):
         gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
         self.assertEqual(module.margin_queries, 1)
 
+    def test_an_entry_needs_headroom_for_its_own_margin(self):
+        need = 20000 * self.config.point_value * 0.162
+        limits = PreTradeLimits(max_notional=5_000_000, minimum_available_margin=1000,
+                                available_margin_field="Available", entry_margin_rate=0.162)
+        module, gateway = self.gateway(margin=str(need - 1), limits=limits)
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertEqual(module.orders, 0)
+        self.assertIn("below required", gateway.risk_block_reason)
+        module, gateway = self.gateway(margin=str(need), limits=limits)
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
+        self.assertEqual(module.orders, 1)
+
     def test_a_blocked_exit_still_stops_the_bot(self):
         module, gateway = self.gateway(margin="100")
         with self.assertRaisesRegex(PreTradeRiskError, "reduce-only"):
