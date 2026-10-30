@@ -239,7 +239,7 @@ class GridTemplateTests(unittest.TestCase):
             argv += ["--leg-json", json.dumps(["--symbol", months[leg["symbol"]]] + leg["extraArgs"])]
         legs = sim_hft_bot.leg_namespaces(argv)
         self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "DHFK6", "CDFK6"])
-        inventories, sized, most = [], {}, {}
+        inventories, sized, level_counts, most = [], {}, {}, {}
         for args in legs:
             args.sizing_equity = 2_000_000
             sim_hft_bot._inject_sizing_equity(args, None)
@@ -248,8 +248,10 @@ class GridTemplateTests(unittest.TestCase):
             self.assertIsInstance(strategy, GridPingPongStrategy)
             self.assertEqual(strategy_config.max_order_qty, strategy_config.max_inventory)
             self.assertEqual(strategy_config.max_inventory % strategy.settings.levels, 0)
-            strategy._size({"CCFK6": 100, "DHFK6": 200, "CDFK6": 2000}[args.symbol])
-            sized[args.symbol] = strategy.qty
+            price = {"CCFK6": 100, "DHFK6": 200, "CDFK6": 2000}[args.symbol]
+            strategy._size_levels(price)
+            strategy._size(price)
+            sized[args.symbol], level_counts[args.symbol] = strategy.qty, strategy.levels
             # Each daily start re-sizes from equity, so a growing account
             # reaches the inventory cap.
             levels = strategy.settings.levels
@@ -265,6 +267,8 @@ class GridTemplateTests(unittest.TestCase):
             # Every entry needs headroom for its own lots, whatever the sizing.
             self.assertEqual(args.entry_margin_rate, 0.162)
         self.assertEqual(sized, {"CCFK6": 2, "DHFK6": 1, "CDFK6": 1})
+        # CDF adds a one-lot level for every 0.5 of equity its margin covers.
+        self.assertEqual(level_counts, {"CCFK6": 6, "DHFK6": 12, "CDFK6": 1})
         self.assertEqual(config["autoRecovery"]["maxFlattenQty"], max(inventories))
         # A leg stops adding entries once available margin falls below its
         # headroom, so the higher the headroom the later the leg in priority.
@@ -347,6 +351,53 @@ class MarginSizingTests(unittest.TestCase):
     def test_sizing_needs_an_equity(self):
         with self.assertRaisesRegex(ValueError, "positive equity"):
             self.make(0)
+
+
+class LevelSizingTests(unittest.TestCase):
+    def make(self, equity):
+        config = StrategyConfig(symbol="CDFK6", tick_size=5, point_value=2000, fee_per_fill=50, tax_rate=0.00002,
+                                base_qty=1, max_order_qty=5, max_inventory=5)
+        self.ledger = PositionLedger(config)
+        return GridPingPongStrategy(config, self.ledger, grid_points=5, levels=5, stop_grids=1,
+                                    level_share=0.5, equity=equity)
+
+    def fill_down(self, strategy, levels):
+        strategy.decide(tick("09:00:00", 2430, 1.0))
+        for n in range(levels):
+            self.ledger.on_fill(Fill("buy", 2425 - 5 * n, 1, f"F{n}", 0.0))
+
+    def test_level_count_follows_equity_and_contract_margin(self):
+        # One CDF lot at 2430 holds 787,320; half of 5,000,000 covers three.
+        strategy = self.make(5_000_000)
+        self.fill_down(strategy, 3)
+        (exit_order,) = strategy.decide(tick("09:01:00", 2414, 2.0)).intents
+        self.assertEqual((exit_order.role, exit_order.price), ("exit", 2420))
+        # The stop sits one grid past the third level, not the fifth.
+        (stop,) = strategy.decide(tick("09:01:05", 2410, 3.0)).intents
+        self.assertEqual(stop.role, "risk_exit")
+
+    def test_level_count_never_exceeds_the_configured_levels(self):
+        strategy = self.make(1e9)
+        self.fill_down(strategy, 4)
+        orders = by_side(strategy.decide(tick("09:01:00", 2409, 2.0)))
+        self.assertEqual((orders["buy"].role, orders["buy"].price), ("entry", 2405))
+
+    def test_a_small_account_runs_one_level(self):
+        strategy = self.make(2_000_000)
+        self.fill_down(strategy, 1)
+        (exit_order,) = strategy.decide(tick("09:00:05", 2424, 2.0)).intents
+        self.assertEqual(exit_order.role, "exit")
+
+    def restart_holding_two(self, equity):
+        strategy = self.make(equity)
+        self.ledger.on_fill(Fill("buy", 2425, 1, "F1", 0.0))
+        self.ledger.on_fill(Fill("buy", 2420, 1, "F2", 0.0))
+        return by_side(strategy.decide(tick("09:00:00", 2421, 1.0)))
+
+    def test_a_restart_with_inventory_sizes_levels_before_quoting(self):
+        orders = self.restart_holding_two(5_000_000)
+        self.assertEqual((orders["buy"].role, orders["buy"].price), ("entry", 2415))
+        self.assertEqual(self.restart_holding_two(2_000_000).keys(), {"sell"})
 
 
 if __name__ == "__main__":

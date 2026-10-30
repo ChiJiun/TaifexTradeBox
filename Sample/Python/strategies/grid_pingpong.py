@@ -37,6 +37,10 @@ class GridSettings:
     # levels x qty lots at margin_rate of the current contract value, so the
     # grid grows with equity and shrinks as the price rises. 0 keeps base_qty.
     margin_share: float = 0.0
+    # Size the level count the same way: level_share of equity buys up to
+    # `levels` levels of base_qty lots. A stock future fills against informed
+    # flow when a level carries more lots, so deeper grids scale it better.
+    level_share: float = 0.0
     margin_rate: float = 0.162
     equity: float = 0.0
 
@@ -56,9 +60,9 @@ class GridSettings:
             raise ValueError("entry window must end before the flatten time")
         if self.stop_slip_ticks < 0 or self.stop_ttl_seconds <= 0:
             raise ValueError("invalid stop settings")
-        if not 0 <= self.margin_share <= 1:
-            raise ValueError("margin_share must be in [0, 1]")
-        if self.margin_share and (self.equity <= 0 or self.margin_rate <= 0):
+        if not (0 <= self.margin_share <= 1 and 0 <= self.level_share <= 1):
+            raise ValueError("margin_share and level_share must be in [0, 1]")
+        if (self.margin_share or self.level_share) and (self.equity <= 0 or self.margin_rate <= 0):
             raise ValueError("margin sizing needs a positive equity and margin_rate")
 
 
@@ -85,7 +89,9 @@ class GridPingPongStrategy:
         self.risk_exit: OrderIntent | None = None
         self.risk_exit_at = 0.0
         self.qty = config.base_qty
+        self.levels = self.settings.levels
         self.sized = False
+        self.levels_sized = False
 
     def parameters(self) -> dict:
         return asdict(self.settings)
@@ -94,14 +100,22 @@ class GridPingPongStrategy:
         g = self.settings.grid_points
         return round(price / g) * g
 
+    def _size_levels(self, price: float) -> None:
+        s = self.settings
+        if not s.level_share or price <= 0 or self.levels_sized:
+            return
+        self.levels_sized = True
+        level_margin = price * self.config.point_value * s.margin_rate * self.config.base_qty
+        self.levels = max(1, min(s.levels, int(s.level_share * s.equity // level_margin)))
+
     def _size(self, price: float) -> None:
         s = self.settings
         if not s.margin_share or price <= 0 or self.sized:
             return
         self.sized = True
         lot_margin = price * self.config.point_value * s.margin_rate
-        cap = max(1, min(self.config.max_order_qty, self.config.max_inventory // s.levels))
-        self.qty = max(1, min(cap, int(s.margin_share * s.equity // (s.levels * lot_margin))))
+        cap = max(1, min(self.config.max_order_qty, self.config.max_inventory // self.levels))
+        self.qty = max(1, min(cap, int(s.margin_share * s.equity // (self.levels * lot_margin))))
 
     def _infer_anchor(self, position: int) -> float:
         # Held levels are anchor - g ... anchor - n*g (mirrored for shorts),
@@ -120,6 +134,9 @@ class GridPingPongStrategy:
             return StrategyDecision((), features, False, "grid: no exchange time")
         s, tick, now = self.settings, self.config.tick_size, quote.received_at
         pos = self.ledger.position
+        # The level count only moves the stop line and the deepest entry, so
+        # it can be sized on a restart that already holds inventory.
+        self._size_levels(quote.last)
         if pos == 0:
             # Sized once, from the first flat price: held levels stay uniform
             # and a price near a lot boundary never re-quotes the grid.
@@ -141,7 +158,7 @@ class GridPingPongStrategy:
             self.stopping = False
             self.risk_exit = None
         else:
-            outer = self.anchor - sign * (s.levels + s.stop_grids) * g
+            outer = self.anchor - sign * (self.levels + s.stop_grids) * g
             # A gap can cross the stop line before every level fills; stop on
             # the line itself so the grid never buys its way down to it.
             if s.stop_grids >= 0 and sign * (quote.last - outer) <= 0:
@@ -172,7 +189,7 @@ class GridPingPongStrategy:
             exit_qty = abs(pos) - (held - 1) * q
             intents.append(OrderIntent("sell" if pos > 0 else "buy", deepest + sign * s.exit_grids * g,
                                        exit_qty, "exit", f"grid exit level {held}"))
-            if entries_open and held < s.levels:
+            if entries_open and held < self.levels:
                 intents.append(OrderIntent("buy" if pos > 0 else "sell", deepest - sign * g, q,
                                            "entry", f"grid level {held + 1}"))
         # An entry already through the market would fill at once above (below)
