@@ -218,17 +218,29 @@ class GridTemplateTests(unittest.TestCase):
             argv += ["--leg-json", json.dumps(["--symbol", months[leg["symbol"]]] + leg["extraArgs"])]
         legs = sim_hft_bot.leg_namespaces(argv)
         self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "DHFK6", "CDFK6"])
-        levels = []
+        inventories, sized = [], {}
         for args in legs:
+            args.sizing_equity = 2_000_000
+            sim_hft_bot._inject_sizing_equity(args, None)
             strategy_config = sim_hft_bot.build_config(args)
             strategy = sim_hft_bot.build_strategy(args, strategy_config, PositionLedger(strategy_config))
             self.assertIsInstance(strategy, GridPingPongStrategy)
-            self.assertEqual(strategy_config.max_order_qty, strategy.settings.levels)
+            self.assertEqual(strategy_config.max_order_qty, strategy_config.max_inventory)
+            self.assertEqual(strategy_config.max_inventory % strategy.settings.levels, 0)
+            # Lots per level at 2 million equity and a low price, the most it sizes to.
+            strategy._size({"CCFK6": 100, "DHFK6": 200, "CDFK6": 2000}[args.symbol])
+            sized[args.symbol] = strategy.qty
             self.assertEqual(strategy.settings.grid_points, args.tick_size)
             self.assertGreaterEqual(args.quote_stale_seconds, 300)
             self.assertGreaterEqual(args.stale_fatal_seconds, 900)
-            levels.append(strategy.settings.levels)
-        self.assertEqual(config["autoRecovery"]["maxFlattenQty"], max(levels))
+            inventories.append(strategy_config.max_inventory)
+            # The grid runs to three minutes before the close, then flattens.
+            self.assertEqual((args.entry_cutoff_minutes, args.flatten_minutes), (3, 3))
+            self.assertEqual(strategy.settings.last_entry_minute, 13 * 60 + 42)
+            # Every entry needs headroom for its own lots, whatever the sizing.
+            self.assertEqual(args.entry_margin_rate, 0.162)
+        self.assertEqual(sized, {"CCFK6": 2, "DHFK6": 1, "CDFK6": 1})
+        self.assertEqual(config["autoRecovery"]["maxFlattenQty"], max(inventories))
         # A leg stops adding entries once available margin falls below its
         # headroom, so the higher the headroom the later the leg in priority.
         self.assertEqual(sorted(legs, key=lambda a: a.min_available_margin), legs)
@@ -244,7 +256,7 @@ class GridTemplateTests(unittest.TestCase):
             self.assertGreater(args.max_notional, high[args.symbol] * args.point_value * args.max_inventory)
         # Legs that read margin up to 5 s ago may each re-quote both sides
         # after CDF takes its lot; the CDF headroom has to leave room for that.
-        others = sum(2 * lot[args.symbol] for args in legs[:-1])
+        others = sum(2 * lot[args.symbol] * sized[args.symbol] for args in legs[:-1])
         self.assertGreaterEqual(legs[-1].min_available_margin, lot["CDFK6"] + others)
         # CDF's one lot is most of the headroom, so it never reuses a margin
         # read that the smaller legs may have spent since.
