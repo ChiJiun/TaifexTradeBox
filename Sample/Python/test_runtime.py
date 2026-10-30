@@ -145,6 +145,37 @@ class EngineRuntimeTests(unittest.TestCase):
                 engine.close()
 
 
+    def test_quiet_gap_between_ticks_keeps_the_trading_state(self):
+        # 2026-10-30: the CCF grid held 1 lot between sparse ticks, and every
+        # idle half second rewrote health to manual_reconciliation_required
+        # (or waiting_market when flat), so the watchdog paged exit 3 and 2.
+        class AlwaysTradingSchedule:
+            def status(self, _local=None):
+                return SimpleNamespace(phase="regular", trading_day="2026-10-30", trading=True,
+                                       minutes_since_open=60.0, minutes_until_close=60.0, reason="")
+
+        config = StrategyConfig(symbol="CCFK6", max_order_qty=1, max_inventory=1, warmup_ticks=2)
+        ledger = PositionLedger(config)
+        with tempfile.TemporaryDirectory() as directory:
+            engine = BotEngine(
+                config, ShadowGateway(ledger), Path(directory) / "runs",
+                session_schedule=AlwaysTradingSchedule(), quote_stale_seconds=300, stale_fatal_seconds=900,
+            )
+            ledger.position = 1
+            engine.last_quote = Quote(
+                symbol="CCFK6", bid=108.0, ask=108.5, bid_qty=5, ask_qty=5, last=108.0, last_qty=1,
+                total_volume=1, exchange_time="10:30:00", received_at=time.monotonic(),
+            )
+            engine.start()
+            engine.health.update(state="healthy")  # as the last processed tick leaves it
+            try:
+                time.sleep(1.5)
+                snapshot = engine.health.snapshot()
+                self.assertEqual(snapshot["state"], "healthy")
+                self.assertEqual(snapshot["position"], 1)
+            finally:
+                engine.close()
+
 class RiskStateStoreTests(unittest.TestCase):
     def test_locked_risk_state_is_retried_then_fails_closed(self):
         import os
