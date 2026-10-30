@@ -14,7 +14,7 @@
     "enabled": true,
     "exclusiveBotAccount": true,
     "maxAttemptsPerDay": 3,
-    "maxFlattenQty": 24
+    "maxFlattenQty": 18
   },
   "extraArgs": [
     "--point-value",
@@ -24,9 +24,9 @@
     "--base-qty",
     "1",
     "--max-order-qty",
-    "24",
+    "18",
     "--max-inventory",
-    "24",
+    "18",
     "--quote-stale-seconds",
     "300",
     "--stale-fatal-seconds",
@@ -89,7 +89,7 @@
         "--max-notional",
         "10000000",
         "--min-available-margin",
-        "300000",
+        "400000",
         "--max-daily-orders",
         "2000",
         "--strategy-params-json",

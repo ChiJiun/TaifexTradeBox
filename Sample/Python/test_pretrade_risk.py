@@ -221,6 +221,19 @@ class RiskGatewayTests(unittest.TestCase):
         gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),), quote())
         self.assertEqual(module.orders, 1)
 
+    def test_an_unbound_entry_counts_against_the_next_entry(self):
+        # TTB may answer QUERYMARGIN before an unbound order reached it, so the
+        # sell side of a flat grid also needs headroom for the buy side.
+        need = 20000 * self.config.point_value * 0.162
+        limits = PreTradeLimits(max_notional=5_000_000, minimum_available_margin=1000,
+                                available_margin_field="Available", entry_margin_rate=0.162)
+        module, gateway = self.gateway(margin=str(1.5 * need), limits=limits)
+        module.NEWORDER = lambda payload: (setattr(module, "orders", module.orders + 1), {"Code": "0000"})[1]
+        gateway.sync((OrderIntent("buy", 20000, 1, "entry", "test"),
+                      OrderIntent("sell", 20001, 1, "entry", "test")), quote())
+        self.assertEqual(module.orders, 1)
+        self.assertIn("below required", gateway.risk_block_reason)
+
     def test_a_blocked_exit_still_stops_the_bot(self):
         module, gateway = self.gateway(margin="100")
         with self.assertRaisesRegex(PreTradeRiskError, "reduce-only"):

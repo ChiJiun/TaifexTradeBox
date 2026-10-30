@@ -551,6 +551,7 @@ class TTBOrderGateway:
                 intent, self.ledger.position, self.active, self.config,
                 self.risk_limits, order_rate=self.order_rate, now=now,
                 margin_supplier=self._margin_response,
+                unbound=[sent["intent"] for sent in self.pending.values()],
             )
         except PreTradeRiskError as exc:
             reason = str(exc)

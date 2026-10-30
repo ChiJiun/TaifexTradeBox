@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from strategy_core import OrderIntent, StrategyConfig
 from .api import _decoded, is_success_response
@@ -291,6 +291,7 @@ def assess_pretrade(
     order_rate: DurableOrderRateGuard,
     now: float,
     margin_supplier: Callable[[], Any],
+    unbound: Iterable[OrderIntent] = (),
 ) -> None:
     """Identical live/offline pre-trade risk policy, with injected margin data.
 
@@ -313,6 +314,12 @@ def assess_pretrade(
     margin = parse_available_margin(
         margin_supplier(), limits.available_margin_field, limits.available_margin_currency,
     )
+    # Entries sent but not yet bound may not be reflected in the margin read,
+    # e.g. the buy side of a flat grid while its sell side is checked, so
+    # they are taken off it before either check.
+    margin -= sum(
+        sent.quantity * sent.price for sent in unbound if sent.role == "entry"
+    ) * config.point_value * limits.entry_margin_rate
     required = max(limits.minimum_available_margin,
                    intent.quantity * intent.price * config.point_value * limits.entry_margin_rate)
     if margin < required:

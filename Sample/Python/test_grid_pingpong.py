@@ -218,7 +218,7 @@ class GridTemplateTests(unittest.TestCase):
             argv += ["--leg-json", json.dumps(["--symbol", months[leg["symbol"]]] + leg["extraArgs"])]
         legs = sim_hft_bot.leg_namespaces(argv)
         self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "DHFK6", "CDFK6"])
-        inventories, sized = [], {}
+        inventories, sized, most = [], {}, {}
         for args in legs:
             args.sizing_equity = 2_000_000
             sim_hft_bot._inject_sizing_equity(args, None)
@@ -227,9 +227,13 @@ class GridTemplateTests(unittest.TestCase):
             self.assertIsInstance(strategy, GridPingPongStrategy)
             self.assertEqual(strategy_config.max_order_qty, strategy_config.max_inventory)
             self.assertEqual(strategy_config.max_inventory % strategy.settings.levels, 0)
-            # Lots per level at 2 million equity and a low price, the most it sizes to.
             strategy._size({"CCFK6": 100, "DHFK6": 200, "CDFK6": 2000}[args.symbol])
             sized[args.symbol] = strategy.qty
+            # Each daily start re-sizes from equity, so a growing account
+            # reaches the inventory cap.
+            levels = strategy.settings.levels
+            most[args.symbol] = (strategy_config.max_inventory // levels
+                                 if strategy.settings.margin_share else strategy_config.base_qty)
             self.assertEqual(strategy.settings.grid_points, args.tick_size)
             self.assertGreaterEqual(args.quote_stale_seconds, 300)
             self.assertGreaterEqual(args.stale_fatal_seconds, 900)
@@ -254,10 +258,12 @@ class GridTemplateTests(unittest.TestCase):
             # Max notional is a fatal limit, not an entry block; a price rally
             # alone must never reach it.
             self.assertGreater(args.max_notional, high[args.symbol] * args.point_value * args.max_inventory)
-        # Legs that read margin up to 5 s ago may each re-quote both sides
-        # after CDF takes its lot; the CDF headroom has to leave room for that.
-        others = sum(2 * lot[args.symbol] * sized[args.symbol] for args in legs[:-1])
-        self.assertGreaterEqual(legs[-1].min_available_margin, lot["CDFK6"] + others)
+        # An entry leaves at least its leg's headroom less its own lots. Legs
+        # with lower headroom that read margin up to 5 s ago may each re-quote
+        # both sides after that, at the most they size to.
+        for i, args in enumerate(legs[1:], 1):
+            lower = sum(2 * lot[other.symbol] * most[other.symbol] for other in legs[:i])
+            self.assertGreaterEqual(args.min_available_margin - lot[args.symbol] * most[args.symbol], lower)
         # CDF's one lot is most of the headroom, so it never reuses a margin
         # read that the smaller legs may have spent since.
         self.assertEqual(legs[-1].margin_cache_seconds, 0)
@@ -306,13 +312,16 @@ class MarginSizingTests(unittest.TestCase):
         orders = by_side(self.make(1e9, share=1).decide(tick("09:00:00", 2430, 1.0)))
         self.assertEqual(orders["buy"].quantity, 4)
 
-    def test_held_levels_keep_their_size_until_flat(self):
+    def test_lots_per_level_are_sized_once_per_start(self):
         strategy = self.make(10_000_000)
         strategy.decide(tick("09:00:00", 2430, 1.0))
         self.ledger.on_fill(Fill("buy", 2425, 2, "F1", 0.0))
-        # Cheaper lots would size up, but only once the grid is flat again.
+        # Cheaper lots would size up, but held levels keep their size.
         orders = by_side(strategy.decide(tick("09:00:05", 2000, 2.0)))
         self.assertEqual((orders["sell"].quantity, orders["sell"].role), (2, "risk_exit"))
+        # Nor does the grid re-quote at a new size once flat again.
+        self.ledger.on_fill(Fill("sell", 2000, 2, "F2", 3.0))
+        self.assertEqual(by_side(strategy.decide(tick("09:00:10", 2000, 4.0)))["buy"].quantity, 2)
 
     def test_sizing_needs_an_equity(self):
         with self.assertRaisesRegex(ValueError, "positive equity"):

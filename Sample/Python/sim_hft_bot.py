@@ -14,7 +14,7 @@ from typing import Any
 
 from strategies import MovingAverageStrategy
 from strategy_core import PositionLedger, StrategyConfig
-from ttb.api import SharedReportsApi, TTBApi
+from ttb.api import SharedReportsApi, TTBApi, TTBApiError
 from ttb.engine import BotEngine, CsvRecorder
 from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
 from ttb.runtime import SessionSchedule, TAIPEI_TZ
@@ -28,7 +28,7 @@ from ttb.calendar import (
 from datetime import datetime
 from ttb.health import HealthReporter
 from ttb.status_server import StatusServer
-from ttb.risk import PreTradeLimits, parse_available_margin
+from ttb.risk import PreTradeLimits, PreTradeRiskError, parse_available_margin
 from ttb.contracts import point_value_for
 from ttb.orders import (
     ShadowGateway,
@@ -322,9 +322,20 @@ def _inject_sizing_equity(args: argparse.Namespace, api: TTBApi) -> None:
         return
     equity = args.sizing_equity
     if args.mode == "ttb":
-        equity = parse_available_margin(
-            api.query_margin(), args.available_margin_field or "AVAILABELMARGIN", args.available_margin_currency,
-        )
+        # TTB is often slow to answer right after login; a failed start costs
+        # one of the supervisor's daily recoveries.
+        for attempt in range(3):
+            try:
+                equity = parse_available_margin(
+                    api.query_margin(), args.available_margin_field or "AVAILABELMARGIN",
+                    args.available_margin_currency,
+                )
+                break
+            except (PreTradeRiskError, TTBApiError):
+                if attempt == 2:
+                    raise
+                LOG.warning("sizing equity read failed; retrying")
+                time.sleep(5)
     if equity <= 0:
         raise SystemExit("margin_share sizing needs a positive equity (--sizing-equity or TTB available margin)")
     LOG.info("grid sizing from equity %.0f, margin_share %s", equity, params["margin_share"])

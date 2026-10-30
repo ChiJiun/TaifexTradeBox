@@ -85,6 +85,7 @@ class GridPingPongStrategy:
         self.risk_exit: OrderIntent | None = None
         self.risk_exit_at = 0.0
         self.qty = config.base_qty
+        self.sized = False
 
     def parameters(self) -> dict:
         return asdict(self.settings)
@@ -95,8 +96,9 @@ class GridPingPongStrategy:
 
     def _size(self, price: float) -> None:
         s = self.settings
-        if not s.margin_share or price <= 0:
+        if not s.margin_share or price <= 0 or self.sized:
             return
+        self.sized = True
         lot_margin = price * self.config.point_value * s.margin_rate
         cap = max(1, min(self.config.max_order_qty, self.config.max_inventory // s.levels))
         self.qty = max(1, min(cap, int(s.margin_share * s.equity // (s.levels * lot_margin))))
@@ -119,7 +121,8 @@ class GridPingPongStrategy:
         s, tick, now = self.settings, self.config.tick_size, quote.received_at
         pos = self.ledger.position
         if pos == 0:
-            # Lots per level change only while flat, so held levels stay uniform.
+            # Sized once, from the first flat price: held levels stay uniform
+            # and a price near a lot boundary never re-quotes the grid.
             self._size(quote.last)
         g, q = s.grid_points, self.qty
         if self.anchor is None:
