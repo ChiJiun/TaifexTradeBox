@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from strategy_core import Fill, OrderIntent, PositionLedger, Quote, StrategyConfig
-from ttb.api import TTBApi, TTBApiError, TTBOrderRequest, position_effect_for
+from ttb.api import SharedReportsApi, TTBApi, TTBApiError, TTBOrderRequest, position_effect_for
 from ttb.orders import TTBOrderGateway
 from ttb.risk import PreTradeLimits
 
@@ -70,7 +70,7 @@ class GatewayPositionEffectTests(unittest.TestCase):
         self.module = FakeModule()
         self.ledger = PositionLedger(self.config)
         self.gateway = TTBOrderGateway(
-            self.module, self.config, self.ledger, 0.25,
+            self.api(), self.config, self.ledger, 0.25,
             risk_limits=PreTradeLimits(
                 max_notional=5_000_000, minimum_available_margin=1000,
                 available_margin_field="Available",
@@ -78,6 +78,9 @@ class GatewayPositionEffectTests(unittest.TestCase):
             risk_counters_path=Path(tmp.name) / "risk.json",
         )
         self.gateway.bootstrapped = True
+
+    def api(self):
+        return self.module
 
     def test_exit_while_long_closes_and_entry_while_flat_opens(self):
         self.gateway.sync((OrderIntent("buy", 19990, 1, "entry", "test"),), quote())
@@ -141,6 +144,13 @@ class GatewayPositionEffectTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.gateway.sync((OrderIntent("buy", 19980, 1, "entry", "test"),), quote())
         self.assertIn("rate-counter", self.gateway.unsafe_reason)
+
+class SharedReportGatewayTests(GatewayPositionEffectTests):
+    # A multi-leg bot reads reports through one cache shared by its legs; a
+    # rejected cancel must still be judged on a report read after the reject.
+    def api(self):
+        return SharedReportsApi(self.module, max_age=1.0, clock=lambda: 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

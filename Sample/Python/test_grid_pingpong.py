@@ -232,8 +232,16 @@ class GridTemplateTests(unittest.TestCase):
         # rejects one it cannot cover, which stops the bot. Each headroom
         # must cover the leg's own order at a price above the research range.
         high = {"CCFK6": 130, "DHFK6": 300, "CDFK6": 2800}
+        lot = {args.symbol: high[args.symbol] * args.point_value * 0.162 for args in legs}
         for args in legs:
-            self.assertGreater(args.min_available_margin, high[args.symbol] * args.point_value * 0.162)
+            self.assertGreater(args.min_available_margin, lot[args.symbol])
+            # Max notional is a fatal limit, not an entry block; a price rally
+            # alone must never reach it.
+            self.assertGreater(args.max_notional, high[args.symbol] * args.point_value * args.max_inventory)
+        # Legs that read margin up to 5 s ago may each re-quote both sides
+        # after CDF takes its lot; the CDF headroom has to leave room for that.
+        others = sum(2 * lot[args.symbol] for args in legs[:-1])
+        self.assertGreaterEqual(legs[-1].min_available_margin, lot["CDFK6"] + others)
         # CDF's one lot is most of the headroom, so it never reuses a margin
         # read that the smaller legs may have spent since.
         self.assertEqual(legs[-1].margin_cache_seconds, 0)

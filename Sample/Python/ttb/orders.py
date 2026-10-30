@@ -708,6 +708,11 @@ class TTBOrderGateway:
             self._latch_unsafe("rate-counter persistence failed during cancel; manual reconciliation required")
 
     def _reported_terminal(self, order_no: str) -> bool:
+        # A report shared by several legs may predate the fill that made TTB
+        # reject this cancel; only a read after the reject can show it.
+        drop = getattr(self.api, "drop_report", None)
+        if drop is not None:
+            drop("orders")
         response = self.api.query_orders()
         if not is_success_response(response):
             return False
