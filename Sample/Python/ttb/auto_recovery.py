@@ -12,7 +12,7 @@ from strategy_core import StrategyConfig
 
 from .api import extract_order_no
 from .calendar import CONTRACT_CODE, SUPPORTED_PRODUCTS
-from .journal import ExecutionJournal, JournalError, JournalLock
+from .journal import ExecutionJournal, JournalError, JournalLock, replay_fills
 from .orders import (
     _explicit_side, _float, _response_rows, _strict_quantity, _value,
     is_working_order, order_number, order_symbol, reported_position,
@@ -134,9 +134,10 @@ def _final_flatten_row(
         ]
     if len({order_number(row) for row in matches}) > 1:
         raise RecoveryRefused(f"several TTB orders match one flatten order for {symbol}")
-    if not matches or is_working_order(matches[0]):
+    # One order may span several report rows; it is final only when none still works.
+    if not matches or any(is_working_order(row) for row in matches):
         return None
-    return matches[0]
+    return max(matches, key=_deal_total)
 
 
 def _flatten_symbol(
@@ -156,7 +157,7 @@ def _flatten_symbol(
                     policy, sleep)
         if row is None:
             raise RecoveryRefused(f"flatten order for {symbol} never reached a final state in the TTB report")
-        filled = _strict_quantity(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0), "filled quantity")
+        filled = _deal_total(row)
         if filled > size:
             raise RecoveryRefused(f"flatten order for {symbol} reports more fills than ordered")
         action.update(order_no=order_number(row), filled=filled)
@@ -182,6 +183,10 @@ def _clean_twice(api: Any, policy: RecoveryPolicy, sleep: Callable[[float], None
     return second if second.can_clear else None
 
 
+def _deal_total(row: dict[str, Any]) -> int:
+    return _strict_quantity(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0), "filled quantity")
+
+
 def _journal_symbols(journal_dir: Path, days: tuple[str, ...]) -> set[str]:
     symbols: set[str] = set()
     for day in days:
@@ -189,6 +194,28 @@ def _journal_symbols(journal_dir: Path, days: tuple[str, ...]) -> set[str]:
         for path in journal_dir.glob(f"events-*{suffix}"):
             symbols.add(path.name[len("events-"):-len(suffix)].upper())
     return symbols
+
+
+def _report_fills(api: Any) -> dict[str, dict[str, Any]]:
+    """Filled TTB orders by order number, one entry each even if the report repeats an order."""
+    orders: dict[str, dict[str, Any]] = {}
+    for row in _response_rows(api.query_orders()):
+        total = _deal_total(row)
+        if not total:
+            continue
+        symbol, order_no = order_symbol(row), order_number(row)
+        if not symbol or not order_no:
+            raise RecoveryRefused("a filled TTB order has no symbol or order number; reconcile the journal manually")
+        side = _explicit_side(_value(row, "BS", "Side", "ComdBS1"))
+        price = _float(_value(row, "DEAL_PRCE", "DealPrice", default=0))
+        if not side or price <= 0:
+            raise RecoveryRefused(f"TTB fill of {symbol} order {order_no} has no usable side/price")
+        seen = orders.get(order_no)
+        if seen and (seen["symbol"], seen["side"]) != (symbol, side):
+            raise RecoveryRefused(f"TTB report rows of order {order_no} disagree on symbol or side")
+        if not seen or total > seen["total"]:
+            orders[order_no] = {"symbol": symbol, "side": side, "price": price, "total": total}
+    return orders
 
 
 def _plan_journal_fills(
@@ -199,64 +226,68 @@ def _plan_journal_fills(
     Runs only after two clean inspections, so every TTB order is final and
     every position is 0. Fills the journal lacks (auto-recovery's own market
     IOCs, or fills of bot orders after the bot stopped) are taken from the
-    order report; an order already journaled on another day is left alone.
-    The plan is accepted only if replaying it leaves the journal of every
-    symbol flat; anything else refuses without writing.
+    order report and booked into the partition that holds the open position:
+    one of `days` (what a restarted bot replays) or, for a position carried
+    over by a deferred recovery, the last partition before them. An order
+    journaled in any other partition is left alone. The plan is accepted only
+    if replaying it with the journal's own cursor rules leaves that partition
+    and every partition of `days` flat; anything else refuses before writing.
     """
-    filled: dict[str, list[dict[str, Any]]] = {}
-    for row in _response_rows(api.query_orders()):
-        if not _strict_quantity(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0), "filled quantity"):
-            continue
-        symbol = order_symbol(row)
-        if not symbol or not order_number(row):
-            raise RecoveryRefused("a filled TTB order has no symbol or order number; reconcile the journal manually")
-        filled.setdefault(symbol, []).append(row)
-
+    fills = _report_fills(api)
     plan: list[tuple[ExecutionJournal, str, dict[str, Any]]] = []
-    for symbol in sorted(set(filled) | _journal_symbols(journal_dir, days)):
+    for symbol in sorted({fill["symbol"] for fill in fills.values()} | _journal_symbols(journal_dir, days)):
         journal = ExecutionJournal(journal_dir, symbol)  # validates every retained partition
+        config = StrategyConfig(symbol=symbol)
         partitions = journal.trading_days()
-        targets = [day for day in days if day in partitions]
-        if len(targets) > 1:
-            raise RecoveryRefused(f"{symbol} has journals for several candidate trading days {targets}")
-        target = targets[0] if targets else ""
+        current = [day for day in partitions if day in days]
+        open_days = [day for day in current if journal.replay_ledger(day, config)[0].position]
+        if len(open_days) > 1:
+            raise RecoveryRefused(f"{symbol} journals of {open_days} all hold open positions; reconcile manually")
+        target = open_days[0] if open_days else (current[-1] if current else "")
+        earlier = [day for day in partitions if day < min(days)]
+        journaled = {
+            str(event["payload"].get("order_no") or event["payload"].get("order_id") or "")
+            for day in partitions for event in journal.events(day)
+        }
+        if (not open_days and earlier and journal.replay_ledger(earlier[-1], config)[0].position
+                and any(fill["symbol"] == symbol and order_no not in journaled for order_no, fill in fills.items())):
+            # A deferred recovery closing yesterday's position today.
+            target = earlier[-1]
         elsewhere = {
             str(event["payload"].get("order_no") or event["payload"].get("order_id") or "")
             for day in partitions if day != target for event in journal.events(day)
         }
-        position, cursors, acked = 0, {}, {}
-        if target:
-            ledger, cursors = journal.replay_ledger(target, StrategyConfig(symbol=symbol))
-            position = ledger.position
-            acked = {str(event["payload"].get("order_no")): str(event["payload"].get("side"))
-                     for event in journal.events(target) if event["kind"] == "order_ack"}
+        events = journal.events(target) if target else []
+        booked = [event["payload"] for event in events if event["kind"] == "fill"]
+        cursors = replay_fills(booked, config)[1]
+        acked = {str(event["payload"].get("order_no")): str(event["payload"].get("side"))
+                 for event in events if event["kind"] == "order_ack"}
         additions: list[dict[str, Any]] = []
-        for row in filled.get(symbol, []):
-            order_no = order_number(row)
-            if order_no in elsewhere and order_no not in cursors and order_no not in acked:
+        for order_no, fill in fills.items():
+            if fill["symbol"] != symbol or (order_no in elsewhere and order_no not in cursors and order_no not in acked):
                 continue
-            total = _strict_quantity(_value(row, "DEAL_TOTL", "DealQty", "FilledQty", default=0), "filled quantity")
             previous = cursors.get(order_no, 0)
-            if total < previous:
+            if fill["total"] < previous:
                 raise RecoveryRefused(f"journal holds more fills than TTB for {symbol} order {order_no}")
-            if total == previous:
+            if fill["total"] == previous:
                 continue
-            side = _explicit_side(_value(row, "BS", "Side", "ComdBS1"))
-            price = _float(_value(row, "DEAL_PRCE", "DealPrice", default=0))
-            if not side or price <= 0 or acked.get(order_no, side) != side:
-                raise RecoveryRefused(f"TTB fill of {symbol} order {order_no} has no usable side/price")
-            delta = total - previous
+            if acked.get(order_no, fill["side"]) != fill["side"]:
+                raise RecoveryRefused(f"TTB side of {symbol} order {order_no} differs from the journaled order")
             additions.append({
-                "order_id": order_no, "side": side, "price": price, "quantity": delta,
-                "deal_total": total, "source": "auto_recovery",
+                "order_id": order_no, "side": fill["side"], "price": fill["price"],
+                "quantity": fill["total"] - previous, "deal_total": fill["total"], "source": "auto_recovery",
             })
-            position += delta if side == "buy" else -delta
-        if position != 0:
-            raise RecoveryRefused(
-                f"{symbol} journal ({target or 'no partition'}) does not reconcile with the TTB report "
-                f"(position {position} after {len(additions)} report fills); reconcile manually")
         if additions and not target:
             raise RecoveryRefused(f"{symbol} has unjournaled fills but no journal for trading days {list(days)}")
+        try:
+            position = replay_fills(booked + additions, config)[0].position
+        except JournalError as exc:
+            raise RecoveryRefused(f"{symbol} report fills would not replay: {exc}") from exc
+        if position != 0:
+            label = target or "no partition"
+            raise RecoveryRefused(
+                f"{symbol} journal ({label}) does not reconcile with the TTB report "
+                f"(position {position} after {len(additions)} report fills); reconcile manually")
         plan.extend((journal, target, payload) for payload in additions)
     return plan
 
@@ -271,9 +302,10 @@ def _reconcile_journals(
         for journal, day, payload in plan:
             journal.append("fill", payload, trading_day=day)
             written.append({"journal_fill": journal.symbol, "trading_day": day, **payload})
-        for symbol in sorted({journal.symbol for journal, _day, _payload in plan}):
+        for symbol, day in sorted({(journal.symbol, day) for journal, day, _payload in plan}):
             reread = ExecutionJournal(journal_dir, symbol)
-            if any(reread.replay_ledger(day, StrategyConfig(symbol=symbol))[0].position for day in days):
+            if any(reread.replay_ledger(check, StrategyConfig(symbol=symbol))[0].position
+                   for check in {day, *days}):
                 raise RecoveryRefused(f"{symbol} journal still not flat after reconciliation")
     except (JournalError, RuntimeError) as exc:
         reason = str(exc) if isinstance(exc, RecoveryRefused) else f"execution journal unusable: {exc}"

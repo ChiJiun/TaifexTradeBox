@@ -16,8 +16,15 @@ from ttb.journal import ExecutionJournal, JournalError, JournalLock
 from ttb.orders import TTBOrderGateway
 
 DAY = "2026-10-30"
+PREVIOUS_DAY = "2026-10-29"
 SYMBOL = "CCFK6"
 TAIPEI = timezone(timedelta(hours=8))
+
+
+def market_row(order_no, qty, filled, price="108.5"):
+    """An auto-recovery market IOC buy in the TTB order report."""
+    return {"ORDNO": order_no, "COMD_ID": SYMBOL, "BS": "B", "ORDR_PRCE": "0", "VOLM": qty, "LESS_VOLM": "0",
+            "DEAL_TOTL": filled, "DEAL_PRCE": price, "STAT": "完全成交" if qty == filled else "已刪除"}
 
 
 def short(qty="3"):
@@ -168,14 +175,14 @@ class PartialMarketIocTests(RecoveryCase):
 
 
 class JournalReconciliationTests(RecoveryCase):
-    def bot_journal(self, quantity=3):
+    def bot_journal(self, quantity=3, day=DAY):
         """What the bot journaled before it stopped: a short of `quantity` lots."""
         journal = ExecutionJournal(self.journal_dir, SYMBOL)
         journal.append("order_ack", {"order_no": "S1", "side": "sell", "quantity": quantity, "price": 110.0,
-                                     "role": "entry", "source": "report"}, DAY)
+                                     "role": "entry", "source": "report"}, day)
         journal.append("fill", {"order_id": "S1", "side": "sell", "price": 110.0,
-                                "quantity": quantity, "deal_total": quantity}, DAY)
-        journal.append("shutdown", {"position": -quantity, "fatal_error": "", "reconciled": False}, DAY)
+                                "quantity": quantity, "deal_total": quantity}, day)
+        journal.append("shutdown", {"position": -quantity, "fatal_error": "", "reconciled": False}, day)
         return journal
 
     def restart_engine(self):
@@ -229,6 +236,49 @@ class JournalReconciliationTests(RecoveryCase):
         self.flag.write_text("x", encoding="ascii")
         self.recover(FakeBroker(rows), journal_dir=self.journal_dir, journal_days=(DAY,))
         self.assertEqual(len(self.recovery_fills()), 2)
+
+    def test_repeated_report_rows_of_one_order_are_booked_once(self):
+        # TTB may list one order on several rows (partial, then final).
+        self.bot_journal()
+        rows = [bot_order_row(), market_row("Dm1", "3", "1"), market_row("Dm1", "3", "2"), market_row("Dm2", "1", "1")]
+        self.recover(FakeBroker(rows), journal_dir=self.journal_dir, journal_days=(DAY,))
+        self.assertEqual([(f["order_id"], f["quantity"], f["deal_total"]) for f in self.recovery_fills()],
+                         [("Dm1", 2, 2), ("Dm2", 1, 1)])
+        self.assertFalse(self.flag.exists())
+        self.assertEqual(self.restart_engine().ledger.position, 0)
+
+    def test_duplicate_rows_that_only_balance_twice_write_nothing(self):
+        # Counting Dm1 twice would net to 0 but leave an unreplayable journal.
+        self.bot_journal(quantity=2)
+        path = self.journal_dir / f"events-{SYMBOL}-{DAY}.jsonl"
+        before = path.read_bytes()
+        rows = [bot_order_row(qty="2"), market_row("Dm1", "1", "1"), market_row("Dm1", "1", "1")]
+        with self.assertRaisesRegex(RecoveryRefused, "does not reconcile"):
+            self.recover(FakeBroker(rows), journal_dir=self.journal_dir, journal_days=(DAY,))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(self.flag.exists())
+
+    def test_deferred_recovery_books_the_carried_position_into_its_own_day(self):
+        # Short 3 left at yesterday's close; recovery deferred, flattens at today's open.
+        self.bot_journal(day=PREVIOUS_DAY)
+        ExecutionJournal(self.journal_dir, SYMBOL).append(
+            "broker_report", {"orders": [], "reported_position": -3}, DAY)  # today's failed startup
+        broker = FakeBroker(positions=[short("3")], deal_price="108.5")
+        self.assertEqual(self.recover(broker, journal_dir=self.journal_dir, journal_days=(DAY,))["action"],
+                         "recovered")
+        journal = ExecutionJournal(self.journal_dir, SYMBOL)
+        self.assertEqual([e["payload"]["order_id"] for e in journal.events(PREVIOUS_DAY)
+                          if e["payload"].get("source") == "auto_recovery"], ["Dm00001"])
+        self.assertEqual(journal.replay_ledger(PREVIOUS_DAY, StrategyConfig(symbol=SYMBOL))[0].position, 0)
+        self.assertEqual(self.restart_engine().ledger.position, 0)
+        self.assertFalse(self.flag.exists())
+
+    def test_stale_open_journal_of_an_earlier_day_does_not_block_recovery(self):
+        self.bot_journal(day=PREVIOUS_DAY)  # never reconciled, and not replayed today
+        self.assertEqual(self.recover(FakeBroker(), journal_dir=self.journal_dir,
+                                      journal_days=(DAY,))["action"], "already_clean")
+        self.assertFalse(self.flag.exists())
+        self.assertEqual(self.recovery_fills(), [])
 
     def test_journal_that_disagrees_with_the_report_fails_closed_unwritten(self):
         self.bot_journal(quantity=2)  # journal -2, but TTB is short 3

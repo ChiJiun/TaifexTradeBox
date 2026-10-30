@@ -7,7 +7,7 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from strategy_core import Fill, PositionLedger, StrategyConfig
 
@@ -190,26 +190,30 @@ class ExecutionJournal:
             return record
 
     def replay_ledger(self, trading_day: str, config: StrategyConfig) -> tuple[PositionLedger, dict[str, int]]:
-        ledger = PositionLedger(config)
-        filled_totals: dict[str, int] = {}
-        for event in self.events(trading_day):
-            if event["kind"] != "fill":
-                continue
-            row = event["payload"]
-            try:
-                order_id = str(row["order_id"])
-                total = int(row["deal_total"])
-                delta = int(row["quantity"])
-                side = str(row["side"])
-                price = float(row["price"])
-                if (
-                    not order_id or side not in ("buy", "sell") or delta <= 0 or
-                    total <= filled_totals.get(order_id, 0) or
-                    total - filled_totals.get(order_id, 0) != delta or price <= 0
-                ):
-                    raise ValueError("invalid fill cursor")
-                ledger.on_fill(Fill(side, price, delta, order_id))
-                filled_totals[order_id] = total
-            except (KeyError, ValueError, TypeError) as exc:
-                raise JournalError("cannot replay fill; execution journal corrupt") from exc
-        return ledger, filled_totals
+        return replay_fills(
+            (event["payload"] for event in self.events(trading_day) if event["kind"] == "fill"), config,
+        )
+
+
+def replay_fills(fills: Iterable[dict[str, Any]], config: StrategyConfig) -> tuple[PositionLedger, dict[str, int]]:
+    """Replay fill payloads with the journal's cursor rules; also vets fills before they are appended."""
+    ledger = PositionLedger(config)
+    filled_totals: dict[str, int] = {}
+    for row in fills:
+        try:
+            order_id = str(row["order_id"])
+            total = int(row["deal_total"])
+            delta = int(row["quantity"])
+            side = str(row["side"])
+            price = float(row["price"])
+            if (
+                not order_id or side not in ("buy", "sell") or delta <= 0 or
+                total <= filled_totals.get(order_id, 0) or
+                total - filled_totals.get(order_id, 0) != delta or price <= 0
+            ):
+                raise ValueError("invalid fill cursor")
+            ledger.on_fill(Fill(side, price, delta, order_id))
+            filled_totals[order_id] = total
+        except (KeyError, ValueError, TypeError) as exc:
+            raise JournalError("cannot replay fill; execution journal corrupt") from exc
+    return ledger, filled_totals

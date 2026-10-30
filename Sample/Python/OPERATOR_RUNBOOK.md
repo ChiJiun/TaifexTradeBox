@@ -63,6 +63,14 @@ py -3.13 reconcile_ttb.py --clear-flag `
 
 **限制**：TTB 沒有供此工具可靠確認目前登入競賽/帳戶身分的已驗證 API，且訂單與持倉快照不是交易所層級的原子查詢。兩次查詢可以降低但不能消除檢查與清除間狀態變化的風險。因此 CLI 的四個確認是人工責任，而非程式已驗證身分的證明。
 
+### 3a. 帳戶已平，但 auto-recovery 因 journal 對不上而拒絕
+
+auto-recovery 會把 bot 沒有記到的成交，依 TTB 委託回報補進 `output/journal/events-<標的>-<交易日>.jsonl`。只有補記後重放會剛好歸 0，它才寫入、清旗標。拒絕原因是 `journal ... does not reconcile`、`journal holds more fills than TTB`、`execution journal unusable` 等時，表示 journal 和回報對不上，它**一筆都沒寫**。這時只執行 `--clear-flag` 沒有用：bot 啟動時重放當日 journal，部位仍然不是 0，會再次 exit 2。
+
+1. 在 GUI 核對當日所有委託的成交（單號、買賣別、成交口數、成交價），找出 journal 少記或多記的地方。拒絕訊息與 `output/reconciliation` 稽核檔裡有部位差額。
+2. 停止 supervisor。journal 有雜湊鏈，**不要直接編輯 jsonl**。只能用 `ExecutionJournal(Path("output/journal"), "<標的>").append("fill", {"order_id": ..., "side": "buy"/"sell", "price": ..., "quantity": ..., "deal_total": ..., "source": "manual"}, "<交易日>")` 追加缺少的成交；`deal_total` 是該委託的累計成交口數。
+3. 用 `replay_ledger("<交易日>", StrategyConfig(symbol="<標的>"))` 確認部位為 0，再依第 3 節用 `--clear-flag` 清除旗標。
+
 ## 4. 重新驗收後啟動
 
 ```powershell
