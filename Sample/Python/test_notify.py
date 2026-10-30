@@ -130,6 +130,62 @@ class WatchdogRetryTests(unittest.TestCase):
     def test_a_persistent_failure_still_fails_after_every_attempt(self):
         self.assertEqual(self.run_watchdog(failures=99), (2, 3))
 
+    def test_recovery_posts_a_chinese_utf8_message_to_the_webhook(self):
+        import http.server
+        import json
+        import threading
+        bodies = []
+
+        class Hook(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                bodies.append((self.headers.get("Content-Type"), self.rfile.read(int(self.headers["Content-Length"]))))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Hook)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as work:
+                check = Path(work) / "automation" / "check_ttb_health.ps1"
+                check.parent.mkdir()
+                check.write_text("exit 0\n", encoding="utf-8")
+                state = Path(work) / "output" / "supervisor" / "health-watchdog-state.json"
+                state.parent.mkdir(parents=True)
+                state.write_text(json.dumps({"alerted": True, "lastAlertAt": "2026-10-30T09:21:00+08:00"}),
+                                 encoding="utf-8")
+                subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(HERE / "automation" / "health_watchdog.ps1"), "-WorkDir", work,
+                     "-AlertWebhookUrl", f"http://127.0.0.1:{server.server_port}/hook"],
+                    capture_output=True, text=True, timeout=120, check=True)
+        finally:
+            server.shutdown()
+        self.assertEqual(len(bodies), 1)
+        content_type, raw = bodies[0]
+        self.assertIn("charset=utf-8", content_type)
+        payload = json.loads(raw.decode("utf-8"))
+        self.assertEqual(payload["kind"], "recovery")
+        self.assertTrue(payload["content"].startswith("✅【已恢復】TaifexTradeBox bot 健康檢查恢復正常"),
+                        payload["content"])
+        self.assertIn("故障通知發於 09:21", payload["content"])
+
+
+class WatchdogMessageTests(unittest.TestCase):
+    def test_failure_message_says_it_failed_and_gives_the_exit_code(self):
+        script = (HERE / "automation" / "health_watchdog.ps1").read_text(encoding="utf-8-sig")
+        body = script[script.index("function Format-AlertSummary"):script.index("$alerted = ")]
+        command = f"{body}\nFormat-AlertSummary 'failure' 2 'ttb-sim-gcp' $null"
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                                 "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n" + command],
+                                capture_output=True, timeout=60, check=True)
+        text = result.stdout.decode("utf-8").strip()
+        self.assertTrue(text.startswith("🔴【故障】TaifexTradeBox bot 健康檢查失敗"), text)
+        self.assertIn("exit=2", text)
+        self.assertIn("ttb-sim-gcp", text)
+
 
 if __name__ == "__main__":
     unittest.main()
