@@ -51,11 +51,14 @@ function Format-AlertSummary([string]$Kind, [int]$ExitCode, [string]$HostName, $
         # Show Taipei time whatever the host's time zone; a repeat alert
         # moves lastAlertAt, so it is the latest failure alert, not the first.
         $since = ''
+        # An unreadable time must not stop the recovery alert itself.
         if ($LastAlertAt) {
-            $at = [TimeZoneInfo]::ConvertTime(
-                [datetimeoffset]::Parse([string]$LastAlertAt, [Globalization.CultureInfo]::InvariantCulture),
-                [TimeZoneInfo]::FindSystemTimeZoneById('Taipei Standard Time'))
-            $since = '，最後一次故障通知於 ' + $at.ToString('MM/dd HH:mm')
+            try {
+                $at = [TimeZoneInfo]::ConvertTime(
+                    [datetimeoffset]::Parse([string]$LastAlertAt, [Globalization.CultureInfo]::InvariantCulture),
+                    [TimeZoneInfo]::FindSystemTimeZoneById('Taipei Standard Time'))
+                $since = '，最後一次故障通知於 ' + $at.ToString('MM/dd HH:mm')
+            } catch {}
         }
         return "✅【已恢復】TaifexTradeBox bot 健康檢查恢復正常（主機 $HostName$since）"
     }

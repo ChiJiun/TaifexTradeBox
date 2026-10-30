@@ -187,6 +187,11 @@ class WatchdogMessageTests(unittest.TestCase):
         text = self.summary("Format-AlertSummary 'recovery' 0 'vm' '2026-10-30T01:21:00Z'")
         self.assertIn("最後一次故障通知於 10/30 09:21", text)
 
+    def test_an_unreadable_alert_time_still_gives_the_recovery_message(self):
+        text = self.summary("Format-AlertSummary 'recovery' 0 'vm' 'not a time'")
+        self.assertTrue(text.startswith("✅【已恢復】"), text)
+        self.assertNotIn("最後一次故障通知於", text)
+
     def test_failure_message_says_it_failed_and_gives_the_exit_code(self):
         text = self.summary("Format-AlertSummary 'failure' 2 'ttb-sim-gcp' $null")
         self.assertTrue(text.startswith("🔴【故障】TaifexTradeBox bot 健康檢查失敗"), text)
