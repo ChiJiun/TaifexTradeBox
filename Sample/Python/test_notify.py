@@ -130,6 +130,8 @@ class WatchdogRetryTests(unittest.TestCase):
     def test_a_persistent_failure_still_fails_after_every_attempt(self):
         self.assertEqual(self.run_watchdog(failures=99), (2, 3))
 
+
+class WatchdogMessageTests(unittest.TestCase):
     def test_recovery_posts_a_chinese_utf8_message_to_the_webhook(self):
         import http.server
         import json
@@ -170,18 +172,23 @@ class WatchdogRetryTests(unittest.TestCase):
         self.assertEqual(payload["kind"], "recovery")
         self.assertTrue(payload["content"].startswith("✅【已恢復】TaifexTradeBox bot 健康檢查恢復正常"),
                         payload["content"])
-        self.assertIn("故障通知發於 09:21", payload["content"])
+        # Taipei time even on a UTC host (the CI runner).
+        self.assertIn("最後一次故障通知於 10/30 09:21", payload["content"])
 
-
-class WatchdogMessageTests(unittest.TestCase):
-    def test_failure_message_says_it_failed_and_gives_the_exit_code(self):
+    def summary(self, call):
         script = (HERE / "automation" / "health_watchdog.ps1").read_text(encoding="utf-8-sig")
         body = script[script.index("function Format-AlertSummary"):script.index("$alerted = ")]
-        command = f"{body}\nFormat-AlertSummary 'failure' 2 'ttb-sim-gcp' $null"
         result = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
-                                 "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n" + command],
+                                 "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n" + body + "\n" + call],
                                 capture_output=True, timeout=60, check=True)
-        text = result.stdout.decode("utf-8").strip()
+        return result.stdout.decode("utf-8").strip()
+
+    def test_recovery_time_is_taipei_time_whatever_the_alert_offset(self):
+        text = self.summary("Format-AlertSummary 'recovery' 0 'vm' '2026-10-30T01:21:00Z'")
+        self.assertIn("最後一次故障通知於 10/30 09:21", text)
+
+    def test_failure_message_says_it_failed_and_gives_the_exit_code(self):
+        text = self.summary("Format-AlertSummary 'failure' 2 'ttb-sim-gcp' $null")
         self.assertTrue(text.startswith("🔴【故障】TaifexTradeBox bot 健康檢查失敗"), text)
         self.assertIn("exit=2", text)
         self.assertIn("ttb-sim-gcp", text)

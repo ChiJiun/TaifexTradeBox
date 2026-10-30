@@ -48,7 +48,15 @@ function Test-MarketHours([datetime]$At) {
 # Operators read these on a phone; say plainly whether the bot broke or recovered.
 function Format-AlertSummary([string]$Kind, [int]$ExitCode, [string]$HostName, $LastAlertAt) {
     if ($Kind -eq 'recovery') {
-        $since = if ($LastAlertAt) { '，故障通知發於 ' + ([datetime]$LastAlertAt).ToString('HH:mm') } else { '' }
+        # Show Taipei time whatever the host's time zone; a repeat alert
+        # moves lastAlertAt, so it is the latest failure alert, not the first.
+        $since = ''
+        if ($LastAlertAt) {
+            $at = [TimeZoneInfo]::ConvertTime(
+                [datetimeoffset]::Parse([string]$LastAlertAt, [Globalization.CultureInfo]::InvariantCulture),
+                [TimeZoneInfo]::FindSystemTimeZoneById('Taipei Standard Time'))
+            $since = '，最後一次故障通知於 ' + $at.ToString('MM/dd HH:mm')
+        }
         return "✅【已恢復】TaifexTradeBox bot 健康檢查恢復正常（主機 $HostName$since）"
     }
     return "🔴【故障】TaifexTradeBox bot 健康檢查失敗（exit=$ExitCode，主機 $HostName），請查看 supervisor.log"
@@ -72,10 +80,11 @@ if ($shouldAlert -and $AlertWebhookUrl) {
     $summary = Format-AlertSummary $kind $exitCode $env:COMPUTERNAME $lastAlertAt
     $detailText = $output.Trim()
     if ($detailText.Length -gt 1500) { $detailText = $detailText.Substring(0, 1500) }
+    $message = if ($detailText) { "$summary`n詳細：$detailText" } else { $summary }
     $payload = [ordered]@{
         # content (Discord) / text (Slack) let common chat webhooks render it.
-        content = "$summary`n詳細：$detailText"
-        text = "$summary`n詳細：$detailText"
+        content = $message
+        text = $message
         source = 'TaifexTradeBox'
         kind = $kind
         checkedAt = $now.ToString('o')
