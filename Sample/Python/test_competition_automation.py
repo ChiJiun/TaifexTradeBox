@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from datetime import date
@@ -697,6 +698,24 @@ class CompetitionConfigTests(unittest.TestCase):
         self.assertIn("IsNullOrWhiteSpace([string]$current.$keep)", set_mode)
         template = json.loads((HERE / "automation" / "config.competition.example.json").read_text(encoding="utf-8"))
         self.assertIs(template["autoLogin"], True)
+
+    def test_no_script_variable_aliases_a_typed_parameter_by_case(self):
+        # PowerShell names ignore case, so `$template = ... | ConvertFrom-Json`
+        # under `[string]$Template` silently became a string and broke
+        # set_mode.ps1 -Mode ttb on the VM (2026-10-30).
+        root = HERE.parents[1]
+        offenders = []
+        for path in sorted(root.rglob("*.ps1")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            block = re.search(r"(?is)^\s*param\s*\((.*?)\)\s*$", text, re.M)
+            if not block:
+                continue
+            params = re.findall(r"\[\w+\]\s*\$(\w+)", block.group(1))
+            for name in params:
+                for match in re.finditer(rf"(?im)^\s*\$({name})\s*=(?!=)", text[block.end():]):
+                    if match.group(1) != name:
+                        offenders.append(f"{path.relative_to(root)}: ${match.group(1)} vs [{name}]")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":
