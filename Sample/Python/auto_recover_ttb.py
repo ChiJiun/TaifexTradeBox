@@ -1,12 +1,15 @@
 """Unattended recovery for a TTB competition account used ONLY by this bot.
 
-Cancels every working order, flattens TXF/MTX/TMF futures with market IOC
-orders, verifies a clean account twice and then clears
+Cancels every working order, flattens supported futures with market IOC
+orders (resending the unfilled rest a bounded number of times), verifies a
+clean account twice, books the fills the bot never saw into its execution
+journal so a same-day restart replays flat, and then clears
 output/supervisor/manual-reconciliation-required.flag. Each action is audited
 under output/reconciliation. Bounded by a durable per-day attempt budget.
 
 Exit codes: 0 clean/recovered, 3 deferred (retry later), 2 refused (manual).
-Never run this while sim_hft_bot.py is running; the supervisor guarantees it.
+Never run this while sim_hft_bot.py is running; the supervisor guarantees it,
+and the bot's lock on the journal directory makes this refuse if it is.
 """
 from __future__ import annotations
 
@@ -29,6 +32,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--audit-dir", type=Path, default=Path("output/reconciliation"))
     parser.add_argument("--budget-file", type=Path, default=Path("output/supervisor/auto-recovery.json"))
     parser.add_argument("--calendar-file", type=Path, default=Path("automation/taifex_calendar_2026.json"))
+    parser.add_argument("--journal-dir", type=Path, default=Path("output/journal"),
+                        help="the bot's execution journal directory (sim_hft_bot --journal-dir)")
     parser.add_argument("--max-attempts-per-day", type=int, default=3)
     parser.add_argument("--max-flatten-qty", type=int, default=10)
     parser.add_argument("--confirm-exclusive-bot-account", action="store_true",
@@ -41,6 +46,18 @@ def market_open(calendar_file: Path) -> bool:
         return SessionSchedule(calendar=TradingCalendar.from_file(calendar_file)).status().trading
     except Exception:
         return False
+
+
+def journal_days(calendar_file: Path) -> tuple[str, ...]:
+    """Trading days a bot restarted now may replay, with or without after-hours sessions."""
+    try:
+        calendar = TradingCalendar.from_file(calendar_file)
+    except Exception:
+        calendar = None
+    return tuple(dict.fromkeys(
+        SessionSchedule(calendar=calendar, include_after_hours=after_hours).status().trading_day
+        for after_hours in (False, True)
+    ))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             api, flag=args.flag, audit_dir=args.audit_dir,
             budget=AttemptBudget(args.budget_file, policy.max_attempts_per_day),
             policy=policy, market_open=market_open(args.calendar_file),
+            journal_dir=args.journal_dir, journal_days=journal_days(args.calendar_file),
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0

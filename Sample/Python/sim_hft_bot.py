@@ -26,6 +26,7 @@ from ttb.calendar import (
 )
 from datetime import datetime
 from ttb.status_server import StatusServer
+from ttb.journal import JournalError, JournalLock
 from ttb.risk import PreTradeLimits
 from ttb.contracts import point_value_for
 from ttb.orders import (
@@ -322,6 +323,14 @@ def main(argv: list[str] | None = None) -> int:
             journal_dir=args.journal_dir, margin_cache_seconds=args.margin_cache_seconds,
         )
     )
+    # Held for the whole run (the OS drops it on a crash): auto-recovery must
+    # never trade or rewrite the journal while this bot can still trade.
+    journal_lock = None
+    if isinstance(gateway, TTBOrderGateway):
+        try:
+            journal_lock = JournalLock(gateway.journal.directory).acquire()
+        except JournalError as exc:
+            raise SystemExit(f"execution journal already in use: {exc}") from exc
     strategy = build_strategy(args, config, ledger)
     calendar = None
     contract = None
@@ -397,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
         monitor.close()
         status_server.close()
         engine.close()
+        if journal_lock is not None:
+            journal_lock.release()
         LOG.info(
             "finished realized=%.2f fees_tax=%.2f position=%s output=%s",
             ledger.realized_pnl,

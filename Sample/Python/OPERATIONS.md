@@ -74,7 +74,7 @@ py -3.13 sim_hft_bot.py --symbol <CURRENT_VERIFIED_SYMBOL> --mode shadow
 - 交易時段行情距上次有效報價超過預設 **5 秒**，進入 `stale_market_data`：停止新的入口並處理已知掛單。第一次報價另有啟動寬限時間，不能把 5 秒理解為任何狀態下都立即退出。
 - 自收到過行情起，持續超過預設 **120 秒** 的中斷會 Fail-Closed 結束（可用 `--stale-fatal-seconds` 調整）。收到連續預設 **3 筆**新鮮行情後才可能恢復正常報價。
 - 程式在同一風控交易日保存 `risk-state.json`，並將成交等事件寫入 Journal。**不能將持久化風控等同於自動辨識或回復帳戶未知持倉。** 回覆矛盾、磁碟故障、Journal 損毀都應停止並人工對帳。
-- Ctrl+C／停止旗標會啟動既有關機對帳；**預設不會保證主動平倉**。`--flatten-on-shutdown`（Supervisor `flattenOnShutdown`）只有在允許條件下**嘗試**平倉，可能失敗或部分成交，並不是可靠的斷線平倉保證。
+- Ctrl+C／停止旗標會啟動既有關機對帳；**預設不會保證主動平倉**。`--flatten-on-shutdown`（Supervisor `flattenOnShutdown`）只有在允許條件下**嘗試**平倉：限價 IOC 依序以對手價再穿 2、5、10 檔送出（最多 3 張，每張都等前一張終結、成交入帳且部位回報一致才送剩餘口數；價格離對手價最多 3%：對手價本身在 ±10% 漲跌停內，只有行情離漲跌停不到 3% 時才可能被拒單，不會盲目重送），仍可能失敗或部分成交，並不是可靠的斷線平倉保證；失敗時 bot 以非 0 結束，由 auto-recovery 的市價 IOC 接手。
 - `/healthz` 表示程序存活，`/readyz` **只有 `healthy` 才 ready**，`/status` 提供完整 health。休市 `waiting_market` 不表示故障，但也不是交易就緒。特別是 `health.updated_at` 可在無有效行情時持續更新；驗證行情新鮮度必須使用 `last_quote_wall_utc`／`last_quote_exchange_time` 及 QuoteMonitor 的完整性計數器，不可只看心跳時間。
 
 ## 4. 異常與人工恢復
@@ -115,7 +115,7 @@ py -3.13 ttb_readonly_capture.py
 |---|---|
 | `symbol: "auto:TMF"`（也支援 `auto:TXF`、`auto:MTX`） | 依核准日曆選近月；到期日當天（13:30 收盤、無夜盤）起改用次月。bot 持倉或有掛單時**不換月**，空倉後以 exit 0 結束，由 supervisor 以新月份重啟。查詢：`py -3.13 -m automation.resolve_symbol auto:TMF` |
 | `automation/ttb_login.py`（`autoLogin: true`） | 以 UI Automation 填入 Windows 認證管理員 `TaifexTradeBox/TTB` 的帳密、按「登入」、選 `ttbCompetition` 競賽，最後以唯讀 API 確認 `QUERYMARGIN`／委託／部位都回 `0000`。登入前強制**關閉** TTB「下單失敗每 5 秒自動重送」（`chkAutoPut`，TTB 預設為開），否則 TTB 會自行重送 bot 不認得的委託；並保持「斷線自動重連」開啟。live（`mode: "ttb"`）時 supervisor 加 `--require-auto-resubmit-off`：即使 TTB 已經登入，也會讀取 `chkAutoPut`，必要時關閉並套用；讀不到或關不掉就登入失敗，不啟動 bot。密碼不寫入檔案或 log。 |
-| `auto_recover_ttb.py`（`autoRecovery`） | bot 非正常退出或啟動時帳戶不乾淨：撤銷**全部**工作中委託、以市價 IOC 平掉 TXF/MTX/TMF 期貨部位、兩次唯讀檢查皆乾淨才清除 `manual-reconciliation-required.flag`，每步驟寫入 `output/reconciliation` 稽核。每日最多 `maxAttemptsPerDay` 次（`output/supervisor/auto-recovery.json` 持久化），超過、遇到選擇權／超量部位、或平倉後仍不平，就維持鎖定並由 Watchdog 告警，回到 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md) 人工流程。休市帶倉會延到下一個交易時段再處理。 |
+| `auto_recover_ttb.py`（`autoRecovery`） | bot 非正常退出或啟動時帳戶不乾淨：撤銷**全部**工作中委託、以市價 IOC 平掉支援的期貨部位（部分成交時，確認該張 IOC 已終結且部位回報與成交一致後才重送剩餘口數，每個標的最多 3 張）、兩次唯讀檢查皆乾淨後，再把 bot 沒記到的成交（自己的平倉單、或 bot 停止後才成交的 bot 委託）依 TTB 委託回報以 `fill` 事件補進 `output/journal` 當日 journal，重放後每個標的都歸 0 才清除 `manual-reconciliation-required.flag`；journal 與回報對不上或 journal 損毀時不寫入、維持鎖定。bot 執行期間持有 `output/journal/writer.lock` 檔案鎖，auto-recovery 拿不到鎖（bot 還在跑）就不做任何動作。每步驟寫入 `output/reconciliation` 稽核。每日最多 `maxAttemptsPerDay` 次（`output/supervisor/auto-recovery.json` 持久化），超過、遇到選擇權／超量部位、或平倉後仍不平，就維持鎖定並由 Watchdog 告警，回到 [OPERATOR_RUNBOOK.md](OPERATOR_RUNBOOK.md) 人工流程。休市帶倉會延到下一個交易時段再處理。 |
 | `run_ttb_automation.ps1` | 每輪：確保 TTB 執行 → 等 8080/51141 → 自動登入（失敗每 60 秒重試）→ 需要時自動恢復 → 啟動 bot。 |
 
 **部署全步驟（依序執行；1–6 一次性，7 以後每次上線）**

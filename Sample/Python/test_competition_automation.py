@@ -411,19 +411,41 @@ class HttpModuleTests(unittest.TestCase):
 class FakeBroker:
     """Mutable TTB account: cancels and market IOC orders take effect."""
 
-    def __init__(self, orders=(), positions=(), fills_market=True, code="0000"):
+    def __init__(self, orders=(), positions=(), fills_market=True, code="0000",
+                 liquidity=None, deal_price="109.5", position_lag_polls=0):
         self.orders = [dict(row) for row in orders]
         self.positions = [dict(row) for row in positions]
         self.fills_market = fills_market
         self.code = code
         self.cancelled = []
         self.market_orders = []
+        # Lots each successive market IOC can fill (None: all of them).
+        self.liquidity = None if liquidity is None else list(liquidity)
+        self.deal_price = deal_price
+        # The position report shows the pre-fill rows this many more times.
+        self.position_lag_polls = position_lag_polls
+        self._stale_positions = None
+        self._stale_left = 0
 
     def query_orders(self):
         return {"Code": self.code, "Data": json.dumps(self.orders)}
 
     def query_positions(self):
+        if self._stale_left:
+            self._stale_left -= 1
+            return {"Code": self.code, "Data": json.dumps(self._stale_positions)}
         return {"Code": self.code, "Data": json.dumps(self.positions)}
+
+    def _signed(self, symbol):
+        return sum(int(row["Hold"]) * (1 if row["ComdBS1"] in ("B", "1") else -1)
+                   for row in self.positions if row["ComdID1"] == symbol)
+
+    def _book(self, symbol, side, quantity):
+        self._stale_positions, self._stale_left = [dict(row) for row in self.positions], self.position_lag_polls
+        signed = self._signed(symbol) + (quantity if side == "buy" else -quantity)
+        self.positions = [row for row in self.positions if row["ComdID1"] != symbol]
+        if signed:
+            self.positions.append({"ComdID1": symbol, "ComdBS1": "B" if signed > 0 else "S", "Hold": str(abs(signed))})
 
     def query_margin(self):
         return {"Code": self.code, "Data": "{}"}
@@ -435,9 +457,19 @@ class FakeBroker:
                 row.update(LESS_VOLM="0", STAT="已取消")
 
     def new_market_ioc(self, symbol, side, quantity):
+        # Like TTB: OrdNo only in the report, unfilled IOC remainder deleted.
         self.market_orders.append((symbol, side, quantity))
-        if self.fills_market:
-            self.positions = [row for row in self.positions if row["ComdID1"] != symbol]
+        filled = quantity if self.fills_market else 0
+        if self.liquidity is not None:
+            filled = min(quantity, self.liquidity.pop(0) if self.liquidity else 0)
+        self.orders.append({
+            "ORDNO": f"Dm{len(self.market_orders):05d}", "COMD_ID": symbol, "BS": "B" if side == "buy" else "S",
+            "ORDR_PRCE": "0", "VOLM": str(quantity), "LESS_VOLM": "0", "DEAL_TOTL": str(filled),
+            "DEAL_PRCE": self.deal_price if filled else "0",
+            "STAT": "完全成交" if filled == quantity else "已刪除",
+        })
+        if filled:
+            self._book(symbol, side, filled)
         return {"Code": "0000"}
 
 

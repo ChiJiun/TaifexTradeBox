@@ -16,6 +16,60 @@ class JournalError(RuntimeError):
     """A corrupted/unwritable execution journal must stop all live trading."""
 
 
+class JournalLock:
+    """Exclusive OS lock on a journal directory, held by the live bot for its whole run.
+
+    The OS releases it when the holder exits, even on a crash, so a lock that
+    cannot be taken proves a live process (the bot) still owns the journals.
+    Offline writers such as auto-recovery take it before touching them.
+    """
+
+    NAME = "writer.lock"
+
+    def __init__(self, directory: Path) -> None:
+        self.path = Path(directory) / self.NAME
+        self._handle: Any = None
+
+    def acquire(self) -> "JournalLock":
+        if self._handle is not None:
+            return self
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise JournalError(f"execution journal is locked by a running process: {self.path}") from exc
+        self._handle = handle
+        return self
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass  # closing the handle drops the lock anyway
+        finally:
+            handle.close()
+
+    def __enter__(self) -> "JournalLock":
+        return self.acquire()
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.release()
+
+
 class ExecutionJournal:
     """Append-only, fsync-backed, hash-chained JSONL partitioned by trading day.
 
@@ -36,10 +90,13 @@ class ExecutionJournal:
         self._cache: dict[str, list[dict[str, Any]]] = {}
         if validate_all:
             # Validate every retained partition on startup, not just today.
-            for path in sorted(self.directory.glob(f"events-{self.symbol}-*.jsonl")):
-                day = path.stem.rsplit("-", 3)[-3:]
-                date_text = "-".join(day)
+            for date_text in self.trading_days():
                 self._read(date_text)
+
+    def trading_days(self) -> list[str]:
+        """Trading days that have a partition on disk for this symbol."""
+        return ["-".join(path.stem.rsplit("-", 3)[-3:])
+                for path in sorted(self.directory.glob(f"events-{self.symbol}-*.jsonl"))]
 
     def _path(self, trading_day: str) -> Path:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", trading_day):
