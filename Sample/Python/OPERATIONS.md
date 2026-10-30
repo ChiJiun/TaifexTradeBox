@@ -145,6 +145,7 @@ GUI 自動登入已在 TTB 2026.07.08.1000（控制項 `txtAccnt`、`txtPwd`、`
 
 - **報價訂閱在 TTB GUI**：TTBHelp 的 `QUOTEDATA` 只開本機 ZMQ 監聽，TTB 只推送「報價設定」頁已加入的商品；TTB 登入時會對已存清單逐一查基本報價，查不到（例如盤前或收盤後）就把該商品從清單**永久刪除**（2026-10-28 在 VM 實測，見反編譯的 `BaseForm.LoadSymbol`）。所以 `ttb_login --subscribe <近月>` 每次登入都會檢查，缺少時自動按「新增訂閱」補回，supervisor log 回報 `subscribed`、`added` 或 `add_failed:[...]`。補訂失敗時 live gate 收不到報價會延後，下一輪登入再補；換月由 `resolve_symbol` 決定近月，不用手動加次月。
 - **委託回報輪詢間隔 `--poll-seconds 2`**：TTB 本機 API 的 `QUERYRESTOREREPORT` 與部位查詢各約 0.5 秒（2026-10-29 在 VM 實測 0.52／0.56 秒）。預設 0.5 秒輪詢會讓每一輪決策都卡約 1.1 秒，策略 30 秒內湊不到 `warmup_ticks`（30 筆），永遠停在 warmup。改為 2 秒後，成交最多晚約 2 秒才被偵測到。supervisor 只在啟動時讀 `config.json`，改設定後要重啟 `TTB Automation`。
+  - 每個 TTB 本機 API 請求都會先固定等 0.5 秒（反編譯 TTB `TradeController` 建構子的 `Thread.Sleep(500)`）。所以下單前不再額外查詢：剛輪詢完 0.5 秒內送出的單，沿用該次輪詢的委託表來綁定單號，超過 0.5 秒才重查；保證金依 `--margin-cache-seconds` 沿用。多數單的 API 時間從約 1.8 秒降到約 0.55 秒；部位或曝險增加時仍要查保證金，約 1.3 秒。輪詢改成先查部位、再查委託表，讓委託表是這一輪最新的資料。
 - **競賽組合策略 `strategies.portfolio:PortfolioStrategy`**：在 TX 上同時跑兩個子策略，真實帳戶只下它們部位的淨額。
   - **子策略**：
     - `burst`（`strategies.flow_momentum`）：45 秒內漲跌 80 點且 tick rule 量流同向時順勢市價進場，停利 100、停損 60、最多抱 60 秒。
