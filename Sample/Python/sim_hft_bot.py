@@ -8,12 +8,13 @@ from logging.handlers import RotatingFileHandler
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from strategies import MovingAverageStrategy
 from strategy_core import PositionLedger, StrategyConfig
-from ttb.api import TTBApi
+from ttb.api import SharedReportsApi, TTBApi
 from ttb.engine import BotEngine, CsvRecorder
 from ttb.market_data import QuoteMonitor, ZmqQuoteSubscriber
 from ttb.runtime import SessionSchedule, TAIPEI_TZ
@@ -25,6 +26,7 @@ from ttb.calendar import (
     resolve_symbol,
 )
 from datetime import datetime
+from ttb.health import HealthReporter
 from ttb.status_server import StatusServer
 from ttb.risk import PreTradeLimits
 from ttb.contracts import point_value_for
@@ -158,7 +160,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="required with --mode ttb; confirms the account has no position or working order",
     )
+    parser.add_argument(
+        "--leg-json", action="append", default=[],
+        help="JSON list of arguments for one more contract on the same account, applied over "
+             "this command line, e.g. [\"--symbol\", \"auto:CDF\", \"--tick-size\", \"5\"]; repeatable",
+    )
     return parser.parse_args(argv)
+
+
+def leg_namespaces(argv: list[str] | None = None) -> list[argparse.Namespace]:
+    """Parse the primary leg and every --leg-json leg.
+
+    A leg inherits the whole primary command line and only overrides what it
+    lists, because argparse keeps the last value of a repeated option.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    primary = parse_args(argv)
+    base: list[str] = []
+    skip = False
+    for item in argv:
+        if skip:
+            skip = False
+        elif item == "--leg-json":
+            skip = True
+        elif not item.startswith("--leg-json="):
+            base.append(item)
+    legs = [primary]
+    for raw in primary.leg_json:
+        try:
+            extra = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"--leg-json must be a JSON list of strings: {exc}") from exc
+        if not isinstance(extra, list) or not all(isinstance(item, str) for item in extra):
+            raise SystemExit("--leg-json must be a JSON list of strings")
+        if any(item == "--leg-json" or item.startswith("--leg-json=") for item in extra):
+            raise SystemExit("--leg-json cannot nest")
+        legs.append(parse_args(base + extra))
+    if len(legs) > 1:
+        for leg in legs:
+            name = leg.symbol.strip().upper().replace(":", "_")
+            # Per-leg files; the primary health path carries the combined view.
+            leg.output = leg.output / name
+            leg.leg_health_file = leg.health_file.with_name(f"{leg.health_file.stem}-{name}.json")
+            leg.risk_state_file = leg.risk_state_file.with_name(f"{leg.risk_state_file.stem}-{name}.json")
+    return legs
 
 
 def configure_logging(args: argparse.Namespace) -> None:
@@ -277,16 +322,50 @@ def roll_due(spec: str, current: str, calendar_file: Path, ledger: PositionLedge
     return True
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    configure_logging(args)
-    if args.mode == "ttb" and not args.confirm_virtual_orders:
-        raise SystemExit("--mode ttb requires --confirm-virtual-orders")
-    if args.mode == "ttb" and not args.confirm_flat_account:
-        raise SystemExit(
-            "TTB recovery is not automatic: verify a flat account and no orders, then pass --confirm-flat-account"
-        )
+SEVERE_STATES = ("error", "manual_reconciliation_required")
 
+
+def combined_health(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+    """One health view over every leg for watchdogs that read a single file.
+
+    Any failed leg fails the bot, and the bot is healthy while any leg
+    trades: a sparse contract paused on stale quotes is not an outage.
+    """
+    states = [str(item.get("state", "unknown")) for item in snapshots]
+    state = next((severe for severe in SEVERE_STATES if severe in states), None)
+    if state is None:
+        state = "healthy" if "healthy" in states else states[0]
+    positions = [item.get("position") for item in snapshots]
+    quote_times = [str(item["last_quote_wall_utc"]) for item in snapshots if item.get("last_quote_wall_utc")]
+    return {
+        "state": state,
+        "symbol": ",".join(str(item.get("symbol", "")) for item in snapshots),
+        "mode": snapshots[0].get("mode", "unknown"),
+        "strategy": snapshots[0].get("strategy", ""),
+        "process_id": snapshots[0].get("process_id"),
+        "position": None if any(p is None for p in positions) else sum(abs(float(p)) for p in positions),
+        "last_quote_wall_utc": max(quote_times) if quote_times else "",
+        "fatal_error": "; ".join(
+            f"{item.get('symbol')}: {item['fatal_error']}" for item in snapshots if item.get("fatal_error")
+        ),
+        "clean_shutdown": all(bool(item.get("clean_shutdown")) for item in snapshots),
+        "legs": snapshots,
+    }
+
+
+@dataclass
+class Leg:
+    args: argparse.Namespace
+    symbol_spec: str
+    auto_roll: bool
+    config: StrategyConfig
+    ledger: PositionLedger
+    gateway: Any
+    engine: BotEngine
+    monitor: QuoteMonitor
+
+
+def build_leg(args: argparse.Namespace, api: TTBApi) -> Leg:
     if args.max_exchange_lag_seconds <= 0:
         raise SystemExit("--max-exchange-lag-seconds must be positive")
     symbol_spec = args.symbol.strip()
@@ -308,7 +387,6 @@ def main(argv: list[str] | None = None) -> int:
         config.estimated_cycle_net(40_000),
     )
 
-    api = TTBApi.connect(args.host, args.zmq_port)
     ledger = PositionLedger(config)
     limits = PreTradeLimits(
         max_orders_per_minute=args.max_orders_per_minute,
@@ -359,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         gateway,
         args.output,
         strategy=strategy,
-        health_path=args.health_file,
+        health_path=getattr(args, "leg_health_file", args.health_file),
         quote_stale_seconds=args.quote_stale_seconds,
         stale_fatal_seconds=args.stale_fatal_seconds,
         resume_fresh_ticks=args.resume_fresh_ticks,
@@ -368,59 +446,126 @@ def main(argv: list[str] | None = None) -> int:
         flatten_on_shutdown=(args.mode == "ttb" and args.flatten_on_shutdown),
         feed_dead_seconds=args.feed_dead_seconds,
     )
-    strategy_name = args.strategy_module or args.strategy
-    engine.health.update(mode=args.mode, strategy=strategy_name)
+    engine.health.update(mode=args.mode, strategy=args.strategy_module or args.strategy)
     monitor = QuoteMonitor(
         api, args.zmq_port, config.symbol, engine.submit,
         max_exchange_lag_seconds=args.max_exchange_lag_seconds,
         on_status=lambda stats: engine.health.update(market_data=stats),
     )
+    return Leg(args, symbol_spec, auto_roll, config, ledger, gateway, engine, monitor)
+
+
+def main(argv: list[str] | None = None) -> int:
+    leg_args = leg_namespaces(argv)
+    args = leg_args[0]
+    configure_logging(args)
+    if args.mode == "ttb" and not args.confirm_virtual_orders:
+        raise SystemExit("--mode ttb requires --confirm-virtual-orders")
+    if args.mode == "ttb" and not args.confirm_flat_account:
+        raise SystemExit(
+            "TTB recovery is not automatic: verify a flat account and no orders, then pass --confirm-flat-account"
+        )
+    if any(leg.mode != args.mode for leg in leg_args):
+        raise SystemExit("every leg must use the same --mode")
+    multi = len(leg_args) > 1
+
+    api = TTBApi.connect(args.host, args.zmq_port)
+    if multi:
+        api = SharedReportsApi(api.module)
+    legs = [build_leg(leg, api) for leg in leg_args]
+    symbols = [leg.config.symbol for leg in legs]
+    if len(set(symbols)) != len(symbols):
+        raise SystemExit(f"each leg needs its own contract: {symbols}")
+    if multi:
+        combined = HealthReporter(args.health_file)
+
+        def snapshot() -> dict[str, Any]:
+            return combined_health([leg.engine.health.snapshot() for leg in legs])
+    else:
+        snapshot = legs[0].engine.health.snapshot
+    status_server = StatusServer(args.status_host, args.status_port, snapshot)
+    # One subscription to every symbol TTB publishes feeds all legs' dead-feed
+    # timers: a quiet contract on one leg is not a dead TTB feed.
+    def feed_tick(_raw: dict[str, Any]) -> None:
+        for leg in legs:
+            leg.engine.note_feed_tick()
+
     feed = (
-        ZmqQuoteSubscriber(args.zmq_port, "", lambda _raw: engine.note_feed_tick())
-        if args.feed_dead_seconds > 0 else None
+        ZmqQuoteSubscriber(args.zmq_port, "", feed_tick)
+        if any(leg.engine.feed_dead_seconds for leg in legs) else None
     )
-    status_server = StatusServer(args.status_host, args.status_port, engine.health.snapshot)
+
+    def stop_all() -> None:
+        for leg in legs:
+            leg.engine.stop_event.set()
 
     def stop_handler(_signum: int, _frame: Any) -> None:
-        engine.stop_event.set()
+        stop_all()
 
     signal.signal(signal.SIGINT, stop_handler)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, stop_handler)
     try:
-        engine.start()
+        if multi:
+            # Each leg's baseline demands a flat account, so all take it
+            # before the first one can send an order.
+            try:
+                for leg in legs:
+                    if isinstance(leg.gateway, TTBOrderGateway):
+                        leg.gateway.bootstrap()
+            except Exception as exc:
+                for leg in legs:
+                    leg.engine.fatal_error = leg.engine.fatal_error or f"account baseline refused: {exc}"
+                raise
+        for leg in legs:
+            leg.engine.start()
         status_server.start()
-        monitor.start()
+        for leg in legs:
+            leg.monitor.start()
         if feed is not None:
             feed.start()
-        LOG.info("monitoring %s; press Ctrl+C to stop", config.symbol)
+        LOG.info("monitoring %s; press Ctrl+C to stop", ", ".join(symbols))
         next_roll_check = time.monotonic() + max(5.0, args.roll_check_seconds)
-        while not engine.stop_event.wait(1.0):
+        while not legs[0].engine.stop_event.wait(1.0):
+            if multi:
+                combined.update(**snapshot())
+            # One leg stopping (fatal error, rollover) stops every leg; the
+            # supervisor restarts the whole bot.
+            if any(leg.engine.stop_event.is_set() for leg in legs):
+                stop_all()
             if args.stop_file is not None and args.stop_file.exists():
                 LOG.warning("operator stop requested by %s", args.stop_file)
-                engine.stop_event.set()
-            if auto_roll and time.monotonic() >= next_roll_check:
+                stop_all()
+            if time.monotonic() >= next_roll_check:
                 next_roll_check = time.monotonic() + max(5.0, args.roll_check_seconds)
-                if roll_due(symbol_spec, config.symbol, args.calendar_file, ledger, gateway):
-                    # A clean exit (code 0) lets the supervisor relaunch on
-                    # the new contract; shutdown still verifies a flat account.
-                    LOG.warning("front month moved away from %s; stopping for rollover", config.symbol)
-                    engine.health.update(rollover_from=config.symbol)
-                    engine.stop_event.set()
+                for leg in legs:
+                    if leg.auto_roll and roll_due(
+                        leg.symbol_spec, leg.config.symbol, leg.args.calendar_file, leg.ledger, leg.gateway
+                    ):
+                        # A clean exit (code 0) lets the supervisor relaunch on
+                        # the new contract; shutdown still verifies a flat account.
+                        LOG.warning("front month moved away from %s; stopping for rollover", leg.config.symbol)
+                        leg.engine.health.update(rollover_from=leg.config.symbol)
+                        stop_all()
     finally:
-        monitor.close()
+        for leg in legs:
+            leg.monitor.close()
         if feed is not None:
             feed.close()
         status_server.close()
-        engine.close()
-        LOG.info(
-            "finished realized=%.2f fees_tax=%.2f position=%s output=%s",
-            ledger.realized_pnl,
-            ledger.fees_and_tax,
-            ledger.position,
-            engine.recorder.path,
-        )
-    return 2 if engine.fatal_error or ledger.position else 0
+        for leg in legs:
+            leg.engine.close()
+            LOG.info(
+                "finished %s realized=%.2f fees_tax=%.2f position=%s output=%s",
+                leg.config.symbol,
+                leg.ledger.realized_pnl,
+                leg.ledger.fees_and_tax,
+                leg.ledger.position,
+                leg.engine.recorder.path,
+            )
+        if multi:
+            combined.update(**snapshot())
+    return 2 if any(leg.engine.fatal_error or leg.ledger.position for leg in legs) else 0
 
 
 if __name__ == "__main__":

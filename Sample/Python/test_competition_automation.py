@@ -662,8 +662,8 @@ class CompetitionConfigTests(unittest.TestCase):
         supervisor.index("Stop-Process -Name TTB", supervisor.index("$loginFailures -ge"))
         self.assertIn("$loginFailures = 0", supervisor)
         # The bot's --feed-dead-seconds only works when the liquid canary is
-        # subscribed in TTB next to the traded contract.
-        self.assertIn("@([string]$config.symbol, [string]$config.quoteCanary)", supervisor)
+        # subscribed in TTB next to every traded contract.
+        self.assertIn("@(Get-BotLegs | ForEach-Object { $_.symbol }) + @([string]$config.quoteCanary)", supervisor)
         self.assertIn("automation.live_gate", supervisor)
         self.assertLess(supervisor.index("automation.live_gate"), supervisor.index("launching bot mode="))
         installer = (HERE / "automation" / "install_azure_tasks.ps1").read_text(encoding="utf-8")

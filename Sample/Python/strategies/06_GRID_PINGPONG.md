@@ -67,6 +67,7 @@
 
 - `automation/config.grid-ccf.example.json`
 - `automation/config.grid-cdf.example.json`
+- `automation/config.grid-portfolio.example.json`（三檔同時跑，見下方「多標的組合」）
 
 切換方式：
 
@@ -84,4 +85,72 @@ powershell -File automation\set_mode.ps1 -Mode ttb -Template config.competition.
 
 放寬的代價是：TTB 的行情連線整個斷掉時，bot 要等將近半小時才會停機。2026-10-30 上午，TTB 行情顯示「已註冊」但完全沒有 tick，這種情況發生了兩次。所以範本另外設定 `quoteCanary: auto:TXF` 和 `--feed-dead-seconds 90`：supervisor 登入時一併訂閱台指期，bot 監聽 TTB 推送的所有 tick。交易時段內如果 90 秒都沒有任何商品跳動，就判定 TTB 行情斷線，撤單後結束，讓 supervisor 重啟 TTB。
 
-範本的 `liveGate.tickSize` 和 `liveGate.distanceTicks` 會讓探針單掛在市價下方約 5～6%，落在漲跌停範圍內。目前架構一個帳戶只能跑一隻 bot，啟動時要求整個帳戶沒有持倉和掛單，所以 CCF 和 CDF 不能同時跑。
+範本的 `liveGate.tickSize` 和 `liveGate.distanceTicks` 會讓探針單掛在市價下方約 5～6%，落在漲跌停範圍內。
+
+## 多標的組合
+
+`automation/config.grid-portfolio.example.json` 在同一個帳戶、同一個 bot 程序裡同時跑 CCF、CDF、DHF 三個網格：
+
+| 標的 | 層數 | 停損 | 可用保證金門檻 | 一張進場單的保證金 |
+|---|---:|---:|---:|---:|
+| CCF | 8 | 3 格 | 10 萬 | 約 3.5 萬 |
+| DHF | 10 | 3 格 | 30 萬 | 約 8 萬 |
+| CDF | 1 | 3 格 | 120 萬 | 約 79 萬 |
+
+設定方式：
+
+- 主標的沿用 `symbol` 和 `extraArgs`。
+- 其他標的寫在 `legs`，每一項有 `symbol`、`extraArgs`、`liveGate`。
+- `extraArgs` 只要列出和主標的不同的參數，其餘沿用主標的的命令列。
+- supervisor 會替每個 leg 和 `quoteCanary` 訂閱報價、各跑一次 live gate 探針，再用 `--leg-json` 把 leg 傳給 bot。
+- `--feed-dead-seconds` 寫在主標的的 `extraArgs`，所有 leg 都沿用。bot 只開一個訂閱 TTB 全部 tick 的連線，任何商品跳動都會重設每個 leg 的斷線計時，所以冷門的 leg 不會因自己沒成交而被判斷線。
+
+執行方式：
+
+- 每個 leg 有自己的 engine、帳本、風控狀態檔（`output/risk-state-<SYMBOL>.json`）、輸出目錄（`output/runs/<SYMBOL>`）和 health 檔（`output/health-<SYMBOL>.json`）。
+- `output/health.json` 和狀態 HTTP 端點顯示合併後的狀態：
+  - 任一 leg 錯誤，整體就是錯誤。
+  - 任一 leg 正常交易，整體就是 healthy。冷門標的因報價過時而暫停，不算停機。
+- 所有 leg 共用一個 TTB API 連線。委託和庫存回報每秒最多查一次，結果給所有 leg 共用，所以增加 leg 不會讓 API 呼叫倍增。
+- 啟動時，所有 leg 都先確認整個帳戶沒有持倉和掛單，才開始下單。
+- 任一 leg 停止（錯誤、換月、操作員停止），全部 leg 一起停止，由 supervisor 重啟。
+
+保證金優先順序靠各 leg 的 `--min-available-margin`：可用保證金低於門檻時，那個 leg 只停止新進場，出場照常。門檻越高的 leg 越早讓出保證金，所以資金不足時依 CCF → DHF → CDF 的順序使用。
+
+TTB 的保證金規則（2026-10-30 在 VM 以唯讀查詢實測）：
+
+- 股票期貨原始保證金是契約值的 16.2%，盤中沒有當沖減半。
+- 每張掛著的新倉委託都依委託價先扣 16.2%。空手的網格兩邊都掛時，兩張都扣。平倉委託不扣。
+- 所以 `AVAILABELMARGIN` = 權益 − 部位保證金 − 新倉掛單保證金。
+
+門檻怎麼定：
+
+- 每個門檻都必須高於該標的自己一張進場單的保證金。TTB 拒單時，bot 會停機重啟。
+- CDF 一口就要約 79 萬，所以：
+  - CCF、DHF 沿用最多 5 秒前查到的保證金，可能在 CDF 掛單後各自再掛兩邊進場單。所以 CDF 門檻要大於「CDF 一口＋CCF、DHF 各兩口」的保證金：以偏高價位（CDF 2,800、DHF 300、CCF 130）估算約 119 萬，取 120 萬。
+  - 加上 `--margin-cache-seconds 0`，每次送單前都重新查保證金。
+- 以 200 萬權益計，CDF 第二口幾乎永遠放不進去，所以只跑 1 層。
+- `--max-notional` 觸發時是停機，不是只擋進場，所以每檔都留到偏高價位乘上最大口數仍不會觸發（CDF 1,000 萬，價格超過 5,000 才觸發）。
+
+依據是 29 天（2026-09-11～10-28）的三檔共用帳戶合跑回放：
+
+- 費用：手續費每口 50 元、期交稅 0.00002。
+- 成交與保證金：觸價成交；每 2 秒才入帳和改單，和 `--poll-seconds 2` 一致；保證金按上面的規則扣。
+
+| 組合 | 日均 | 前半／後半 | 最差一天 | 保證金用量中位 |
+|---|---:|---:|---:|---:|
+| 只跑 CCF＋DHF | 12.4 萬 | 14.4／10.6 萬 | −2.9 萬 | 86 萬 |
+| 本範本 | 16.8 萬 | 16.9／16.7 萬 | −12.4 萬 | 173 萬 |
+| 三檔都不設門檻（需約 323 萬） | 26.9 萬 | — | −28.4 萬 | 323 萬 |
+
+- **CDF 門檻 100 萬看起來更好，但不採用。** 在 100 萬時，CDF 能塞進第二口，日均到 20–21 萬。代價是可用保證金最低只剩 0.5–4 萬，CCF／DHF 很容易被拒單。
+- **110–120 萬是高原。** CDF 不論 1～3 層，日均都在 16.6–17.9 萬。
+- **CCF、DHF 的門檻在 4–20 萬、10–30 萬之間影響很小。**
+
+已知限制：空手時若可用保證金只夠 CDF 掛一邊，CDF 只會掛先送出的那一邊（買單），等於暫時偏多。回測結果已包含這個效應。
+
+切換到組合範本：
+
+```powershell
+powershell -File automation\set_mode.ps1 -Mode ttb -Template config.grid-portfolio.example.json
+```
