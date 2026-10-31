@@ -1,3 +1,4 @@
+import argparse
 import json
 import unittest
 from datetime import date
@@ -241,22 +242,22 @@ class GridTemplateTests(unittest.TestCase):
         self.assertEqual([leg.symbol for leg in legs], ["CCFK6", "DHFK6", "CDFK6"])
         inventories, sized, level_counts, most = [], {}, {}, {}
         for args in legs:
-            args.sizing_equity = 2_000_000
-            sim_hft_bot._inject_sizing_equity(args, None)
             strategy_config = sim_hft_bot.build_config(args)
-            strategy = sim_hft_bot.build_strategy(args, strategy_config, PositionLedger(strategy_config))
+            for equity in (2_000_000, 3_000_000, 10_000_000):
+                leg = argparse.Namespace(**vars(args))
+                leg.sizing_equity = equity
+                sim_hft_bot._inject_sizing_equity(leg, None)
+                strategy = sim_hft_bot.build_strategy(leg, strategy_config, PositionLedger(strategy_config))
+                price = {"CCFK6": 100, "DHFK6": 200, "CDFK6": 2000}[args.symbol]
+                strategy._size_levels(price)
+                strategy._size(price)
+                sized[args.symbol, equity], level_counts[args.symbol, equity] = strategy.qty, strategy.levels
             self.assertIsInstance(strategy, GridPingPongStrategy)
             self.assertEqual(strategy_config.max_order_qty, strategy_config.max_inventory)
             self.assertEqual(strategy_config.max_inventory % strategy.settings.levels, 0)
-            price = {"CCFK6": 100, "DHFK6": 200, "CDFK6": 2000}[args.symbol]
-            strategy._size_levels(price)
-            strategy._size(price)
-            sized[args.symbol], level_counts[args.symbol] = strategy.qty, strategy.levels
             # Each daily start re-sizes from equity, so a growing account
-            # reaches the inventory cap.
-            levels = strategy.settings.levels
-            most[args.symbol] = (strategy_config.max_inventory // levels
-                                 if strategy.settings.margin_share else strategy_config.base_qty)
+            # reaches its largest tier.
+            most[args.symbol] = max(sized[args.symbol, equity] for equity in (2_000_000, 3_000_000, 10_000_000))
             self.assertEqual(strategy.settings.grid_points, args.tick_size)
             self.assertGreaterEqual(args.quote_stale_seconds, 300)
             self.assertGreaterEqual(args.stale_fatal_seconds, 900)
@@ -266,9 +267,18 @@ class GridTemplateTests(unittest.TestCase):
             self.assertEqual(strategy.settings.last_entry_minute, 13 * 60 + 42)
             # Every entry needs headroom for its own lots, whatever the sizing.
             self.assertEqual(args.entry_margin_rate, 0.162)
-        self.assertEqual(sized, {"CCFK6": 2, "DHFK6": 1, "CDFK6": 1})
-        # CDF adds a one-lot level for every 0.5 of equity its margin covers.
-        self.assertEqual(level_counts, {"CCFK6": 6, "DHFK6": 12, "CDFK6": 1})
+        # CCF runs one lot a level below 3M and three from there: in replay
+        # two lots at 2M earned less than one and left the least spare margin.
+        self.assertEqual({k: v for k, v in sized.items() if k[0] == "CCFK6"},
+                         {("CCFK6", 2_000_000): 1, ("CCFK6", 3_000_000): 3, ("CCFK6", 10_000_000): 3})
+        self.assertEqual({sized[k] for k in sized if k[0] != "CCFK6"}, {1})
+        # CDF adds a one-lot level for every 0.5 of equity its margin covers,
+        # up to four: a fifth level barely paid and deepened the worst day.
+        self.assertEqual({k: v for k, v in level_counts.items() if k[0] == "CDFK6"},
+                         {("CDFK6", 2_000_000): 1, ("CDFK6", 3_000_000): 2, ("CDFK6", 10_000_000): 4})
+        self.assertEqual({level_counts[k] for k in level_counts if k[0] == "CCFK6"}, {6})
+        self.assertEqual({level_counts[k] for k in level_counts if k[0] == "DHFK6"}, {12})
+        self.assertEqual(most, {"CCFK6": 3, "DHFK6": 1, "CDFK6": 1})
         self.assertEqual(config["autoRecovery"]["maxFlattenQty"], max(inventories))
         # A leg stops adding entries once available margin falls below its
         # headroom, so the higher the headroom the later the leg in priority.
@@ -351,6 +361,56 @@ class MarginSizingTests(unittest.TestCase):
     def test_sizing_needs_an_equity(self):
         with self.assertRaisesRegex(ValueError, "positive equity"):
             self.make(0)
+
+
+class QtyTierTests(unittest.TestCase):
+    def make(self, equity, tiers=((0, 1), (3_000_000, 3)), **settings):
+        config = StrategyConfig(symbol="CDFK6", tick_size=5, point_value=2000, fee_per_fill=50, tax_rate=0.00002,
+                                base_qty=1, max_order_qty=12, max_inventory=12)
+        self.ledger = PositionLedger(config)
+        settings.setdefault("levels", 3)
+        return GridPingPongStrategy(config, self.ledger, grid_points=5, stop_grids=1, qty_tiers=tiers,
+                                    equity=equity, **settings)
+
+    def lots(self, strategy):
+        return by_side(strategy.decide(tick("09:00:00", 2430, 1.0)))["buy"].quantity
+
+    def test_lots_per_level_follow_the_highest_tier_reached(self):
+        self.assertEqual(self.lots(self.make(2_999_999)), 1)
+        self.assertEqual(self.lots(self.make(3_000_000)), 3)
+        self.assertEqual(self.lots(self.make(50_000_000)), 3)
+        # JSON hands the tiers over as lists.
+        self.assertEqual(self.lots(self.make(3_000_000, tiers=[[0, 1], [3_000_000, 3]])), 3)
+
+    def test_below_the_lowest_tier_the_grid_keeps_base_qty(self):
+        self.assertEqual(self.lots(self.make(1_000_000, tiers=[[2_000_000, 3]])), 1)
+
+    def test_lots_per_level_never_exceed_the_inventory_cap(self):
+        self.assertEqual(self.lots(self.make(5_000_000, tiers=[[0, 10]])), 4)
+        self.assertEqual(self.lots(self.make(5_000_000, tiers=[[0, 10]], levels=6)), 2)
+
+    def test_lots_per_level_are_sized_once_per_start(self):
+        strategy = self.make(3_000_000)
+        self.assertEqual(self.lots(strategy), 3)
+        self.ledger.on_fill(Fill("buy", 2425, 3, "F1", 0.0))
+        self.ledger.on_fill(Fill("sell", 2430, 3, "F2", 0.0))
+        # Equity changes during the day never re-quote the grid.
+        object.__setattr__(strategy.settings, "equity", 1_000_000)
+        self.assertEqual(by_side(strategy.decide(tick("09:00:10", 2430, 4.0)))["buy"].quantity, 3)
+
+    def test_tiers_and_margin_share_are_not_both_used(self):
+        with self.assertRaisesRegex(ValueError, "not both"):
+            self.make(5_000_000, margin_share=0.25)
+
+    def test_tiers_need_an_equity(self):
+        with self.assertRaisesRegex(ValueError, "positive equity"):
+            self.make(0)
+
+    def test_invalid_tiers_are_rejected(self):
+        for tiers in ([[3_000_000, 3], [0, 1]], [[0, 1], [0, 3]], [[0, 0]], [[0, 1.5]], [[0, 1, 2]],
+                      [["0", 1]], [5]):
+            with self.subTest(tiers=tiers), self.assertRaises(ValueError):
+                self.make(5_000_000, tiers=tiers)
 
 
 class LevelSizingTests(unittest.TestCase):

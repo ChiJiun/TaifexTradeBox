@@ -37,6 +37,11 @@ class GridSettings:
     # levels x qty lots at margin_rate of the current contract value, so the
     # grid grows with equity and shrinks as the price rises. 0 keeps base_qty.
     margin_share: float = 0.0
+    # Or size it in steps: ((equity floor, lots per level), ...), the highest
+    # floor the equity reaches wins. In replay two CCF lots, where
+    # margin_share lands at 2M, earned less than one and left the least spare
+    # margin; three beat one only from 3M up.
+    qty_tiers: tuple = ()
     # Size the level count the same way: level_share of equity buys up to
     # `levels` levels of base_qty lots. A stock future fills against informed
     # flow when a level carries more lots, so deeper grids scale it better.
@@ -68,6 +73,20 @@ class GridSettings:
             raise ValueError("size either the lots per level or the level count, not both")
         if (self.margin_share or self.level_share) and (self.equity <= 0 or self.margin_rate <= 0):
             raise ValueError("margin sizing needs a positive equity and margin_rate")
+        if self.qty_tiers:
+            if self.margin_share:
+                raise ValueError("size the lots per level by margin_share or qty_tiers, not both")
+            if self.equity <= 0:
+                raise ValueError("qty_tiers needs a positive equity")
+            try:
+                floors, lots = zip(*[(floor, qty) for floor, qty in self.qty_tiers])
+            except (TypeError, ValueError):
+                raise ValueError("qty_tiers must be [[equity floor, lots per level], ...]") from None
+            if any(not isinstance(f, (int, float)) or isinstance(f, bool) for f in floors) or any(
+                    b <= a for a, b in zip(floors, floors[1:])):
+                raise ValueError("qty_tiers equity floors must be numbers that increase")
+            if any(not isinstance(q, int) or isinstance(q, bool) or q < 1 for q in lots):
+                raise ValueError("qty_tiers lots per level must be integers >= 1")
 
 
 class GridPingPongStrategy:
@@ -114,12 +133,17 @@ class GridPingPongStrategy:
 
     def _size(self, price: float) -> None:
         s = self.settings
-        if not s.margin_share or price <= 0 or self.sized:
+        if not (s.margin_share or s.qty_tiers) or price <= 0 or self.sized:
             return
         self.sized = True
-        lot_margin = price * self.config.point_value * s.margin_rate
         cap = max(1, min(self.config.max_order_qty, self.config.max_inventory // self.levels))
-        self.qty = max(1, min(cap, int(s.margin_share * s.equity // (self.levels * lot_margin))))
+        if s.qty_tiers:
+            # Below the lowest floor the grid keeps base_qty.
+            qty = next((q for floor, q in reversed(s.qty_tiers) if s.equity >= floor), self.config.base_qty)
+        else:
+            lot_margin = price * self.config.point_value * s.margin_rate
+            qty = int(s.margin_share * s.equity // (self.levels * lot_margin))
+        self.qty = max(1, min(cap, qty))
 
     def _infer_anchor(self, position: int) -> float:
         # Held levels are anchor - g ... anchor - n*g (mirrored for shorts),
